@@ -31,6 +31,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.db = db
         app.state.hub = hub
+        app.state.static_map = None
+        if settings.static_map_yaml:
+            from .telemetry.static_map import load_static_map
+
+            try:
+                app.state.static_map = load_static_map(
+                    settings.static_map_yaml, settings.static_map_name)
+            except Exception:
+                logging.getLogger("static_map").exception(
+                    "failed to load static map %s", settings.static_map_yaml)
         try:
             yield
         finally:

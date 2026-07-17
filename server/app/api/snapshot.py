@@ -23,6 +23,9 @@ async def get_map(request: Request) -> dict:
     session = hub.primary()
     map_data = session.state.map.data if session else None
     if map_data is None:
+        # The real robot never streams its map; fall back to the local copy.
+        map_data = getattr(request.app.state, "static_map", None)
+    if map_data is None:
         raise HTTPException(status_code=404, detail="No map received from the robot yet")
     return map_data.model_dump(mode="json")
 

@@ -66,6 +66,10 @@ class WebBridgeNode(Node):
             ("path_max_points", 200),
             ("map_name", "PatrolBot map"),
             ("covariance_warn_threshold", 0.25),
+            # OFF by default: the 7 MB /map starves /scan when streamed off
+            # the Pi (safety watchdog trips). The dashboard server serves a
+            # local copy instead (PATROLBOT_STATIC_MAP_YAML).
+            ("subscribe_map", False),
         ])
         get = {param.name: param.value for param in p}
         server_url = os.environ.get("WEB_BRIDGE_SERVER_URL", get["server_url"])
@@ -100,7 +104,8 @@ class WebBridgeNode(Node):
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         reliable = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
 
-        self.create_subscription(OccupancyGrid, get["topic_map"], self._on_map, latched)
+        if bool(get["subscribe_map"]) or os.environ.get("WEB_BRIDGE_SUBSCRIBE_MAP") == "1":
+            self.create_subscription(OccupancyGrid, get["topic_map"], self._on_map, latched)
         self.create_subscription(PoseWithCovarianceStamped, get["topic_amcl_pose"],
                                  self._on_amcl, latched)
         self.create_subscription(Odometry, get["topic_odom"], self._on_odom, reliable)

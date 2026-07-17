@@ -29,9 +29,10 @@ export function useSaveLayout() {
 
 export function useMapQuery(mapVersion: number) {
   return useQuery({
+    // Version 0 still fetches: the server falls back to its local static map
+    // when no robot has streamed one (the real robot never transmits its map).
     queryKey: ["map", mapVersion],
     queryFn: () => json<MapData>("/api/map"),
-    enabled: mapVersion > 0,
     staleTime: Infinity,
     retry: 2,
   });
