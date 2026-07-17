@@ -1,32 +1,61 @@
 import { useTelemetryStore } from "../stores/telemetryStore";
 
 /**
- * Top-down view of the PatrolBot matching the real chassis: a rectangular
- * body with a segmented bumper strip wrapped across the front face and
- * another across the rear, drive wheels mid-body. The hardware reports each
- * strip as a whole (pressed / not pressed), so all segments of a strip
- * light together when it is hit.
+ * Top-down view of the PatrolBot matching the manual's dimension drawing
+ * (User's Guide Fig. 8-1): an octagonal footprint 589 mm wide x 483 mm
+ * deep whose perimeter facets are the segmented bumper panels — three
+ * across the front (left diagonal, front face, right diagonal), three
+ * across the rear, with the drive wheels on the flat side faces. The
+ * hardware reports each group as a whole, so all three panels of a hit
+ * group light together.
  */
-function BumperStrip({ pressed, y, flip }: { pressed: boolean; y: number; flip?: boolean }) {
-  const fill = pressed ? "var(--danger)" : "var(--muted-bg)";
-  const stroke = pressed ? "var(--danger)" : "var(--border)";
-  // Three visible segments, gently curved like the physical strip.
-  const curve = flip ? 6 : -6;
-  const segments = [
-    { x1: 28, x2: 62 },
-    { x1: 66, x2: 114 },
-    { x1: 118, x2: 152 },
-  ];
+
+// Octagon centered at (100, 120); half-width 82, half-height 66 keeps the
+// manual's 589:483 aspect ratio. FRONT is up.
+const CX = 100;
+const CY = 120;
+const P = {
+  frontL: [-38, -66], frontR: [38, -66],   // front face
+  sideRT: [82, -22], sideRB: [82, 22],     // right face (wheel)
+  rearR: [38, 66], rearL: [-38, 66],       // rear face
+  sideLB: [-82, 22], sideLT: [-82, -22],   // left face (wheel)
+} as const;
+
+function pt([x, y]: readonly [number, number], scale = 1): string {
+  return `${CX + x * scale} ${CY + y * scale}`;
+}
+
+const BODY = `M ${pt(P.frontL)} L ${pt(P.frontR)} L ${pt(P.sideRT)} L ${pt(P.sideRB)} ` +
+  `L ${pt(P.rearR)} L ${pt(P.rearL)} L ${pt(P.sideLB)} L ${pt(P.sideLT)} Z`;
+
+// Bumper panels: the three front facets and three rear facets, drawn as
+// thick strips slightly outside the body outline.
+const PANEL_SCALE = 1.12;
+const FRONT_PANELS = [
+  [P.sideLT, P.frontL],
+  [P.frontL, P.frontR],
+  [P.frontR, P.sideRT],
+] as const;
+const REAR_PANELS = [
+  [P.sideRB, P.rearR],
+  [P.rearR, P.rearL],
+  [P.rearL, P.sideLB],
+] as const;
+
+function PanelGroup({ panels, pressed }: {
+  panels: typeof FRONT_PANELS | typeof REAR_PANELS;
+  pressed: boolean;
+}) {
   return (
     <g className={pressed ? "bumper-hit" : ""}>
-      {segments.map((segment, index) => (
+      {panels.map(([a, b], index) => (
         <path
           key={index}
-          d={`M ${segment.x1} ${y} Q ${(segment.x1 + segment.x2) / 2} ${y + curve} ${segment.x2} ${y}
-              l 0 ${flip ? -9 : 9} Q ${(segment.x1 + segment.x2) / 2} ${y + curve + (flip ? -9 : 9)} ${segment.x1} ${y + (flip ? -9 : 9)} Z`}
-          fill={fill}
-          stroke={stroke}
-          strokeWidth="1.5"
+          d={`M ${pt(a, PANEL_SCALE)} L ${pt(b, PANEL_SCALE)}`}
+          fill="none"
+          stroke={pressed ? "var(--danger)" : "var(--muted-bg)"}
+          strokeWidth="9"
+          strokeLinecap="round"
         />
       ))}
     </g>
@@ -40,24 +69,27 @@ export function BumpersWidget() {
 
   return (
     <div className="bumpers-widget">
-      <svg viewBox="0 0 180 260" className="bumpers-svg" role="img"
+      <svg viewBox="0 0 200 240" className="bumpers-svg" role="img"
            aria-label="Robot bumper diagram (top view)">
-        <text x="90" y="14" textAnchor="middle" className="bumper-label">FRONT</text>
+        <text x="100" y="18" textAnchor="middle" className="bumper-label">FRONT</text>
 
-        <BumperStrip pressed={front} y={30} />
+        <PanelGroup panels={FRONT_PANELS} pressed={front} />
+        <PanelGroup panels={REAR_PANELS} pressed={rear} />
 
-        {/* Chassis body */}
-        <rect x="34" y="44" width="112" height="172" rx="14"
-              fill="var(--surface-2)" stroke="var(--border)" strokeWidth="2" />
-        {/* Drive wheels mid-body */}
-        <rect x="24" y="108" width="12" height="44" rx="5" fill="var(--muted)" />
-        <rect x="144" y="108" width="12" height="44" rx="5" fill="var(--muted)" />
-        {/* Heading marker */}
-        <path d="M 90 66 l 12 22 h -24 Z" fill="var(--cmu-red)" />
+        {/* Octagonal chassis (589 x 483 mm footprint, FRONT up) */}
+        <path d={BODY} fill="var(--surface-2)" stroke="var(--border)" strokeWidth="2" />
 
-        <BumperStrip pressed={rear} y={230} flip />
+        {/* Drive wheels on the flat side faces */}
+        <rect x="12" y="98" width="9" height="44" rx="4" fill="var(--muted)" />
+        <rect x="179" y="98" width="9" height="44" rx="4" fill="var(--muted)" />
 
-        <text x="90" y="252" textAnchor="middle" className="bumper-label">REAR</text>
+        {/* Laser window across the front and heading wedge */}
+        <path d={`M ${pt([-30, -58])} L ${pt([30, -58])}`} stroke="var(--info)"
+              strokeWidth="4" strokeLinecap="round" opacity="0.6" />
+        <path d={`M ${pt([0, -34])} L ${pt([13, -8])} L ${pt([-13, -8])} Z`}
+              fill="var(--cmu-red)" />
+
+        <text x="100" y="230" textAnchor="middle" className="bumper-label">REAR</text>
       </svg>
 
       <div className="kv-list">
@@ -80,8 +112,8 @@ export function BumpersWidget() {
         </p>
       )}
       <p className="subtext">
-        The hardware reports each strip as a whole, so all segments of a hit
-        strip light together.
+        The hardware reports each bumper group as a whole, so all panels of a
+        hit group light together.
       </p>
     </div>
   );

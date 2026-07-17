@@ -19,30 +19,41 @@ const MAX_ARROW_PX = 80;
 
 /** Semi-transparent top-down robot drawn under the pointer while picking a
  *  pose — the operator places "the robot" rather than an abstract cursor.
- *  Matches the Bumpers widget's chassis: rounded body, side wheels, red
- *  heading wedge. `angle` is the screen-space heading (radians). */
+ *  Matches the PatrolBot's real octagonal footprint (589 x 483 mm, manual
+ *  Fig. 8-1), like the Bumpers widget. `angle` is the screen-space heading
+ *  (radians); the front faces along +x before rotation. */
 function drawRobotGhost(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number): void {
-  const s = 15; // half-length of the body
+  const s = 15; // half-length front-to-back; width is wider (589:483)
+  const w = s * 1.22;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
   ctx.globalAlpha = 0.8;
+  // Octagon with the front facet at +x: corners follow the manual's drawing.
   ctx.beginPath();
-  ctx.roundRect(-s, -s * 0.72, s * 2, s * 1.44, 5);
+  ctx.moveTo(s, -w * 0.46);        // front face, left corner
+  ctx.lineTo(s, w * 0.46);         // front face, right corner
+  ctx.lineTo(s * 0.33, w);         // front-right diagonal -> right face
+  ctx.lineTo(-s * 0.33, w);        // right face (wheel side)
+  ctx.lineTo(-s, w * 0.46);        // rear-right diagonal
+  ctx.lineTo(-s, -w * 0.46);       // rear face
+  ctx.lineTo(-s * 0.33, -w);       // rear-left diagonal -> left face
+  ctx.lineTo(s * 0.33, -w);        // left face (wheel side)
+  ctx.closePath();
   ctx.fillStyle = cssVar("--surface-2");
   ctx.strokeStyle = cssVar("--muted");
   ctx.lineWidth = 1.6;
   ctx.fill();
   ctx.stroke();
-  // Drive wheels mid-body
+  // Drive wheels on the flat side faces
   ctx.fillStyle = cssVar("--muted");
-  ctx.fillRect(-s * 0.35, -s * 0.95, s * 0.7, s * 0.28);
-  ctx.fillRect(-s * 0.35, s * 0.67, s * 0.7, s * 0.28);
+  ctx.fillRect(-s * 0.3, -w - 1.5, s * 0.6, 3);
+  ctx.fillRect(-s * 0.3, w - 1.5, s * 0.6, 3);
   // Heading wedge toward the front
   ctx.beginPath();
-  ctx.moveTo(s * 0.85, 0);
-  ctx.lineTo(s * 0.15, s * 0.42);
-  ctx.lineTo(s * 0.15, -s * 0.42);
+  ctx.moveTo(s * 0.8, 0);
+  ctx.lineTo(s * 0.1, w * 0.4);
+  ctx.lineTo(s * 0.1, -w * 0.4);
   ctx.closePath();
   ctx.fillStyle = cssVar("--cmu-red");
   ctx.fill();
