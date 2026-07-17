@@ -65,6 +65,33 @@ Pydantic models (`server/app/protocol/messages.py`) are authoritative;
 `frontend/src/types/protocol.ts` mirrors them; both test suites validate the
 fixtures, so drift breaks CI on whichever side moved.
 
+## Phase 4 — recording & playback
+
+Entirely server-side (`server/app/recordings/recorder.py`): while a
+recording is active the hub feeds selected channels (pose, laser scan,
+path, battery, drive-base state, system reports, alerts) through per-channel
+decimation into SQLite/PostgreSQL. REST under `/api/recordings` covers
+start (with a channel list), stop, list, detail, CSV export, and delete;
+an interrupted recording is closed out at startup. The Recordings widget
+replays a session on the Live Map as a ghost robot with a time slider.
+Camera video is a reserved channel — advertised in the UI, not implemented.
+The robot is asked for nothing extra (no rosbag).
+
+## Phase 5 — production pieces
+
+- `infrastructure/docker-compose.production.yml`: nginx TLS front
+  (`infrastructure/nginx/`, self-signed dev certs via `generate-certs.sh`,
+  certbot-ready) + the server image.
+- PostgreSQL: `PATROLBOT_DATABASE_URL=postgresql://…` selects
+  `database/pg.py` (asyncpg); SQLite stays the default. Same interface,
+  verified by `tests/test_postgres.py` against a real Postgres.
+- Auth: `PATROLBOT_AUTH_MODE=oidc` turns on an OpenID Connect
+  code+PKCE flow (`authentication/oidc.py`) — point the issuer at CMU's
+  IdP, register `/auth/callback`, list admins in
+  `PATROLBOT_ADMIN_USERNAMES`. Sessions are HMAC-signed cookies; in oidc
+  mode all `/api/*` (except health) and `/ws/ui` require one. Local
+  single-user mode remains the default.
+
 ## Deviations from the original build spec
 
 - SQLite (via aiosqlite) instead of PostgreSQL for Phases 1–2 — single user,

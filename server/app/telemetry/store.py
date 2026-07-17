@@ -64,6 +64,7 @@ class RobotState:
     last_seen: str | None = None
     connection: str = "offline"
     battery_estimate: BatteryEstimate | None = None
+    recording: bool = False  # a telemetry recording is in progress
 
     events: deque[EventData] = field(default_factory=lambda: deque(maxlen=500))
     _next_event_id: int = 1
@@ -209,6 +210,7 @@ class RobotState:
             diagnostics=self.diagnostics.data,
             pose=self.pose.data,
             path=self.path.data,
+            recording=self.recording,
         )
         health = derive_health(
             connection=self.connection,

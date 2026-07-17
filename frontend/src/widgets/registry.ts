@@ -4,6 +4,7 @@ import { BatteryWidget } from "./BatteryWidget";
 import { LiveMapWidget, MapSettings } from "./LiveMapWidget";
 import { NavControlsWidget } from "./NavControlsWidget";
 import { PiStatsWidget } from "./PiStatsWidget";
+import { RecordingsWidget } from "./RecordingsWidget";
 import { RobotStatusWidget } from "./RobotStatusWidget";
 import { SystemHealthWidget } from "./SystemHealthWidget";
 
@@ -70,6 +71,14 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     component: PiStatsWidget,
     defaultSize: { w: 4, h: 10, minW: 3, minH: 4 },
     needsRobot: true,
+  },
+  recordings: {
+    id: "recordings",
+    title: "Recordings",
+    description: "Record telemetry sessions and replay them on the map",
+    component: RecordingsWidget,
+    defaultSize: { w: 4, h: 13, minW: 3, minH: 6 },
+    needsRobot: false,
   },
   navControls: {
     id: "navControls",

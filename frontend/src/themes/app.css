@@ -505,9 +505,96 @@ button {
   border-color: var(--danger);
 }
 
+.btn.success {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+}
+
+.btn.success:hover:not(:disabled) { filter: brightness(0.92); }
+
 .btn.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
 
 .map-canvas.picking { cursor: crosshair; }
+
+/* ---------- Recordings widget ---------- */
+
+.rec-start {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.rec-active {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.rec-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: rec-blink 1.2s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes rec-blink {
+  50% { opacity: 0.25; }
+}
+
+.rec-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 4px;
+}
+
+.rec-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.rec-channel.disabled { opacity: 0.55; cursor: not-allowed; }
+.rec-channel input { accent-color: var(--cmu-red); }
+
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--info-bg);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 8px 0;
+}
+
+.replay-bar input[type="range"] {
+  flex: 1;
+  accent-color: var(--info);
+}
+
+.rec-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.rec-row:last-child { border-bottom: none; }
+.rec-row.replaying { background: color-mix(in srgb, var(--info-bg) 55%, transparent); border-radius: 6px; }
 
 /* ---------- Widget library / dialogs ---------- */
 

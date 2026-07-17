@@ -31,9 +31,14 @@ interface CommandState {
   active: ActiveCommand | null;
   lastResult: CommandResultInfo | null;
   pickMode: PickMode;
+  /** Where the robot was heading when the operator pressed Stop; offering
+   *  "Resume" re-sends this destination. */
+  stoppedGoal: GoalData | null;
 
   setPickMode: (mode: PickMode) => void;
   send: (command: CommandType, goal?: GoalData) => void;
+  stop: () => void;
+  resume: () => void;
   handleAck: (data: CommandAckData) => void;
   handleProgress: (data: CommandProgressData) => void;
   handleResult: (data: CommandResultData) => void;
@@ -51,10 +56,29 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   active: null,
   lastResult: null,
   pickMode: "none",
+  stoppedGoal: null,
 
   setPickMode: (mode) => set({ pickMode: mode }),
 
+  stop: () => {
+    // Remember the destination in effect right now so Resume can restore it.
+    const goal = useTelemetryStore.getState().path?.goal ?? null;
+    set({ stoppedGoal: goal ?? get().stoppedGoal });
+    get().send("stop");
+  },
+
+  resume: () => {
+    const goal = get().stoppedGoal;
+    if (!goal) return;
+    set({ stoppedGoal: null });
+    get().send("navigate_to_pose", goal);
+  },
+
   send: (command, goal) => {
+    // A fresh destination invalidates any pending Resume offer.
+    if (command === "navigate_to_pose" && get().stoppedGoal && goal !== undefined) {
+      set({ stoppedGoal: null });
+    }
     const commandId = crypto.randomUUID();
     const frame = JSON.stringify({
       version: 1,

@@ -20,14 +20,15 @@ PRESET_LAYOUTS = {
         },
     },
     "Research": {
-        "widgets": ["liveMap", "robotStatus", "battery", "piStats", "alerts"],
+        "widgets": ["liveMap", "robotStatus", "battery", "piStats", "alerts", "recordings"],
         "layouts": {
             "lg": [
                 {"i": "liveMap", "x": 0, "y": 0, "w": 7, "h": 21},
                 {"i": "robotStatus", "x": 7, "y": 0, "w": 5, "h": 9},
                 {"i": "battery", "x": 7, "y": 9, "w": 5, "h": 12},
-                {"i": "piStats", "x": 0, "y": 21, "w": 7, "h": 10},
-                {"i": "alerts", "x": 7, "y": 21, "w": 5, "h": 10},
+                {"i": "piStats", "x": 0, "y": 21, "w": 4, "h": 12},
+                {"i": "recordings", "x": 4, "y": 21, "w": 4, "h": 12},
+                {"i": "alerts", "x": 8, "y": 21, "w": 4, "h": 12},
             ]
         },
     },

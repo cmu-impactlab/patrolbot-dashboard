@@ -59,8 +59,26 @@ CREATE TABLE IF NOT EXISTS command_audit (
     detail TEXT,
     completed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS recordings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    robot_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    channels TEXT NOT NULL DEFAULT '["pose","battery","event"]',
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    status TEXT NOT NULL DEFAULT 'recording',
+    sample_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS recording_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts);
+CREATE INDEX IF NOT EXISTS idx_samples_rec ON recording_samples(recording_id, id);
 """
 
 
@@ -75,6 +93,13 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # Migration for databases created before channel selection existed.
+        async with self._db.execute("PRAGMA table_info(recordings)") as cur:
+            columns = [row[1] for row in await cur.fetchall()]
+        if "channels" not in columns:
+            await self._db.execute(
+                "ALTER TABLE recordings ADD COLUMN channels TEXT NOT NULL "
+                "DEFAULT '[\"pose\",\"battery\",\"event\"]'")
         await self._db.execute(
             "INSERT OR IGNORE INTO users (id, username, display_name) VALUES (1, 'local', 'Local Operator')"
         )
@@ -98,6 +123,18 @@ class Database:
     def db(self) -> aiosqlite.Connection:
         assert self._db is not None, "Database not initialized"
         return self._db
+
+    # -- users ----------------------------------------------------------------
+
+    async def get_or_create_user(self, username: str, display_name: str) -> int:
+        await self.db.execute(
+            "INSERT INTO users (username, display_name) VALUES (?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name",
+            (username, display_name))
+        await self.db.commit()
+        async with self.db.execute("SELECT id FROM users WHERE username = ?", (username,)) as cur:
+            row = await cur.fetchone()
+            return int(row["id"])
 
     # -- events ---------------------------------------------------------------
 
@@ -144,6 +181,69 @@ class Database:
             rows = [dict(row) for row in await cur.fetchall()]
         rows.reverse()
         return rows
+
+    # -- recordings --------------------------------------------------------------
+
+    async def start_recording(self, robot_id: str, name: str,
+                              channels: list[str]) -> dict[str, Any] | None:
+        """Create a recording; returns None when one is already in progress."""
+        async with self.db.execute("SELECT id FROM recordings WHERE status = 'recording'") as cur:
+            if await cur.fetchone() is not None:
+                return None
+        cur = await self.db.execute(
+            "INSERT INTO recordings (robot_id, name, channels) VALUES (?, ?, ?)",
+            (robot_id, name, json.dumps(channels)))
+        await self.db.commit()
+        return await self.get_recording(cur.lastrowid)
+
+    async def stop_recording(self, recording_id: int) -> bool:
+        cur = await self.db.execute(
+            "UPDATE recordings SET status = 'done', ended_at = datetime('now') "
+            "WHERE id = ? AND status = 'recording'", (recording_id,))
+        await self.db.commit()
+        return cur.rowcount > 0
+
+    async def add_recording_sample(self, recording_id: int, ts: str, kind: str, data: str) -> None:
+        await self.db.execute(
+            "INSERT INTO recording_samples (recording_id, ts, kind, data) VALUES (?,?,?,?)",
+            (recording_id, ts, kind, data))
+        await self.db.execute(
+            "UPDATE recordings SET sample_count = sample_count + 1 WHERE id = ?", (recording_id,))
+        await self.db.commit()
+
+    async def list_recordings(self, limit: int = 50) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count "
+            "FROM recordings ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return [self._recording_row(row) for row in await cur.fetchall()]
+
+    async def get_recording(self, recording_id: int) -> dict[str, Any] | None:
+        async with self.db.execute(
+            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count "
+            "FROM recordings WHERE id = ?", (recording_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return self._recording_row(row) if row else None
+
+    @staticmethod
+    def _recording_row(row: Any) -> dict[str, Any]:
+        out = dict(row)
+        out["channels"] = json.loads(out["channels"])
+        return out
+
+    async def get_recording_samples(self, recording_id: int) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT ts, kind, data FROM recording_samples WHERE recording_id = ? ORDER BY id",
+            (recording_id,)
+        ) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def delete_recording(self, recording_id: int) -> bool:
+        await self.db.execute("DELETE FROM recording_samples WHERE recording_id = ?", (recording_id,))
+        cur = await self.db.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
+        await self.db.commit()
+        return cur.rowcount > 0
 
     # -- command audit -----------------------------------------------------------
 

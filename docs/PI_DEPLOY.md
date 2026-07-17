@@ -36,6 +36,17 @@ EOF'
 
 ## 3. Compose service (add to patrolbot-repo/docker/docker-compose.yml)
 
+> **Status 2026-07-17:** this service is now merged into
+> `patrolbot-repo/docker/docker-compose.yml` behind the `web-bridge`
+> profile (uncommitted there; see that repo's TODO.md). Start it with
+> `docker compose --profile web-bridge up -d web-bridge`. The snippet below
+> is kept for reference.
+>
+> **Stable address:** `WEB_BRIDGE_SERVER_URL` currently points at the
+> operator laptop's VPN IP, which changes between sessions. Before other
+> people depend on the dashboard, give the server a stable address
+> (reserved VPN IP or a DNS name) and set it once in `docker/.env`.
+
 ```yaml
   web-bridge:
     <<: *common

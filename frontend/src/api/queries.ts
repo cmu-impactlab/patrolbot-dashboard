@@ -4,6 +4,10 @@ import type { LayoutDoc, SavedLayout } from "../stores/layoutStore";
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
+  if (response.status === 401) {
+    // OIDC deployments: an expired/missing session sends the browser to log in.
+    location.href = "/auth/login";
+  }
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
   return (await response.json()) as T;
 }
@@ -55,6 +59,43 @@ export function useMapQuery(mapVersion: number) {
     staleTime: Infinity,
     retry: 2,
   });
+}
+
+import type { RecordingRow, RecordingSample } from "../stores/replayStore";
+
+export function useRecordings() {
+  return useQuery({
+    queryKey: ["recordings"],
+    queryFn: () => json<RecordingRow[]>("/api/recordings"),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useStartRecording() {
+  return useMutation({
+    mutationFn: ({ name, channels }: { name: string; channels: string[] }) =>
+      json<RecordingRow>("/api/recordings/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, channels }),
+      }),
+  });
+}
+
+export function useStopRecording() {
+  return useMutation({
+    mutationFn: () => json<RecordingRow>("/api/recordings/stop", { method: "POST" }),
+  });
+}
+
+export function useDeleteRecording() {
+  return useMutation({
+    mutationFn: (id: number) => json(`/api/recordings/${id}`, { method: "DELETE" }),
+  });
+}
+
+export function fetchRecordingDetail(id: number) {
+  return json<RecordingRow & { samples: RecordingSample[] }>(`/api/recordings/${id}`);
 }
 
 export interface BatteryHistoryRow {

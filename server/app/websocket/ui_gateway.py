@@ -21,6 +21,13 @@ router = APIRouter()
 @router.websocket("/ws/ui")
 async def ui_ws(websocket: WebSocket) -> None:
     hub = websocket.app.state.hub
+    settings = websocket.app.state.settings
+    if settings.auth_mode == "oidc":
+        from ..authentication.sessions import COOKIE_NAME, verify
+
+        if verify(settings.session_secret, websocket.cookies.get(COOKIE_NAME)) is None:
+            await websocket.close(code=4401, reason="not signed in")
+            return
     await websocket.accept()
     client = await hub.browser_connected(websocket)
     sender = asyncio.create_task(client.sender())

@@ -1,5 +1,43 @@
-# Phase 5 placeholder — CMU server deployment.
+# Production-shaped deployment: nginx TLS front + dashboard server.
 #
-# Will add: PostgreSQL, Redis fan-out, nginx TLS termination (see nginx/),
-# CMU OAuth env, backups, monitoring. Not used in Phases 1–2.
-services: {}
+#   ./infrastructure/nginx/generate-certs.sh        # once (or install real certs)
+#   PATROLBOT_ROBOT_TOKEN=<secret> docker compose \
+#       -f infrastructure/docker-compose.production.yml up -d --build
+#   -> dashboard at https://<host>/  (port 80 redirects)
+#
+# The Pi bridge should point WEB_BRIDGE_SERVER_URL at ws://<host>:8000/ws/robot
+# (direct, LAN/VPN) or wss://<host>/ws/robot to go through nginx.
+#
+# Optional PostgreSQL: set PATROLBOT_DATABASE_URL=postgresql://... on the
+# server service; without it SQLite in the server-data volume is used.
+#
+# Host networking for the same reason as the local compose: the robot
+# bridge connects to <host>:8000, and some hosts (including the current dev
+# laptop) drop host<->docker-bridge traffic.
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.server
+      network: host
+    network_mode: host
+    environment:
+      PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:?set a real robot token}
+      PATROLBOT_DATABASE_PATH: /data/patrolbot.db
+      PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
+    volumes:
+      - server-data:/data
+    restart: always
+
+  nginx:
+    image: nginx:1.27-alpine
+    network_mode: host
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - server
+    restart: always
+
+volumes:
+  server-data:

@@ -41,6 +41,7 @@ def derive_status(
     diagnostics: DiagnosticsData | None,
     pose: PoseData | None,
     path: PathData | None,
+    recording: bool = False,
 ) -> RobotStatusData:
     status = "ready"
     detail = STATUS_DETAILS["ready"]
@@ -67,6 +68,8 @@ def derive_status(
         status = "docked"
     elif base_state is not None and not base_state.motors_enabled:
         status = "paused"
+    elif recording:
+        status = "recording"
     elif path is not None and path.goal is not None and pose is not None and abs(pose.linear_velocity) > 0.02:
         status = "navigating"
 

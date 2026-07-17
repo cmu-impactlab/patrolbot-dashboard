@@ -8,6 +8,9 @@ class Settings(BaseSettings):
 
     robot_token: str = "dev-token"
     database_path: str = "data/patrolbot.db"
+    # Set to postgresql://user:pass@host/db to use PostgreSQL instead of
+    # SQLite (Phase 5 multi-user deployments). Requires the asyncpg extra.
+    database_url: str = ""
     default_robot_id: str = "patrolbot-01"
 
     # Connection staleness thresholds (heartbeat age, seconds).
@@ -22,6 +25,21 @@ class Settings(BaseSettings):
 
     event_limit: int = 5000
     battery_history_days: int = 7
+
+    # Authentication. "local" = single seeded user (default, current behavior).
+    # "oidc" = OpenID Connect authorization-code flow — point the issuer at
+    # CMU's IdP (or any OIDC provider) and register the /auth/callback URL.
+    auth_mode: str = "local"
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_url: str = ""  # e.g. https://dashboard.example.edu/auth/callback
+    # Usernames granted the administrator role (comma separated); everyone
+    # else authenticates as operator.
+    admin_usernames: str = ""
+    # HMAC key for session cookies; MUST be overridden in oidc deployments.
+    session_secret: str = "dev-session-secret"
+    session_ttl_s: int = 12 * 3600
 
     # Optional local map (map_server YAML+PGM pair). Served by /api/map when
     # no robot has streamed one — the real robot deliberately never transmits

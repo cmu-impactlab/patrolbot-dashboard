@@ -3,6 +3,7 @@ import { Check, Crosshair, Layers, Maximize, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useMapQuery } from "../../api/queries";
 import { useCommandStore } from "../../stores/commandStore";
+import { useReplayStore } from "../../stores/replayStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useUiStore, type MapLayers } from "../../stores/uiStore";
 import type { MapData } from "../../types/protocol";
@@ -78,6 +79,52 @@ function drawScene(
     ctx.arc(gx, gy, 2.2, 0, Math.PI * 2);
     ctx.fillStyle = cssVar("--info");
     ctx.fill();
+  }
+
+  // Recording replay overlay: full route (muted), progress, and a ghost
+  // marker at the playhead. Distinct from the live robot (blue outline).
+  const replay = useReplayStore.getState();
+  if (replay.recording && replay.poses.length > 1) {
+    const t = replay.now();
+    ctx.beginPath();
+    for (let i = 0; i < replay.poses.length; i++) {
+      const [sx, sy] = worldToScreen(view, replay.poses[i].x, replay.poses[i].y);
+      if (i === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.strokeStyle = cssVar("--muted");
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([2, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    for (let i = 0; i < replay.poses.length && replay.poses[i].tMs <= t; i++) {
+      const [sx, sy] = worldToScreen(view, replay.poses[i].x, replay.poses[i].y);
+      if (i === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.strokeStyle = cssVar("--active");
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+
+    const ghost = replay.poseAt(t);
+    if (ghost) {
+      const [gx, gy] = worldToScreen(view, ghost.x, ghost.y);
+      const size = Math.max(7, Math.min(16, 0.32 * view.zoom));
+      ctx.save();
+      ctx.translate(gx, gy);
+      ctx.rotate(-ghost.yaw);
+      ctx.beginPath();
+      ctx.moveTo(size * 1.4, 0);
+      ctx.lineTo(-size * 0.8, size * 0.75);
+      ctx.lineTo(-size * 0.8, -size * 0.75);
+      ctx.closePath();
+      ctx.strokeStyle = cssVar("--active");
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   const pose = state.pose;

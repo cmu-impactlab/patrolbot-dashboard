@@ -1,4 +1,4 @@
-import { Anchor, Crosshair, MapPin, Octagon, X } from "lucide-react";
+import { Anchor, Crosshair, MapPin, Octagon, Play, X } from "lucide-react";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 
@@ -21,10 +21,13 @@ export function NavControlsWidget() {
   const active = useCommandStore((state) => state.active);
   const lastResult = useCommandStore((state) => state.lastResult);
   const pickMode = useCommandStore((state) => state.pickMode);
+  const stoppedGoal = useCommandStore((state) => state.stoppedGoal);
   const setPickMode = useCommandStore((state) => state.setPickMode);
-  const send = useCommandStore((state) => state.send);
+  const stop = useCommandStore((state) => state.stop);
+  const resume = useCommandStore((state) => state.resume);
 
   const online = connection.state === "online";
+  const offerResume = stoppedGoal !== null && active === null;
 
   return (
     <div>
@@ -78,14 +81,25 @@ export function NavControlsWidget() {
         <button className="btn" disabled title="This robot has no automatic docking — drive it onto the dock manually">
           <Anchor size={15} /> Return to Dock
         </button>
-        <button
-          className="btn wide danger"
-          disabled={!online}
-          onClick={() => send("stop")}
-          title="Cancel navigation and stop the robot"
-        >
-          <Octagon size={15} /> Stop Robot
-        </button>
+        {offerResume ? (
+          <button
+            className="btn wide success"
+            disabled={!online}
+            onClick={resume}
+            title="Send the robot back to the destination it was stopped on"
+          >
+            <Play size={15} /> Resume
+          </button>
+        ) : (
+          <button
+            className="btn wide danger"
+            disabled={!online}
+            onClick={stop}
+            title="Cancel navigation and stop the robot"
+          >
+            <Octagon size={15} /> Stop Robot
+          </button>
+        )}
       </div>
       <p className="subtext" style={{ marginTop: 10 }}>
         In an actual emergency always use the red physical emergency-stop button on the robot —

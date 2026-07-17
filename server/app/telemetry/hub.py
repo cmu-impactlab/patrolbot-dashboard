@@ -67,12 +67,14 @@ class BrowserClient:
 class TelemetryHub:
     def __init__(self, settings: Settings, db: "Database | None" = None) -> None:
         from ..commands.broker import CommandBroker
+        from ..recordings.recorder import Recorder
 
         self.settings = settings
         self.db = db
         self.robots: dict[str, RobotSession] = {}
         self.browsers: set[BrowserClient] = set()
         self.commands = CommandBroker(self)
+        self.recorder = Recorder(db)
         self._sequence = 0
         self._monitor_task: asyncio.Task | None = None
         self._event_id_seed = 1
@@ -86,6 +88,7 @@ class TelemetryHub:
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
+        await self.recorder.recover()
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:
@@ -143,12 +146,16 @@ class TelemetryHub:
             rebroadcast = False
         elif t == "telemetry.pose":
             events = state.record_pose(payload)
+            self.recorder.offer("pose", envelope.timestamp, envelope.data)
         elif t == "telemetry.lidar":
             events = state.record_lidar(payload)
+            self.recorder.offer("lidar", envelope.timestamp, envelope.data)
         elif t == "telemetry.path":
             events = state.record_path(payload)
+            self.recorder.offer("path", envelope.timestamp, envelope.data)
         elif t == "telemetry.battery":
             events = state.record_battery(payload)
+            self.recorder.offer("battery", envelope.timestamp, envelope.data)
             enriched: BatteryData = payload
             if state.battery_estimate is not None:
                 data_out = {**envelope.data, "estimate": state.battery_estimate.as_dict()}
@@ -159,8 +166,10 @@ class TelemetryHub:
                 ))
         elif t == "telemetry.base_state":
             events = state.record_base_state(payload)
+            self.recorder.offer("base_state", envelope.timestamp, envelope.data)
         elif t == "telemetry.diagnostics":
             events = state.record_diagnostics(payload)
+            self.recorder.offer("diagnostics", envelope.timestamp, envelope.data)
         elif t == "telemetry.resources":
             events = state.record_resources(payload)
         elif t == "telemetry.map":
@@ -206,6 +215,7 @@ class TelemetryHub:
     async def _emit_events(self, session: RobotSession, events: list[EventData]) -> None:
         for event in events:
             self.publish("event.append", session.robot_id, event)
+            self.recorder.offer("event", event.ts, event.model_dump())
             if self.db is not None:
                 await self.db.add_event(session.robot_id, event)
 

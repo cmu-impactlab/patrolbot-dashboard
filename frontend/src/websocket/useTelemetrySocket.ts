@@ -1,9 +1,11 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { DashboardSocket, telemetryUrl } from "./client";
 
 export function useTelemetrySocket(): void {
+  const queryClient = useQueryClient();
   useEffect(() => {
     const store = useTelemetryStore.getState();
     const socket = new DashboardSocket(telemetryUrl(), {
@@ -19,6 +21,14 @@ export function useTelemetrySocket(): void {
           case "command.result":
             commands.handleResult(frame.data);
             break;
+          case "state.connection":
+            // A (re)connecting robot may be a different robot with the same
+            // map_version — refetch rather than trust the cached map.
+            if (frame.data.state === "online") {
+              queryClient.invalidateQueries({ queryKey: ["map"] });
+            }
+            useTelemetryStore.getState().handleFrame(frame);
+            break;
           default:
             useTelemetryStore.getState().handleFrame(frame);
         }
@@ -32,5 +42,5 @@ export function useTelemetrySocket(): void {
       registerCommandSender(null);
       socket.close();
     };
-  }, []);
+  }, [queryClient]);
 }

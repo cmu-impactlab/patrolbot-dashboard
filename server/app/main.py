@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .api import health, history, layouts, snapshot
-from .database.repo import Database
+from .api import health, history, layouts, recordings, snapshot
+from .authentication import oidc
+from .database import create_database
 from .settings import Settings
 from .telemetry.hub import TelemetryHub
 from .websocket import robot_gateway, ui_gateway
@@ -23,7 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        db = Database(settings.database_path)
+        db = create_database(settings)
         await db.init()
         hub = TelemetryHub(settings, db)
         hub.set_event_seed(await db.next_event_id())
@@ -48,10 +49,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await db.close()
 
     app = FastAPI(title="PatrolBot Dashboard Server", lifespan=lifespan)
+
+    if settings.auth_mode == "oidc":
+        from fastapi.responses import JSONResponse
+
+        from .authentication.sessions import COOKIE_NAME, verify
+
+        @app.middleware("http")
+        async def require_session(request, call_next):
+            # /api/health stays open for monitoring; /auth/* is the login
+            # flow itself; everything else under /api needs a session.
+            path = request.url.path
+            if path.startswith("/api/") and path != "/api/health":
+                if verify(settings.session_secret, request.cookies.get(COOKIE_NAME)) is None:
+                    return JSONResponse({"detail": "Not signed in."}, status_code=401)
+            return await call_next(request)
+
     app.include_router(health.router)
     app.include_router(snapshot.router)
     app.include_router(history.router)
     app.include_router(layouts.router)
+    app.include_router(recordings.router)
+    app.include_router(oidc.router)
     app.include_router(robot_gateway.router)
     app.include_router(ui_gateway.router)
 
