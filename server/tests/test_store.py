@@ -1,0 +1,84 @@
+from app.protocol.messages import BaseStateData, BatteryData, DiagnosticItem, DiagnosticsData
+from app.settings import Settings
+from app.telemetry.store import RobotState
+
+
+def make_state() -> RobotState:
+    return RobotState(Settings(), "patrolbot-01")
+
+
+def base_state(**overrides) -> BaseStateData:
+    defaults = dict(
+        session_generation=1, link_connected=True, telemetry_age=0.1,
+        hardware_state_valid=True, charge_state="not_charging", motors_enabled=True,
+        estop_pressed=False, fault_flags=0, stall_value=0,
+        bumpers_front=False, bumpers_rear=False,
+    )
+    defaults.update(overrides)
+    return BaseStateData(**defaults)
+
+
+def test_estop_transition_emits_single_event():
+    state = make_state()
+    events = state.record_base_state(base_state(estop_pressed=True))
+    assert len(events) == 1 and events[0].severity == "critical"
+    # Repeated estop frames do not spam events.
+    assert state.record_base_state(base_state(estop_pressed=True)) == []
+    # Release emits an info event.
+    release = state.record_base_state(base_state(estop_pressed=False))
+    assert len(release) == 1 and release[0].severity == "info"
+
+
+def test_bumper_transition_event():
+    state = make_state()
+    events = state.record_base_state(base_state(bumpers_front=True))
+    assert any("bumper" in e.title.lower() for e in events)
+    assert state.record_base_state(base_state(bumpers_front=True)) == []
+
+
+def test_diagnostics_level_transitions():
+    state = make_state()
+    warn = DiagnosticsData(items=[DiagnosticItem(name="laser", level="WARN", message="Slow")])
+    ok = DiagnosticsData(items=[DiagnosticItem(name="laser", level="OK", message="Fine")])
+    assert len(state.record_diagnostics(warn)) == 1
+    assert state.record_diagnostics(warn) == []  # unchanged level: no event
+    recovered = state.record_diagnostics(ok)
+    assert len(recovered) == 1 and recovered[0].severity == "info"
+
+
+def test_battery_low_threshold_event_once():
+    state = make_state()
+    assert state.record_battery(BatteryData(voltage=24.5, percentage=50.0, charging=False)) == []
+    low = state.record_battery(BatteryData(voltage=23.5, percentage=19.0, charging=False))
+    assert len(low) == 1 and low[0].severity == "warning"
+    assert state.record_battery(BatteryData(voltage=23.4, percentage=18.0, charging=False)) == []
+
+
+def test_charging_transitions_events():
+    state = make_state()
+    state.record_battery(BatteryData(voltage=24.0, percentage=50.0, charging=False))
+    started = state.record_battery(BatteryData(voltage=24.2, percentage=50.0, charging=True))
+    assert any("charging started" in e.title.lower() for e in started)
+    stopped = state.record_battery(BatteryData(voltage=25.0, percentage=80.0, charging=False))
+    assert any("charging stopped" in e.title.lower() for e in stopped)
+
+
+def test_connection_transitions():
+    state = make_state()
+    assert state.connection == "offline"
+    events = state.set_connection("online")
+    assert len(events) == 1 and events[0].severity == "info"
+    assert state.set_connection("online") == []
+    events = state.set_connection("offline")
+    assert len(events) == 1 and events[0].severity == "critical"
+
+
+def test_snapshot_includes_battery_estimate():
+    state = make_state()
+    state.set_connection("online")
+    state.record_battery(BatteryData(voltage=24.5, percentage=80.0, charging=False))
+    snap = state.snapshot()
+    assert snap.battery is not None
+    assert snap.battery.estimate is not None
+    assert snap.battery_estimate is not None
+    assert snap.robot_status.status is not None

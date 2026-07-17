@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "type": "telemetry.heartbeat",
+  "robot_id": "patrolbot-01",
+  "sequence": 100,
+  "timestamp": "2026-07-17T10:00:01.000Z",
+  "data": { "uptime_s": 3600.5 }
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "telemetry.diagnostics",
+  "robot_id": "patrolbot-01",
+  "sequence": 18457,
+  "timestamp": "2026-07-17T10:31:16.200Z",
+  "data": {
+    "items": [
+      { "name": "base_controller", "level": "OK", "message": "Connected" },
+      { "name": "localization", "level": "WARN", "message": "Pose covariance high", "values": { "covariance_trace": "0.4" } }
+    ]
+  }
+}

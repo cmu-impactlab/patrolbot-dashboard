@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "telemetry.path",
+  "robot_id": "patrolbot-01",
+  "sequence": 18454,
+  "timestamp": "2026-07-17T10:31:15.600Z",
+  "data": {
+    "frame_id": "map",
+    "points": [[3.42, -1.18], [3.8, -0.9], [4.5, 0.2], [6.2, 2.4]],
+    "goal": { "x": 6.2, "y": 2.4, "yaw": 0.0 }
+  }
+}

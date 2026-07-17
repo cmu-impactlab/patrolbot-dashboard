@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "type": "server.hello_ack",
+  "robot_id": "patrolbot-01",
+  "sequence": 0,
+  "timestamp": "2026-07-17T10:00:00.100Z",
+  "data": { "want_map": true }
+}

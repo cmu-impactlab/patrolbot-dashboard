@@ -1,0 +1,13 @@
+[project]
+name = "patrolbot-mock-robot"
+version = "0.1.0"
+description = "ROS-free simulated PatrolBot speaking the dashboard WebSocket protocol"
+requires-python = ">=3.11"
+dependencies = ["websockets>=13", "psutil>=6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mock_robot*"]

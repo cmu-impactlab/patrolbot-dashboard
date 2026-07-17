@@ -1,0 +1,31 @@
+/**:
+  ros__parameters:
+    # Dashboard server. Overridable via WEB_BRIDGE_SERVER_URL / WEB_BRIDGE_TOKEN env.
+    server_url: "ws://192.168.1.100:8000/ws/robot"
+    token: "dev-token"
+    robot_id: "patrolbot-01"
+
+    # Topic names — mapped, not hardcoded, so a rename on the robot side is a
+    # config change here.
+    topic_map: "/map"
+    topic_amcl_pose: "/amcl_pose"
+    topic_odom: "/odom"
+    topic_scan: "/scan"
+    topic_plan: "/plan"
+    topic_battery: "/battery"
+    topic_diagnostics: "/diagnostics"
+    topic_base_state: "/patrolbot/base_state"
+
+    # Emission throttles (minimum interval per type, seconds).
+    pose_interval: 0.1
+    scan_interval: 0.2
+    path_interval: 0.5
+    slow_interval: 1.0
+
+    # Normalization limits.
+    scan_max_points: 360
+    path_max_points: 200
+    map_name: "CMU-Q Floor 1"
+
+    # Pose covariance trace above which the UI shows "location uncertain".
+    covariance_warn_threshold: 0.25

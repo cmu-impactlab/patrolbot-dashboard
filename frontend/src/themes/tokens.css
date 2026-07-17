@@ -1,0 +1,69 @@
+/* CMU palette (brand.cmu.edu) + semantic tokens, light and dark themes.
+   Carnegie Red is reserved for identity and primary actions — semantic
+   states use green/amber/red/blue so red keeps meaning danger. */
+:root {
+  --cmu-red: #c41230;
+  --cmu-red-dark: #941024;
+  --cmu-black: #000000;
+  --cmu-iron-gray: #6d6e71;
+  --cmu-steel-gray: #e0e0e0;
+  --cmu-white: #ffffff;
+
+  --ok: #1a7f37;
+  --warn: #b45309;
+  --danger: #c2261a;
+  --info: #0969da;
+  --active: #0969da;
+  --muted: #6d6e71;
+
+  --bg: #f4f4f5;
+  --surface: #ffffff;
+  --surface-2: #f0f0f1;
+  --border: #d9d9dc;
+  --text: #1a1a1c;
+  --text-secondary: #55565a;
+  --text-faint: #8a8b8f;
+  --shadow: 0 1px 3px rgb(0 0 0 / 0.09);
+  --grid-placeholder: rgba(196, 18, 48, 0.12);
+
+  --ok-bg: #e6f4ea;
+  --warn-bg: #fdf1e2;
+  --danger-bg: #fdeceb;
+  --info-bg: #e7f0fd;
+  --muted-bg: #ececee;
+
+  --map-bg: #d8d8da;
+  --map-free: #f7f7f8;
+  --map-occupied: #303034;
+  --map-unknown: #c2c2c6;
+}
+
+:root[data-theme="dark"] {
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  --info: #58a6ff;
+  --active: #58a6ff;
+  --muted: #9d9ea3;
+
+  --bg: #131316;
+  --surface: #1d1d21;
+  --surface-2: #26262b;
+  --border: #35353b;
+  --text: #ececee;
+  --text-secondary: #b5b6ba;
+  --text-faint: #7d7e83;
+  --shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+  --grid-placeholder: rgba(196, 18, 48, 0.28);
+
+  --ok-bg: #12261a;
+  --warn-bg: #2a2113;
+  --danger-bg: #2c1615;
+  --info-bg: #13233a;
+  --muted-bg: #242428;
+
+  --map-bg: #1a1a1e;
+  --map-free: #2c2c31;
+  --map-occupied: #d5d5da;
+  --map-unknown: #212125;
+}

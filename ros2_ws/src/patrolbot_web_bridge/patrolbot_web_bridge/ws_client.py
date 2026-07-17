@@ -1,0 +1,158 @@
+"""Outbound WebSocket client running on its own thread + asyncio loop.
+
+ROS callbacks hand envelopes over via a thread-safe enqueue; a sender task
+drains the queue. Reconnects with jittered exponential backoff and re-runs
+the hello handshake on every new session. Drop-oldest under back-pressure,
+except hello/map frames which must always land.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
+from typing import Callable
+
+import websockets
+
+log = logging.getLogger("web_bridge.ws")
+
+PROTECTED_TYPES = {"robot.hello", "telemetry.map"}
+QUEUE_LIMIT = 256
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+class WsClient:
+    def __init__(self, server_url: str, token: str, robot_id: str,
+                 on_map_wanted: Callable[[], None]) -> None:
+        self.url = f"{server_url}?token={token}"
+        self.server_url = server_url
+        self.robot_id = robot_id
+        self.on_map_wanted = on_map_wanted
+        self.sequence = 0
+        self.map_version = 0
+        self.connected = threading.Event()
+        self._queue: deque[str] = deque()
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wake: asyncio.Event | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run_thread, name="ws-client", daemon=True)
+        self.stats = {"sent": 0, "dropped": 0, "reconnects": 0, "last_connect_mono": 0.0}
+
+    # -- public API (called from ROS executor threads) ------------------------
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(lambda: None)
+        self._thread.join(timeout=5)
+
+    def send(self, type_: str, data: dict) -> None:
+        with self._lock:
+            self.sequence += 1
+            frame = json.dumps({
+                "version": 1, "type": type_, "robot_id": self.robot_id,
+                "sequence": self.sequence, "timestamp": utc_now(), "data": data,
+            }, separators=(",", ":"))
+            if len(self._queue) >= QUEUE_LIMIT:
+                # Drop the oldest unprotected frame; give up only if the queue
+                # is somehow all-protected.
+                for index, queued in enumerate(self._queue):
+                    if '"telemetry.map"' not in queued and '"robot.hello"' not in queued:
+                        del self._queue[index]
+                        self.stats["dropped"] += 1
+                        break
+                else:
+                    if type_ not in PROTECTED_TYPES:
+                        self.stats["dropped"] += 1
+                        return
+            self._queue.append(frame)
+        loop, wake = self._loop, self._wake
+        if loop is not None and wake is not None:
+            loop.call_soon_threadsafe(wake.set)
+
+    # -- internals -------------------------------------------------------------
+
+    def _run_thread(self) -> None:
+        asyncio.run(self._run())
+
+    async def _run(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._wake = asyncio.Event()
+        retry = 0
+        while not self._stop.is_set():
+            try:
+                await self._session()
+                retry = 0
+            except (OSError, websockets.WebSocketException, RuntimeError) as exc:
+                self.connected.clear()
+                delay = min(8.0, 0.5 * (2 ** retry)) * (1.0 + random.random() * 0.3)
+                retry += 1
+                self.stats["reconnects"] += 1
+                log.warning("connection lost (%s); retrying in %.1f s", exc, delay)
+                await asyncio.sleep(delay)
+
+    async def _session(self) -> None:
+        async with websockets.connect(self.url, max_size=16 * 1024 * 1024,
+                                      ping_interval=20, ping_timeout=10) as ws:
+            hello = json.dumps({
+                "version": 1, "type": "robot.hello", "robot_id": self.robot_id,
+                "sequence": 0, "timestamp": utc_now(),
+                "data": {
+                    "protocol_version": 1,
+                    "capabilities": ["pose", "lidar", "path", "battery",
+                                     "base_state", "diagnostics", "resources", "map"],
+                    "map_version": self.map_version,
+                    "software_version": "web-bridge-0.1.0",
+                },
+            }, separators=(",", ":"))
+            await ws.send(hello)
+            ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if ack.get("type") != "server.hello_ack":
+                raise RuntimeError(f"unexpected hello reply: {ack.get('type')}")
+            self.connected.set()
+            self.stats["last_connect_mono"] = time.monotonic()
+            log.info("connected to %s", self.server_url)
+            if ack.get("data", {}).get("want_map", True):
+                self.on_map_wanted()
+
+            reader = asyncio.create_task(self._drain_incoming(ws))
+            try:
+                while not self._stop.is_set():
+                    frame = None
+                    with self._lock:
+                        if self._queue:
+                            frame = self._queue.popleft()
+                    if frame is None:
+                        self._wake.clear()
+                        try:
+                            await asyncio.wait_for(self._wake.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                    await ws.send(frame)
+                    self.stats["sent"] += 1
+            finally:
+                self.connected.clear()
+                reader.cancel()
+
+    async def _drain_incoming(self, ws) -> None:
+        # Phase 3 will route command.* frames here; for now log-and-ignore.
+        async for message in ws:
+            try:
+                frame = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+            if str(frame.get("type", "")).startswith("command."):
+                log.warning("received %s but commands are not enabled (Phase 3)", frame["type"])

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "type": "event.append",
+  "robot_id": "patrolbot-01",
+  "sequence": 10,
+  "timestamp": "2026-07-17T10:31:27.000Z",
+  "data": {
+    "id": 412,
+    "ts": "2026-07-17T10:31:27.000Z",
+    "severity": "warning",
+    "title": "Battery is getting low",
+    "message": "Battery is at 21%. The robot should return to its charging dock soon."
+  }
+}

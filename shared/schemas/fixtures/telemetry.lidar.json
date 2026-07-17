@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "telemetry.lidar",
+  "robot_id": "patrolbot-01",
+  "sequence": 18453,
+  "timestamp": "2026-07-17T10:31:15.500Z",
+  "data": {
+    "angle_min": -1.5707963,
+    "angle_increment": 0.0349066,
+    "ranges": [2.41, 2.38, null, 1.02, 7.95]
+  }
+}

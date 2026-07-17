@@ -1,0 +1,86 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import type { Envelope, PoseData, SnapshotData } from "../types/protocol";
+import { useTelemetryStore } from "./telemetryStore";
+
+function poseFrame(x: number, y: number, sequence = 1): Envelope<"telemetry.pose", PoseData> {
+  return {
+    version: 1,
+    type: "telemetry.pose",
+    robot_id: "patrolbot-01",
+    sequence,
+    timestamp: "2026-07-17T10:00:00.000Z",
+    data: { x, y, yaw: 0, linear_velocity: 0.4, angular_velocity: 0 },
+  };
+}
+
+const snapshot: SnapshotData = {
+  connection: { state: "online", last_seen: "2026-07-17T10:00:00Z" },
+  robot_status: { status: "ready", detail: "Ready." },
+  system_health: { overall: "healthy", subsystems: [] },
+  map_version: 2,
+  pose: { x: 1, y: 2, yaw: 0.5, linear_velocity: 0, angular_velocity: 0 },
+  battery: { voltage: 24.5, percentage: 80, charging: false },
+  events: [{ id: 5, ts: "2026-07-17T10:00:00Z", severity: "info", title: "Hi", message: "m" }],
+};
+
+describe("telemetryStore", () => {
+  beforeEach(() => {
+    useTelemetryStore.setState({
+      pose: null, trajectory: [], events: [], mapVersion: 0,
+      status: { status: "offline", detail: "" },
+      connection: { state: "offline" }, wsConnected: false, frameCount: 0,
+    });
+  });
+
+  it("hydrates from a snapshot", () => {
+    useTelemetryStore.getState().handleFrame({
+      version: 1, type: "server.snapshot", robot_id: "patrolbot-01",
+      sequence: 1, timestamp: "2026-07-17T10:00:00Z", data: snapshot,
+    });
+    const state = useTelemetryStore.getState();
+    expect(state.status.status).toBe("ready");
+    expect(state.pose?.x).toBe(1);
+    expect(state.mapVersion).toBe(2);
+    expect(state.events).toHaveLength(1);
+  });
+
+  it("builds a trajectory from poses, skipping sub-5cm moves", () => {
+    const store = useTelemetryStore.getState();
+    store.handleFrame(poseFrame(0, 0));
+    useTelemetryStore.getState().handleFrame(poseFrame(0.01, 0)); // skipped
+    useTelemetryStore.getState().handleFrame(poseFrame(0.5, 0));
+    expect(useTelemetryStore.getState().trajectory).toEqual([[0, 0], [0.5, 0]]);
+  });
+
+  it("caps the trajectory ring buffer", () => {
+    for (let i = 0; i < 2100; i++) {
+      useTelemetryStore.getState().handleFrame(poseFrame(i * 0.1, 0, i));
+    }
+    expect(useTelemetryStore.getState().trajectory.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("prepends events and caps at 200", () => {
+    for (let i = 1; i <= 210; i++) {
+      useTelemetryStore.getState().handleFrame({
+        version: 1, type: "event.append", robot_id: "patrolbot-01",
+        sequence: i, timestamp: "2026-07-17T10:00:00Z",
+        data: { id: i, ts: "2026-07-17T10:00:00Z", severity: "info", title: `e${i}`, message: "" },
+      });
+    }
+    const events = useTelemetryStore.getState().events;
+    expect(events).toHaveLength(200);
+    expect(events[0].id).toBe(210);
+  });
+
+  it("marks robot offline when the dashboard socket drops", () => {
+    useTelemetryStore.getState().handleFrame({
+      version: 1, type: "state.connection", robot_id: "patrolbot-01",
+      sequence: 1, timestamp: "2026-07-17T10:00:00Z",
+      data: { state: "online", last_seen: null },
+    });
+    useTelemetryStore.getState().setWsConnected(false);
+    const state = useTelemetryStore.getState();
+    expect(state.connection.state).toBe("offline");
+    expect(state.status.status).toBe("offline");
+  });
+});

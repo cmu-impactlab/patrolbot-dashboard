@@ -1,0 +1,234 @@
+import { create } from "zustand";
+import type {
+  AnyFrame,
+  BaseStateData,
+  BatteryData,
+  ConnectionData,
+  DiagnosticsData,
+  EventData,
+  LidarData,
+  PathData,
+  PoseData,
+  ResourcesData,
+  RobotStatusData,
+  SnapshotData,
+  SystemHealthData,
+} from "../types/protocol";
+
+const TRAJECTORY_CAP = 2000;
+const HISTORY_CAP = 300;
+
+export interface ResourceSample {
+  t: number;
+  cpu: number;
+  mem: number;
+  temp: number | null;
+  disk: number;
+}
+
+export interface BatterySample {
+  t: number;
+  voltage: number;
+  percentage: number | null;
+  charging: boolean;
+}
+
+export interface TelemetryState {
+  wsConnected: boolean;
+  robotId: string;
+  connection: ConnectionData;
+  status: RobotStatusData;
+  health: SystemHealthData | null;
+  pose: PoseData | null;
+  poseReceivedAt: number;
+  lidar: LidarData | null;
+  path: PathData | null;
+  battery: BatteryData | null;
+  baseState: BaseStateData | null;
+  diagnostics: DiagnosticsData | null;
+  resources: ResourcesData | null;
+  mapVersion: number;
+  events: EventData[];
+  trajectory: [number, number][];
+  resourceHistory: ResourceSample[];
+  batteryHistory: BatterySample[];
+  frameCount: number;
+  lastFrameAt: string | null;
+  lastAckedEventId: number;
+
+  setWsConnected: (connected: boolean) => void;
+  handleFrame: (frame: AnyFrame) => void;
+  ackEvents: () => void;
+}
+
+function safeStorage(): Storage | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+const initialStatus: RobotStatusData = {
+  status: "offline",
+  detail: "The robot is not connected to the dashboard.",
+};
+
+function appendTrajectory(
+  trajectory: [number, number][],
+  pose: PoseData,
+): [number, number][] {
+  const last = trajectory[trajectory.length - 1];
+  if (last) {
+    const dx = pose.x - last[0];
+    const dy = pose.y - last[1];
+    if (dx * dx + dy * dy < 0.0025) return trajectory; // < 5 cm: skip
+  }
+  const next = trajectory.length >= TRAJECTORY_CAP ? trajectory.slice(-TRAJECTORY_CAP + 1) : trajectory.slice();
+  next.push([pose.x, pose.y]);
+  return next;
+}
+
+function cap<T>(items: T[], item: T, limit: number): T[] {
+  const next = items.length >= limit ? items.slice(-limit + 1) : items.slice();
+  next.push(item);
+  return next;
+}
+
+export const useTelemetryStore = create<TelemetryState>((set, get) => ({
+  wsConnected: false,
+  robotId: "patrolbot-01",
+  connection: { state: "offline", last_seen: null },
+  status: initialStatus,
+  health: null,
+  pose: null,
+  poseReceivedAt: 0,
+  lidar: null,
+  path: null,
+  battery: null,
+  baseState: null,
+  diagnostics: null,
+  resources: null,
+  mapVersion: 0,
+  events: [],
+  trajectory: [],
+  resourceHistory: [],
+  batteryHistory: [],
+  frameCount: 0,
+  lastFrameAt: null,
+  lastAckedEventId: Number(safeStorage()?.getItem("patrolbot.lastAckedEventId") ?? 0),
+
+  setWsConnected: (connected) =>
+    set(
+      connected
+        ? { wsConnected: true }
+        : {
+            wsConnected: false,
+            connection: { state: "offline", last_seen: get().connection.last_seen },
+            status: initialStatus,
+          },
+    ),
+
+  ackEvents: () => {
+    const latest = get().events[0]?.id ?? get().lastAckedEventId;
+    safeStorage()?.setItem("patrolbot.lastAckedEventId", String(latest));
+    set({ lastAckedEventId: latest });
+  },
+
+  handleFrame: (frame) => {
+    const bump = {
+      frameCount: get().frameCount + 1,
+      robotId: frame.robot_id,
+      lastFrameAt: new Date().toISOString(),
+    };
+    switch (frame.type) {
+      case "server.snapshot": {
+        const data = frame.data as SnapshotData;
+        set({
+          ...bump,
+          connection: data.connection,
+          status: data.robot_status,
+          health: data.system_health,
+          pose: data.pose ?? null,
+          battery: data.battery ?? null,
+          baseState: data.base_state ?? null,
+          diagnostics: data.diagnostics ?? null,
+          resources: data.resources ?? null,
+          path: data.path ?? null,
+          mapVersion: data.map_version,
+          events: data.events,
+        });
+        break;
+      }
+      case "state.connection":
+        set({ ...bump, connection: frame.data });
+        break;
+      case "state.robot_status":
+        set({ ...bump, status: frame.data });
+        break;
+      case "state.system_health":
+        set({ ...bump, health: frame.data });
+        break;
+      case "event.append":
+        set({ ...bump, events: [frame.data, ...get().events].slice(0, 200) });
+        break;
+      case "telemetry.pose":
+        set({
+          ...bump,
+          pose: frame.data,
+          poseReceivedAt: performance.now(),
+          trajectory: appendTrajectory(get().trajectory, frame.data),
+        });
+        break;
+      case "telemetry.lidar":
+        set({ ...bump, lidar: frame.data });
+        break;
+      case "telemetry.path":
+        set({ ...bump, path: frame.data });
+        break;
+      case "telemetry.battery":
+        set({
+          ...bump,
+          battery: frame.data,
+          batteryHistory: cap(
+            get().batteryHistory,
+            {
+              t: Date.now(),
+              voltage: frame.data.voltage,
+              percentage: frame.data.percentage ?? null,
+              charging: frame.data.charging,
+            },
+            HISTORY_CAP,
+          ),
+        });
+        break;
+      case "telemetry.base_state":
+        set({ ...bump, baseState: frame.data });
+        break;
+      case "telemetry.diagnostics":
+        set({ ...bump, diagnostics: frame.data });
+        break;
+      case "telemetry.resources":
+        set({
+          ...bump,
+          resources: frame.data,
+          resourceHistory: cap(
+            get().resourceHistory,
+            {
+              t: Date.now(),
+              cpu: frame.data.cpu_percent,
+              mem: frame.data.memory_percent,
+              temp: frame.data.cpu_temp_c ?? null,
+              disk: frame.data.disk_percent,
+            },
+            HISTORY_CAP,
+          ),
+        });
+        break;
+      case "telemetry.map":
+        // Map payload is fetched over REST (useMap); we only track the version.
+        set({ ...bump, mapVersion: frame.data.map_version });
+        break;
+    }
+  },
+}));

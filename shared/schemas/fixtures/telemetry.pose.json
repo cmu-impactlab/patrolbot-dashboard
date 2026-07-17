@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "type": "telemetry.pose",
+  "robot_id": "patrolbot-01",
+  "sequence": 18452,
+  "timestamp": "2026-07-17T10:31:15.432Z",
+  "data": {
+    "frame_id": "map",
+    "x": 3.42,
+    "y": -1.18,
+    "yaw": 1.57,
+    "linear_velocity": 0.24,
+    "angular_velocity": 0.02,
+    "covariance_trace": 0.08,
+    "localized": true
+  }
+}

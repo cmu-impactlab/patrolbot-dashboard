@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "type": "telemetry.base_state",
+  "robot_id": "patrolbot-01",
+  "sequence": 18456,
+  "timestamp": "2026-07-17T10:31:16.100Z",
+  "data": {
+    "session_generation": 4,
+    "link_connected": true,
+    "telemetry_age": 0.12,
+    "hardware_state_valid": true,
+    "charge_state": "not_charging",
+    "motors_enabled": true,
+    "estop_pressed": false,
+    "fault_flags": 0,
+    "stall_value": 0,
+    "bumpers_front": false,
+    "bumpers_rear": false
+  }
+}

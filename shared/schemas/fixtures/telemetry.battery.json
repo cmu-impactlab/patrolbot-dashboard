@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "telemetry.battery",
+  "robot_id": "patrolbot-01",
+  "sequence": 18455,
+  "timestamp": "2026-07-17T10:31:16.000Z",
+  "data": {
+    "voltage": 24.6,
+    "current": -1.8,
+    "percentage": 72.0,
+    "charging": false
+  }
+}

@@ -1,0 +1,34 @@
+# Local/demo deployment: dashboard server (serving the built frontend) + mock robot.
+#
+#   docker compose -f infrastructure/docker-compose.local.yml up --build
+#   -> dashboard at http://localhost:8000
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.server
+      network: host
+    ports:
+      - "8000:8000"
+    environment:
+      PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
+      PATROLBOT_DATABASE_PATH: /data/patrolbot.db
+    volumes:
+      - server-data:/data
+    restart: unless-stopped
+
+  mock-robot:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.mock
+      network: host
+    environment:
+      SERVER_URL: ws://server:8000/ws/robot
+      ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
+      SCENARIO: full
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  server-data:

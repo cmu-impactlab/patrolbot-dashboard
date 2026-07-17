@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Data
+server/data/
+*.db
+*.sqlite3
+
+# ROS
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Misc
+.env
+.DS_Store

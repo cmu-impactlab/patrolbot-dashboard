@@ -1,0 +1,5 @@
+# Phase 5 placeholder — CMU server deployment.
+#
+# Will add: PostgreSQL, Redis fan-out, nginx TLS termination (see nginx/),
+# CMU OAuth env, backups, monitoring. Not used in Phases 1–2.
+services: {}

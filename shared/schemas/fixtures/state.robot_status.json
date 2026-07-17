@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "type": "state.robot_status",
+  "robot_id": "patrolbot-01",
+  "sequence": 8,
+  "timestamp": "2026-07-17T10:31:25.100Z",
+  "data": { "status": "charging", "detail": "Robot is docked and charging." }
+}

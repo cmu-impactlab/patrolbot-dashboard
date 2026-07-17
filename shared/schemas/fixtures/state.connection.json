@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "type": "state.connection",
+  "robot_id": "patrolbot-01",
+  "sequence": 7,
+  "timestamp": "2026-07-17T10:31:25.000Z",
+  "data": { "state": "stale", "last_seen": "2026-07-17T10:31:20.000Z" }
+}

@@ -1,0 +1,6 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY mock-robot/pyproject.toml ./
+COPY mock-robot/mock_robot ./mock_robot
+RUN pip install --no-cache-dir .
+CMD ["sh", "-c", "python -m mock_robot --server ${SERVER_URL:-ws://server:8000/ws/robot} --token ${ROBOT_TOKEN:-dev-token} --scenario ${SCENARIO:-full}"]

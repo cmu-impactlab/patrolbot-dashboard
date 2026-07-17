@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "type": "telemetry.resources",
+  "robot_id": "patrolbot-01",
+  "sequence": 18458,
+  "timestamp": "2026-07-17T10:31:16.300Z",
+  "data": {
+    "cpu_percent": 23.5,
+    "memory_percent": 41.0,
+    "cpu_temp_c": 55.2,
+    "disk_percent": 62.0,
+    "wifi_signal_dbm": -58
+  }
+}

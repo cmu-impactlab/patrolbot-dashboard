@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "type": "server.snapshot",
+  "robot_id": "patrolbot-01",
+  "sequence": 1,
+  "timestamp": "2026-07-17T10:31:20.000Z",
+  "data": {
+    "connection": { "state": "online", "last_seen": "2026-07-17T10:31:19.900Z" },
+    "robot_status": { "status": "ready", "detail": "Robot is ready for a new task." },
+    "system_health": {
+      "overall": "healthy",
+      "subsystems": [
+        { "id": "drive_base", "label": "Drive base", "level": "healthy", "message": "Motor controller responding normally.", "updated_at": "2026-07-17T10:31:19.000Z" }
+      ]
+    },
+    "map_version": 3,
+    "pose": null,
+    "battery": null,
+    "battery_estimate": null,
+    "base_state": null,
+    "diagnostics": null,
+    "resources": null,
+    "path": null,
+    "events": []
+  }
+}

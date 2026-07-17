@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "state.system_health",
+  "robot_id": "patrolbot-01",
+  "sequence": 9,
+  "timestamp": "2026-07-17T10:31:26.000Z",
+  "data": {
+    "overall": "warning",
+    "subsystems": [
+      { "id": "localization", "label": "Robot location", "level": "warning", "message": "The robot is not confident about its current location.", "action": "Use Set Robot Location before sending a new destination.", "updated_at": "2026-07-17T10:31:25.000Z" }
+    ]
+  }
+}
