@@ -27,6 +27,25 @@ export function useSaveLayout() {
   });
 }
 
+/** Save the current layout under a user-chosen name (a custom dashboard). */
+export function useSaveNamedLayout() {
+  return useMutation({
+    mutationFn: ({ name, doc }: { name: string; doc: LayoutDoc }) =>
+      json(`/api/layouts/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(doc),
+      }),
+  });
+}
+
+export function useDeleteLayout() {
+  return useMutation({
+    mutationFn: (name: string) =>
+      json(`/api/layouts/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  });
+}
+
 export function useMapQuery(mapVersion: number) {
   return useQuery({
     // Version 0 still fetches: the server falls back to its local static map

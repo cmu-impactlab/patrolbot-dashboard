@@ -68,6 +68,7 @@ export function DashboardGrid() {
           draggableHandle=".drag-handle"
           isDraggable={editMode}
           isResizable={editMode}
+          resizeHandles={["se", "sw"]}
           onLayoutChange={(_current, all) => setLayouts(all, editMode)}
         >
           {known.map((id) => (

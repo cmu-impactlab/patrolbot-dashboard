@@ -1,29 +1,40 @@
-# Local/demo deployment: dashboard server (serving the built frontend) + mock robot.
+# Local/demo deployment: dashboard server (serving the built frontend and the
+# local CMU-Q floor map; the robot never streams its map).
 #
 #   docker compose -f infrastructure/docker-compose.local.yml up --build
-#   -> dashboard at http://localhost:8000
+#   -> dashboard at http://localhost:8000; the Pi bridge connects to <host>:8000
+#
+# Add the simulated robot (never together with the real bridge — both claim
+# robot_id patrolbot-01):
+#
+#   docker compose -f infrastructure/docker-compose.local.yml --profile mock up --build
 services:
   server:
     build:
       context: ..
       dockerfile: infrastructure/Dockerfile.server
       network: host
-    ports:
-      - "8000:8000"
+    # Host networking (like the robot's own containers): this machine's
+    # firewall drops host<->docker-bridge traffic, and the Pi bridge must
+    # reach the server on <host>:8000 anyway.
+    network_mode: host
     environment:
       PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
       PATROLBOT_DATABASE_PATH: /data/patrolbot.db
+      PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
     volumes:
       - server-data:/data
     restart: unless-stopped
 
   mock-robot:
+    profiles: ["mock"]
     build:
       context: ..
       dockerfile: infrastructure/Dockerfile.mock
       network: host
+    network_mode: host
     environment:
-      SERVER_URL: ws://server:8000/ws/robot
+      SERVER_URL: ws://localhost:8000/ws/robot
       ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
       SCENARIO: full
     depends_on:

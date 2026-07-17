@@ -54,11 +54,13 @@ export interface TelemetryState {
   batteryHistory: BatterySample[];
   frameCount: number;
   lastFrameAt: string | null;
-  lastAckedEventId: number;
+  /** Alert ids the user has read; read alerts move to the "Seen" section. */
+  seenEventIds: number[];
 
   setWsConnected: (connected: boolean) => void;
   handleFrame: (frame: AnyFrame) => void;
-  ackEvents: () => void;
+  markSeen: (id: number) => void;
+  markAllSeen: () => void;
 }
 
 function safeStorage(): Storage | null {
@@ -67,6 +69,25 @@ function safeStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+const SEEN_KEY = "patrolbot.seenEventIds";
+const SEEN_CAP = 500;
+
+function loadSeenIds(): number[] {
+  try {
+    const raw = safeStorage()?.getItem(SEEN_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSeen(ids: number[]): number[] {
+  const capped = ids.slice(-SEEN_CAP);
+  safeStorage()?.setItem(SEEN_KEY, JSON.stringify(capped));
+  return capped;
 }
 
 const initialStatus: RobotStatusData = {
@@ -116,7 +137,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   batteryHistory: [],
   frameCount: 0,
   lastFrameAt: null,
-  lastAckedEventId: Number(safeStorage()?.getItem("patrolbot.lastAckedEventId") ?? 0),
+  seenEventIds: loadSeenIds(),
 
   setWsConnected: (connected) =>
     set(
@@ -129,10 +150,16 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           },
     ),
 
-  ackEvents: () => {
-    const latest = get().events[0]?.id ?? get().lastAckedEventId;
-    safeStorage()?.setItem("patrolbot.lastAckedEventId", String(latest));
-    set({ lastAckedEventId: latest });
+  markSeen: (id) => {
+    const seen = get().seenEventIds;
+    if (seen.includes(id)) return;
+    set({ seenEventIds: persistSeen([...seen, id]) });
+  },
+
+  markAllSeen: () => {
+    const ids = get().events.map((event) => event.id);
+    const merged = [...new Set([...get().seenEventIds, ...ids])];
+    set({ seenEventIds: persistSeen(merged) });
   },
 
   handleFrame: (frame) => {
