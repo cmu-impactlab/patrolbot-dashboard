@@ -39,8 +39,8 @@ export function NavControlsWidget() {
       {online && pickMode !== "none" && (
         <div className="nav-pick-banner">
           {pickMode === "goal"
-            ? "Click a spot on the Live Map to send the robot there."
-            : "Click the robot's true position on the Live Map."}
+            ? "Press on the Live Map where the robot should go, and drag to choose which way it should face."
+            : "Press on the robot's true position on the Live Map, and drag toward where it is facing."}
           <button className="btn" onClick={() => setPickMode("none")} title="Cancel">
             <X size={13} /> Cancel
           </button>

@@ -14,12 +14,49 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+interface PickArrow {
+  ax: number;
+  ay: number;
+  ex: number;
+  ey: number;
+  mode: "goal" | "initialpose";
+}
+
+/** RViz-style orientation arrow drawn while the user drags a pose pick. */
+function drawPickArrow(ctx: CanvasRenderingContext2D, pick: PickArrow): void {
+  const color = pick.mode === "goal" ? cssVar("--info") : cssVar("--ok");
+  const angle = Math.atan2(pick.ey - pick.ay, pick.ex - pick.ax);
+  const length = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay);
+
+  ctx.beginPath();
+  ctx.arc(pick.ax, pick.ay, 4, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  if (length < 8) return; // no direction chosen yet
+
+  ctx.beginPath();
+  ctx.moveTo(pick.ax, pick.ay);
+  ctx.lineTo(pick.ex, pick.ey);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  const head = 11;
+  ctx.beginPath();
+  ctx.moveTo(pick.ex, pick.ey);
+  ctx.lineTo(pick.ex - head * Math.cos(angle - 0.45), pick.ey - head * Math.sin(angle - 0.45));
+  ctx.lineTo(pick.ex - head * Math.cos(angle + 0.45), pick.ey - head * Math.sin(angle + 0.45));
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
 function drawScene(
   ctx: CanvasRenderingContext2D,
   view: View,
   map: MapData,
   bitmap: HTMLCanvasElement,
   layers: MapLayers,
+  pickArrow: PickArrow | null,
 ): void {
   const canvasWidth = ctx.canvas.clientWidth;
   const canvasHeight = ctx.canvas.clientHeight;
@@ -171,6 +208,10 @@ function drawScene(
     ctx.stroke();
     ctx.restore();
   }
+
+  if (pickArrow) {
+    drawPickArrow(ctx, pickArrow);
+  }
 }
 
 export function LiveMapWidget() {
@@ -185,6 +226,7 @@ export function LiveMapWidget() {
   const bitmapRef = useRef<{ key: string; bitmap: HTMLCanvasElement } | null>(null);
   const [panning, setPanning] = useState(false);
   const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
+  const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
   const pickMode = useCommandStore((state) => state.pickMode);
 
   const map = mapQuery.data ?? null;
@@ -217,7 +259,8 @@ export function LiveMapWidget() {
         const pose = useTelemetryStore.getState().pose;
         if (pose) viewRef.current = followView(viewRef.current, width, height, pose.x, pose.y);
       }
-      drawScene(ctx, viewRef.current, map, bitmapRef.current.bitmap, useUiStore.getState().mapLayers);
+      drawScene(ctx, viewRef.current, map, bitmapRef.current.bitmap, useUiStore.getState().mapLayers,
+                pickArrowRef.current);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -235,6 +278,16 @@ export function LiveMapWidget() {
   const onPointerDown = (event: React.PointerEvent) => {
     if (!viewRef.current) return;
     (event.target as Element).setPointerCapture(event.pointerId);
+    const mode = useCommandStore.getState().pickMode;
+    if (mode !== "none") {
+      // RViz-style pose picking: the press anchors the position; dragging
+      // stretches an arrow whose direction becomes the orientation.
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const ax = event.clientX - rect.left;
+      const ay = event.clientY - rect.top;
+      pickArrowRef.current = { ax, ay, ex: ax, ey: ay, mode };
+      return;
+    }
     dragRef.current = {
       sx: event.clientX,
       sy: event.clientY,
@@ -246,6 +299,12 @@ export function LiveMapWidget() {
   };
 
   const onPointerMove = (event: React.PointerEvent) => {
+    if (pickArrowRef.current) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      pickArrowRef.current.ex = event.clientX - rect.left;
+      pickArrowRef.current.ey = event.clientY - rect.top;
+      return;
+    }
     const drag = dragRef.current;
     if (!drag || !viewRef.current) return;
     viewRef.current = {
@@ -255,21 +314,21 @@ export function LiveMapWidget() {
     };
   };
 
-  const onPointerUp = (event: React.PointerEvent) => {
-    const drag = dragRef.current;
+  const onPointerUp = () => {
+    const pick = pickArrowRef.current;
+    pickArrowRef.current = null;
     dragRef.current = null;
     setPanning(false);
-    // A press that barely moved is a click; when a pick mode is armed from
-    // the Navigation widget, convert it to world coordinates and send.
-    if (!drag || !viewRef.current) return;
-    const moved = Math.hypot(event.clientX - drag.sx, event.clientY - drag.sy);
-    const mode = useCommandStore.getState().pickMode;
-    if (moved > 5 || mode === "none") return;
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const [wx, wy] = screenToWorld(viewRef.current, event.clientX - rect.left, event.clientY - rect.top);
+    if (!pick || !viewRef.current) return;
+    const [wx, wy] = screenToWorld(viewRef.current, pick.ax, pick.ay);
+    // Screen y grows downward, world y upward — negate the y component.
+    const dragged = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay) > 8;
+    const yaw = dragged
+      ? Math.round(Math.atan2(-(pick.ey - pick.ay), pick.ex - pick.ax) * 1000) / 1000
+      : null; // plain click: navigate keeps the current heading
     useCommandStore.getState().send(
-      mode === "goal" ? "navigate_to_pose" : "set_initial_pose",
-      { x: Math.round(wx * 100) / 100, y: Math.round(wy * 100) / 100, yaw: null },
+      pick.mode === "goal" ? "navigate_to_pose" : "set_initial_pose",
+      { x: Math.round(wx * 100) / 100, y: Math.round(wy * 100) / 100, yaw },
     );
   };
 
@@ -350,6 +409,7 @@ export function MapSettings() {
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="dropdown-content" sideOffset={4} align="end">
+          <DropdownMenu.Label className="dropdown-label">Layers</DropdownMenu.Label>
           {(Object.keys(LAYER_LABELS) as (keyof MapLayers)[]).map((key) => (
             <DropdownMenu.Item
               key={key}
@@ -363,6 +423,22 @@ export function MapSettings() {
               {LAYER_LABELS[key]}
             </DropdownMenu.Item>
           ))}
+          <DropdownMenu.Separator className="dropdown-separator" />
+          <DropdownMenu.Label className="dropdown-label">Floor</DropdownMenu.Label>
+          <DropdownMenu.Item className="dropdown-item" disabled
+                             style={{ opacity: 0.5, cursor: "not-allowed" }}>
+            <span style={{ width: 14 }} />
+            1st floor — not ready
+          </DropdownMenu.Item>
+          <DropdownMenu.Item className="dropdown-item checked" onSelect={(e) => e.preventDefault()}>
+            <Check size={14} />
+            2nd floor
+          </DropdownMenu.Item>
+          <DropdownMenu.Item className="dropdown-item" disabled
+                             style={{ opacity: 0.5, cursor: "not-allowed" }}>
+            <span style={{ width: 14 }} />
+            3rd floor — not ready
+          </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
