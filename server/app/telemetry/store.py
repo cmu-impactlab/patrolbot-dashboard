@@ -72,6 +72,8 @@ class RobotState:
     _prev_estop: bool = False
     _prev_bumper: bool = False
     _prev_battery_low: bool = False
+    _stopped_since_mono: float | None = None
+    _stalled: bool = False
 
     status: RobotStatusData | None = None
     health: SystemHealthData | None = None
@@ -106,7 +108,33 @@ class RobotState:
 
     def record_pose(self, data: PoseData) -> list[EventData]:
         self.pose.set(data)
-        return []
+        return self._update_stall(data)
+
+    def _update_stall(self, data: PoseData) -> list[EventData]:
+        """Flag the robot as stuck when it sits still with an active goal.
+
+        Only counts genuinely unexplained stops: paused motors, e-stop and
+        charging already have their own statuses and don't accumulate here.
+        """
+        path = self.path.data
+        base = self.base_state.data
+        explained = base is not None and (not base.motors_enabled or base.estop_pressed)
+        stopped = abs(data.linear_velocity) < 0.02 and abs(data.angular_velocity) < 0.05
+        if path is None or path.goal is None or not stopped or explained:
+            self._stopped_since_mono = None
+            self._stalled = False
+            return []
+        now = time.monotonic()
+        if self._stopped_since_mono is None:
+            self._stopped_since_mono = now
+        if self._stalled or now - self._stopped_since_mono < self.settings.stall_warning_s:
+            return []
+        self._stalled = True
+        return [self.add_event(
+            "warning", "Robot may be stuck",
+            f"The robot has an active destination but has not moved for "
+            f"{int(self.settings.stall_warning_s)} seconds.",
+        )]
 
     def record_lidar(self, data: LidarData) -> list[EventData]:
         self.lidar.set(data)
@@ -211,6 +239,7 @@ class RobotState:
             pose=self.pose.data,
             path=self.path.data,
             recording=self.recording,
+            stalled=self._stalled,
         )
         health = derive_health(
             connection=self.connection,

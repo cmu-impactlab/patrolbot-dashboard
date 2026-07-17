@@ -28,6 +28,7 @@ STATUS_DETAILS = {
     "charging": "The robot is docked and charging.",
     "docked": "The robot is on its charging dock.",
     "paused": "The robot's motors are switched off.",
+    "stuck": "The robot stopped on its way to the destination and may be stuck.",
     "navigating": "The robot is driving to its destination.",
     "recording": "The robot is recording a route.",
     "ready": "The robot is ready for a new task.",
@@ -42,6 +43,7 @@ def derive_status(
     pose: PoseData | None,
     path: PathData | None,
     recording: bool = False,
+    stalled: bool = False,
 ) -> RobotStatusData:
     status = "ready"
     detail = STATUS_DETAILS["ready"]
@@ -68,6 +70,8 @@ def derive_status(
         status = "docked"
     elif base_state is not None and not base_state.motors_enabled:
         status = "paused"
+    elif stalled:
+        status = "stuck"
     elif recording:
         status = "recording"
     elif path is not None and path.goal is not None and pose is not None and abs(pose.linear_velocity) > 0.02:

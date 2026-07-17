@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 DiagLevel = Literal["OK", "WARN", "ERROR", "STALE"]
 ConnectionState = Literal["online", "stale", "offline"]
 RobotStatus = Literal[
-    "ready", "navigating", "recording", "docked", "charging", "paused", "needs_attention", "offline"
+    "ready", "navigating", "recording", "docked", "charging", "paused",
+    "stuck", "needs_attention", "offline"
 ]
 HealthLevel = Literal["healthy", "warning", "fault", "offline"]
 EventSeverity = Literal["info", "warning", "critical"]

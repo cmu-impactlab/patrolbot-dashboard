@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { AlertsWidget } from "./AlertsWidget";
 import { BatteryWidget } from "./BatteryWidget";
+import { BumpersWidget } from "./BumpersWidget";
 import { LiveMapWidget, MapSettings } from "./LiveMapWidget";
 import { NavControlsWidget } from "./NavControlsWidget";
 import { PiStatsWidget } from "./PiStatsWidget";
@@ -70,6 +71,14 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     description: "Raspberry Pi resources, link quality and telemetry rate",
     component: PiStatsWidget,
     defaultSize: { w: 4, h: 10, minW: 3, minH: 4 },
+    needsRobot: true,
+  },
+  bumpers: {
+    id: "bumpers",
+    title: "Bumpers",
+    description: "Top-down view showing which bumper strip was hit",
+    component: BumpersWidget,
+    defaultSize: { w: 3, h: 13, minW: 2, minH: 8 },
     needsRobot: true,
   },
   recordings: {

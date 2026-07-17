@@ -8,7 +8,7 @@ export type DiagLevel = "OK" | "WARN" | "ERROR" | "STALE";
 export type ConnectionState = "online" | "stale" | "offline";
 export type RobotStatus =
   | "ready" | "navigating" | "recording" | "docked"
-  | "charging" | "paused" | "needs_attention" | "offline";
+  | "charging" | "paused" | "stuck" | "needs_attention" | "offline";
 export type HealthLevel = "healthy" | "warning" | "fault" | "offline";
 export type EventSeverity = "info" | "warning" | "critical";
 

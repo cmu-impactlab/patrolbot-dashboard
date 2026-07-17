@@ -12,6 +12,7 @@ export const STATUS_COPY: Record<RobotStatus, { label: string; tone: string }> =
   docked: { label: "Docked", tone: "ok" },
   charging: { label: "Charging", tone: "ok" },
   paused: { label: "Paused", tone: "warn" },
+  stuck: { label: "May Be Stuck", tone: "warn" },
   needs_attention: { label: "Needs Attention", tone: "danger" },
   offline: { label: "Offline", tone: "muted" },
 };

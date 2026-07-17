@@ -33,14 +33,15 @@ PRESET_LAYOUTS = {
         },
     },
     "Diagnostics": {
-        "widgets": ["systemHealth", "alerts", "piStats", "robotStatus", "battery", "liveMap"],
+        "widgets": ["systemHealth", "alerts", "piStats", "robotStatus", "battery", "liveMap", "bumpers"],
         "layouts": {
             "lg": [
                 {"i": "systemHealth", "x": 0, "y": 0, "w": 4, "h": 13},
                 {"i": "alerts", "x": 4, "y": 0, "w": 4, "h": 13},
                 {"i": "piStats", "x": 8, "y": 0, "w": 4, "h": 10},
                 {"i": "robotStatus", "x": 8, "y": 10, "w": 4, "h": 9},
-                {"i": "battery", "x": 0, "y": 13, "w": 6, "h": 12},
+                {"i": "battery", "x": 0, "y": 13, "w": 3, "h": 13},
+                {"i": "bumpers", "x": 3, "y": 13, "w": 3, "h": 13},
                 {"i": "liveMap", "x": 6, "y": 19, "w": 6, "h": 12},
             ]
         },

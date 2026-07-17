@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     event_limit: int = 5000
     battery_history_days: int = 7
 
+    # Seconds a robot may sit still while it has an active destination before
+    # the dashboard flags it as stuck.
+    stall_warning_s: float = 15.0
+
     # Authentication. "local" = single seeded user (default, current behavior).
     # "oidc" = OpenID Connect authorization-code flow — point the issuer at
     # CMU's IdP (or any OIDC provider) and register the /auth/callback URL.

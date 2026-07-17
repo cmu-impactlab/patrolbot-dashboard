@@ -515,7 +515,40 @@ button {
 
 .btn.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
 
-.map-canvas.picking { cursor: crosshair; }
+/* While picking a pose, the canvas draws a robot ghost under the pointer
+   instead of showing a cursor. */
+.map-canvas.picking { cursor: none; }
+
+/* ---------- Bumpers widget ---------- */
+
+.bumpers-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.bumpers-svg {
+  width: 100%;
+  max-height: 230px;
+  display: block;
+  margin: 0 auto;
+}
+
+.bumper-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  fill: var(--text-faint);
+}
+
+.bumper-hit {
+  animation: bumper-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes bumper-pulse {
+  50% { opacity: 0.45; }
+}
 
 /* ---------- Login screen ---------- */
 

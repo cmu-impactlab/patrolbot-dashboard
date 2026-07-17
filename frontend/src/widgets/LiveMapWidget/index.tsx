@@ -17,6 +17,38 @@ function cssVar(name: string): string {
 /** Longest the orientation arrow can stretch on screen. */
 const MAX_ARROW_PX = 80;
 
+/** Semi-transparent top-down robot drawn under the pointer while picking a
+ *  pose — the operator places "the robot" rather than an abstract cursor.
+ *  Matches the Bumpers widget's chassis: rounded body, side wheels, red
+ *  heading wedge. `angle` is the screen-space heading (radians). */
+function drawRobotGhost(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number): void {
+  const s = 15; // half-length of the body
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  ctx.roundRect(-s, -s * 0.72, s * 2, s * 1.44, 5);
+  ctx.fillStyle = cssVar("--surface-2");
+  ctx.strokeStyle = cssVar("--muted");
+  ctx.lineWidth = 1.6;
+  ctx.fill();
+  ctx.stroke();
+  // Drive wheels mid-body
+  ctx.fillStyle = cssVar("--muted");
+  ctx.fillRect(-s * 0.35, -s * 0.95, s * 0.7, s * 0.28);
+  ctx.fillRect(-s * 0.35, s * 0.67, s * 0.7, s * 0.28);
+  // Heading wedge toward the front
+  ctx.beginPath();
+  ctx.moveTo(s * 0.85, 0);
+  ctx.lineTo(s * 0.15, s * 0.42);
+  ctx.lineTo(s * 0.15, -s * 0.42);
+  ctx.closePath();
+  ctx.fillStyle = cssVar("--cmu-red");
+  ctx.fill();
+  ctx.restore();
+}
+
 interface PickArrow {
   ax: number;
   ay: number;
@@ -60,6 +92,7 @@ function drawScene(
   bitmap: HTMLCanvasElement,
   layers: MapLayers,
   pickArrow: PickArrow | null,
+  pickHover: [number, number] | null,
 ): void {
   const canvasWidth = ctx.canvas.clientWidth;
   const canvasHeight = ctx.canvas.clientHeight;
@@ -213,7 +246,13 @@ function drawScene(
   }
 
   if (pickArrow) {
+    const angle = Math.hypot(pickArrow.ex - pickArrow.ax, pickArrow.ey - pickArrow.ay) > 8
+      ? Math.atan2(pickArrow.ey - pickArrow.ay, pickArrow.ex - pickArrow.ax)
+      : 0;
+    drawRobotGhost(ctx, pickArrow.ax, pickArrow.ay, angle);
     drawPickArrow(ctx, pickArrow);
+  } else if (pickHover) {
+    drawRobotGhost(ctx, pickHover[0], pickHover[1], 0);
   }
 }
 
@@ -230,6 +269,7 @@ export function LiveMapWidget() {
   const [panning, setPanning] = useState(false);
   const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
   const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
+  const pickHoverRef = useRef<[number, number] | null>(null);
   const pickMode = useCommandStore((state) => state.pickMode);
 
   const map = mapQuery.data ?? null;
@@ -263,7 +303,7 @@ export function LiveMapWidget() {
         if (pose) viewRef.current = followView(viewRef.current, width, height, pose.x, pose.y);
       }
       drawScene(ctx, viewRef.current, map, bitmapRef.current.bitmap, useUiStore.getState().mapLayers,
-                pickArrowRef.current);
+                pickArrowRef.current, pickHoverRef.current);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -318,6 +358,12 @@ export function LiveMapWidget() {
       pick.ey = pick.ay + dy;
       return;
     }
+    if (useCommandStore.getState().pickMode !== "none") {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      pickHoverRef.current = [event.clientX - rect.left, event.clientY - rect.top];
+      return;
+    }
+    pickHoverRef.current = null;
     const drag = dragRef.current;
     if (!drag || !viewRef.current) return;
     viewRef.current = {
@@ -330,6 +376,7 @@ export function LiveMapWidget() {
   const onPointerUp = () => {
     const pick = pickArrowRef.current;
     pickArrowRef.current = null;
+    pickHoverRef.current = null;
     dragRef.current = null;
     setPanning(false);
     if (!pick || !viewRef.current) return;
@@ -376,6 +423,7 @@ export function LiveMapWidget() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onPointerLeave={() => { pickHoverRef.current = null; }}
       />
       <div className="map-controls">
         <button className="btn" onClick={() => zoomButtons(1.25)} title="Zoom in">

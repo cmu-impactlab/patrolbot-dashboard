@@ -82,3 +82,48 @@ def test_snapshot_includes_battery_estimate():
     assert snap.battery.estimate is not None
     assert snap.battery_estimate is not None
     assert snap.robot_status.status is not None
+
+
+def test_stall_detection_flags_stuck():
+    import time as _time
+
+    from app.protocol.messages import GoalData, PathData, PoseData
+
+    state = RobotState(Settings(stall_warning_s=0.05), "patrolbot-01")
+    state.connection = "online"
+    state.record_base_state(base_state())
+    state.record_path(PathData(points=[], goal=GoalData(x=5.0, y=5.0)))
+
+    still = PoseData(x=1.0, y=1.0, yaw=0.0, linear_velocity=0.0, angular_velocity=0.0)
+    assert state.record_pose(still) == []  # stall clock starts, no event yet
+    _time.sleep(0.08)
+    events = state.record_pose(still)
+    assert len(events) == 1 and events[0].severity == "warning"
+    assert "stuck" in events[0].title.lower()
+    status, _health = state.recompute()
+    assert status is not None and status.status == "stuck"
+    # No event spam while still stalled.
+    assert state.record_pose(still) == []
+
+    # Movement clears the stall.
+    moving = PoseData(x=1.2, y=1.0, yaw=0.0, linear_velocity=0.3, angular_velocity=0.0)
+    assert state.record_pose(moving) == []
+    status, _health = state.recompute()
+    assert status is not None and status.status == "navigating"
+
+
+def test_stall_not_counted_when_stop_is_explained():
+    import time as _time
+
+    from app.protocol.messages import GoalData, PathData, PoseData
+
+    state = RobotState(Settings(stall_warning_s=0.05), "patrolbot-01")
+    state.connection = "online"
+    state.record_base_state(base_state(motors_enabled=False))
+    state.record_path(PathData(points=[], goal=GoalData(x=5.0, y=5.0)))
+    still = PoseData(x=1.0, y=1.0, yaw=0.0, linear_velocity=0.0, angular_velocity=0.0)
+    state.record_pose(still)
+    _time.sleep(0.08)
+    assert state.record_pose(still) == []  # paused motors explain the stop
+    status, _health = state.recompute()
+    assert status is not None and status.status == "paused"
