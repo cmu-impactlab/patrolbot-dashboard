@@ -184,12 +184,24 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           path: data.path ?? null,
           mapVersion: data.map_version,
           events: data.events,
+          // A snapshot starts a fresh session — drop lines drawn for the
+          // previous robot/connection instead of mixing them in.
+          trajectory: [],
+          lidar: null,
         });
         break;
       }
-      case "state.connection":
-        set({ ...bump, connection: frame.data });
+      case "state.connection": {
+        const wasOffline = get().connection.state === "offline";
+        if (frame.data.state === "online" && wasOffline) {
+          // The (re)connecting robot may be a different one (mock <-> real):
+          // clear per-robot overlays; live frames repopulate them.
+          set({ ...bump, connection: frame.data, trajectory: [], lidar: null, path: null });
+        } else {
+          set({ ...bump, connection: frame.data });
+        }
         break;
+      }
       case "state.robot_status":
         set({ ...bump, status: frame.data });
         break;

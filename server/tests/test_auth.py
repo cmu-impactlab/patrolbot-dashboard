@@ -69,22 +69,33 @@ def make_idp() -> FastAPI:
     def userinfo(request: Request):
         if request.headers.get("Authorization") != "Bearer test-access":
             return JSONResponse({"error": "bad token"}, status_code=401)
-        return {"sub": "abc123", "preferred_username": "ymh1874",
-                "name": "Yousef H", "email": "ymh1874@cmu.edu"}
+        return {"sub": "abc123", "preferred_username": idp.state.username,
+                "name": "Test User", "email": f"{idp.state.username}@andrew.cmu.edu"}
 
+    idp.state.username = "yousefh"
     return idp
 
 
+class Idp:
+    def __init__(self, url: str, app: FastAPI) -> None:
+        self.url = url
+        self.app = app
+
+    def sign_in_as(self, username: str) -> None:
+        self.app.state.username = username
+
+
 @pytest.fixture()
-def idp_url():
+def idp():
     port = _free_port()
-    server = uvicorn.Server(uvicorn.Config(make_idp(), host="127.0.0.1", port=port, log_level="error"))
+    app = make_idp()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
     while not server.started and time.monotonic() < deadline:
         time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
+    yield Idp(f"http://127.0.0.1:{port}", app)
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -95,20 +106,29 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def test_full_oidc_flow(tmp_path, idp_url):
-    settings = Settings(
+def oidc_settings(tmp_path, idp, **overrides) -> Settings:
+    return Settings(
         database_path=str(tmp_path / "t.db"), auth_mode="oidc",
-        session_secret="s3cret", oidc_issuer=idp_url,
+        session_secret="s3cret", oidc_issuer=idp.url,
         oidc_client_id="dash", oidc_client_secret="shh",
         oidc_redirect_url="http://testserver/auth/callback",
-        admin_usernames="ymh1874",
+        **overrides,
     )
+
+
+def sign_in(client: TestClient) -> object:
+    login = client.get("/auth/login", follow_redirects=False)
+    state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+    return client.get(f"/auth/callback?code=test-code&state={state}", follow_redirects=False)
+
+
+def test_full_oidc_flow(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp, admin_usernames="yousefh")
     with TestClient(create_app(settings)) as client:
         # 1. /auth/login redirects to the IdP with PKCE + state.
         login = client.get("/auth/login", follow_redirects=False)
         assert login.status_code == 307
-        location = urlparse(login.headers["location"])
-        query = parse_qs(location.query)
+        query = parse_qs(urlparse(login.headers["location"]).query)
         assert query["code_challenge_method"] == ["S256"]
         state = query["state"][0]
 
@@ -120,7 +140,7 @@ def test_full_oidc_flow(tmp_path, idp_url):
         assert callback.headers["location"] == "/"
 
         me = client.get("/auth/me").json()
-        assert me["username"] == "ymh1874"
+        assert me["username"] == "yousefh"
         assert me["role"] == "administrator"  # in admin_usernames
 
         # 3. Authenticated API access works, per-user layouts included.
@@ -133,13 +153,42 @@ def test_full_oidc_flow(tmp_path, idp_url):
         assert client.get("/auth/me").status_code == 401
 
 
-def test_callback_rejects_forged_state(tmp_path, idp_url):
-    settings = Settings(
-        database_path=str(tmp_path / "t.db"), auth_mode="oidc",
-        session_secret="s3cret", oidc_issuer=idp_url,
-        oidc_client_id="dash", oidc_client_secret="shh",
-        oidc_redirect_url="http://testserver/auth/callback",
-    )
+def test_allowlist(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp,
+                             allowed_usernames="yousefh,efeoflus",
+                             admin_usernames="yousefh")
+    with TestClient(create_app(settings)) as client:
+        # Both listed Andrew IDs get in with the right roles.
+        idp.sign_in_as("yousefh")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["role"] == "administrator"
+        client.get("/auth/logout")
+
+        idp.sign_in_as("efeoflus")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["role"] == "operator"
+        client.get("/auth/logout")
+
+        # A valid CMU account NOT on the list authenticates at the IdP but
+        # is refused here, with no session issued.
+        idp.sign_in_as("stranger")
+        denied = sign_in(client)
+        assert denied.status_code == 403
+        assert "Not authorized" in denied.text
+        assert "stranger" in denied.text
+        assert client.get("/auth/me").status_code == 401
+
+
+def test_email_style_username_is_normalized(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp, allowed_usernames="yousefh")
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("YousefH@andrew.cmu.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["username"] == "yousefh"
+
+
+def test_callback_rejects_forged_state(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)
     with TestClient(create_app(settings)) as client:
         client.get("/auth/login", follow_redirects=False)
         assert client.get("/auth/callback?code=test-code&state=forged",

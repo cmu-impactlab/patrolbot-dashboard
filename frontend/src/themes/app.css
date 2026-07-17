@@ -517,6 +517,55 @@ button {
 
 .map-canvas.picking { cursor: crosshair; }
 
+/* ---------- Login screen ---------- */
+
+.login-screen {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 40px 44px;
+  max-width: 400px;
+  text-align: center;
+}
+
+.login-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 12px;
+  margin-bottom: 14px;
+}
+
+.login-card h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+.login-button {
+  display: inline-flex;
+  margin-top: 16px;
+  padding: 10px 22px;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding-left: 6px;
+}
+
 /* ---------- Recordings widget ---------- */
 
 .rec-start {

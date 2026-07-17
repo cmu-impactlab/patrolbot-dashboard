@@ -22,6 +22,17 @@ services:
       PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
       PATROLBOT_DATABASE_PATH: /data/patrolbot.db
       PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
+      # Auth passthrough (defaults keep the single-user local mode). For CMU
+      # sign-in set PATROLBOT_AUTH_MODE=oidc plus the OIDC client settings;
+      # scripts/dev_idp.py is a stand-in issuer until CMU credentials exist.
+      PATROLBOT_AUTH_MODE: ${PATROLBOT_AUTH_MODE:-local}
+      PATROLBOT_OIDC_ISSUER: ${PATROLBOT_OIDC_ISSUER:-}
+      PATROLBOT_OIDC_CLIENT_ID: ${PATROLBOT_OIDC_CLIENT_ID:-}
+      PATROLBOT_OIDC_CLIENT_SECRET: ${PATROLBOT_OIDC_CLIENT_SECRET:-}
+      PATROLBOT_OIDC_REDIRECT_URL: ${PATROLBOT_OIDC_REDIRECT_URL:-}
+      PATROLBOT_ALLOWED_USERNAMES: ${PATROLBOT_ALLOWED_USERNAMES:-}
+      PATROLBOT_ADMIN_USERNAMES: ${PATROLBOT_ADMIN_USERNAMES:-}
+      PATROLBOT_SESSION_SECRET: ${PATROLBOT_SESSION_SECRET:-dev-session-secret}
     volumes:
       - server-data:/data
     restart: unless-stopped

@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..settings import Settings
 from .sessions import COOKIE_NAME, issue, verify
@@ -44,6 +44,29 @@ async def _discover(issuer: str) -> dict:
 def _role_for(settings: Settings, username: str) -> str:
     admins = {name.strip() for name in settings.admin_usernames.split(",") if name.strip()}
     return "administrator" if username in admins else "operator"
+
+
+def _is_allowed(settings: Settings, username: str) -> bool:
+    """Authorization on top of authentication: with an allowlist configured,
+    a valid Andrew ID is not enough — it must also be on the list."""
+    allowed = {name.strip() for name in settings.allowed_usernames.split(",") if name.strip()}
+    return not allowed or username in allowed
+
+
+_DENIED_PAGE = """<!doctype html><html><head><title>Not authorized</title>
+<style>body{{font-family:system-ui,sans-serif;display:grid;place-items:center;
+height:100vh;margin:0;background:#f4f4f5;color:#1a1a1c}}
+.card{{background:#fff;border-radius:12px;padding:36px 44px;max-width:430px;
+box-shadow:0 4px 18px rgb(0 0 0/.08);text-align:center}}
+.mark{{width:44px;height:44px;border-radius:9px;background:#c41230;color:#fff;
+display:inline-grid;place-items:center;font-weight:800;margin-bottom:14px}}
+a{{color:#c41230}}</style></head><body><div class="card">
+<div class="mark">PB</div><h2>Not authorized</h2>
+<p>You signed in as <b>{username}</b>, but this account has not been given
+access to the PatrolBot dashboard.</p>
+<p>If you believe you should have access, contact the dashboard
+administrator.</p><p><a href="/auth/logout">Sign out</a></p>
+</div></body></html>"""
 
 
 @router.get("/auth/login")
@@ -95,7 +118,12 @@ async def callback(request: Request, code: str = "", state: str = ""):
         info = userinfo_response.json()
 
     username = info.get("preferred_username") or info.get("email") or info["sub"]
+    # Andrew IDs may arrive as andrewid@andrew.cmu.edu — compare the local part.
+    username = username.split("@", 1)[0].lower()
     display_name = info.get("name") or username
+    if not _is_allowed(settings, username):
+        log.warning("user %s authenticated but is not on the allowlist", username)
+        return HTMLResponse(_DENIED_PAGE.format(username=username), status_code=403)
     user_id = await request.app.state.db.get_or_create_user(username, display_name)
     log.info("user %s logged in (id=%s)", username, user_id)
 

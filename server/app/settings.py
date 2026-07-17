@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Usernames granted the administrator role (comma separated); everyone
     # else authenticates as operator.
     admin_usernames: str = ""
+    # If set (comma-separated Andrew IDs), ONLY these users may sign in —
+    # anyone else authenticates fine at the IdP but is refused here.
+    allowed_usernames: str = ""
     # HMAC key for session cookies; MUST be overridden in oidc deployments.
     session_secret: str = "dev-session-secret"
     session_ttl_s: int = 12 * 3600

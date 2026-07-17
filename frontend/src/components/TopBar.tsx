@@ -1,9 +1,10 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronDown, LayoutDashboard, Moon, Pencil, Plus, Save, Sun, Trash2 } from "lucide-react";
+import { Check, ChevronDown, LayoutDashboard, LogOut, Moon, Pencil, Plus, Save, Sun, Trash2 } from "lucide-react";
 import { useState } from "react";
 import cmuqLogo from "../assets/cmuq-logo.png";
 import { useDeleteLayout, useSaveNamedLayout } from "../api/queries";
+import { useAuthStore } from "../stores/authStore";
 import { useLayoutStore } from "../stores/layoutStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useUiStore } from "../stores/uiStore";
@@ -23,6 +24,7 @@ export function TopBar() {
   const applyPreset = useLayoutStore((state) => state.applyPreset);
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
+  const authUser = useAuthStore((state) => state.user);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -184,6 +186,14 @@ export function TopBar() {
       >
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </button>
+      {authUser?.auth_mode === "oidc" && (
+        <span className="user-chip" title={`Signed in as ${authUser.display_name} (${authUser.role})`}>
+          {authUser.username}
+          <a className="btn icon" href="/auth/logout" title="Sign out">
+            <LogOut size={14} />
+          </a>
+        </span>
+      )}
       <WidgetLibrary open={libraryOpen} onOpenChange={setLibraryOpen} />
     </header>
   );

@@ -1,11 +1,12 @@
 import { useEffect } from "react";
 import { useLayoutsQuery } from "./api/queries";
+import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { TopBar } from "./components/TopBar";
 import { useLayoutStore, type SavedLayout } from "./stores/layoutStore";
 import { useTelemetrySocket } from "./websocket/useTelemetrySocket";
 
-export default function App() {
+function Dashboard() {
   useTelemetrySocket();
   const layoutsQuery = useLayoutsQuery();
   const hydrate = useLayoutStore((state) => state.hydrate);
@@ -24,5 +25,13 @@ export default function App() {
         <DashboardGrid />
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthGate>
+      <Dashboard />
+    </AuthGate>
   );
 }
