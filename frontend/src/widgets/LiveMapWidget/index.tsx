@@ -14,6 +14,9 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+/** Longest the orientation arrow can stretch on screen. */
+const MAX_ARROW_PX = 80;
+
 interface PickArrow {
   ax: number;
   ay: number;
@@ -301,8 +304,18 @@ export function LiveMapWidget() {
   const onPointerMove = (event: React.PointerEvent) => {
     if (pickArrowRef.current) {
       const rect = canvasRef.current!.getBoundingClientRect();
-      pickArrowRef.current.ex = event.clientX - rect.left;
-      pickArrowRef.current.ey = event.clientY - rect.top;
+      const pick = pickArrowRef.current;
+      // The arrow only encodes direction — cap its length so it stays a
+      // compass needle instead of stretching across the map.
+      let dx = event.clientX - rect.left - pick.ax;
+      let dy = event.clientY - rect.top - pick.ay;
+      const length = Math.hypot(dx, dy);
+      if (length > MAX_ARROW_PX) {
+        dx *= MAX_ARROW_PX / length;
+        dy *= MAX_ARROW_PX / length;
+      }
+      pick.ex = pick.ax + dx;
+      pick.ey = pick.ay + dy;
       return;
     }
     const drag = dragRef.current;
