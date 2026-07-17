@@ -55,7 +55,8 @@ class MockRobot:
         self.sequence = 0
         self.map_version = 1
         self.session_generation = 1
-        self.mode = "patrol"  # patrol | to_dock | charging
+        self.mode = "patrol"  # patrol | to_dock | charging | commanded | idle
+        self.command: dict | None = None  # active navigate command {command_id}
         self.robot.set_goal(self.robot.next_waypoint())
 
     def elapsed(self) -> float:
@@ -88,14 +89,16 @@ class MockRobot:
         arrived = self.robot.step(dt, moving_allowed=moving_allowed)
         self.battery.step(dt, discharging_allowed=self.mode != "charging")
 
-        if self.mode == "patrol":
-            if self.battery.needs_charge:
-                self.mode = "to_dock"
-                self.robot.set_goal(DOCK)
-                log.info("battery low (%.0f%%) — heading to dock", self.battery.percentage)
-            elif arrived:
+        if self.mode in ("patrol", "idle") and self.battery.needs_charge:
+            self.mode = "to_dock"
+            self.robot.set_goal(DOCK)
+            log.info("battery low (%.0f%%) — heading to dock", self.battery.percentage)
+        elif self.mode == "patrol":
+            if arrived:
                 self.robot.advance_waypoint()
                 self.robot.set_goal(self.robot.next_waypoint())
+        elif self.mode == "commanded" and arrived:
+            self._command_arrived = True
         elif self.mode == "to_dock" and arrived:
             self.mode = "charging"
             self.battery.charging = True
@@ -113,6 +116,7 @@ class MockRobot:
             self._map_dirty = True
 
     _map_dirty = False
+    _command_arrived = False
 
     # -- emission loops --------------------------------------------------------
 
@@ -130,11 +134,14 @@ class MockRobot:
                 await ws.send(self.frame("telemetry.map", self.map_payload()))
             log.info("connected to %s", self.server_url)
 
+            self.command = None  # a command does not survive a reconnect
+            self._command_arrived = False
             tasks = [
                 asyncio.create_task(self._pose_loop(ws)),
                 asyncio.create_task(self._lidar_loop(ws)),
                 asyncio.create_task(self._path_loop(ws)),
                 asyncio.create_task(self._slow_loop(ws)),
+                asyncio.create_task(self._receive_loop(ws)),
                 asyncio.create_task(self._disconnect_watch()),
             ]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -210,10 +217,88 @@ class MockRobot:
                 "disk_percent": psutil.disk_usage("/").percent,
                 "wifi_signal_dbm": -55 - int(5 * math.sin(elapsed / 30.0)),
             }))
+            await self._command_progress(ws)
             if self._map_dirty:
                 self._map_dirty = False
                 await ws.send(self.frame("telemetry.map", self.map_payload()))
                 log.info("map changed -> version %d", self.map_version)
+
+    # -- command handling ------------------------------------------------------
+
+    async def _receive_loop(self, ws) -> None:
+        """Handle command.request frames; mirrors what the real bridge does."""
+        async for raw in ws:
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if frame.get("type") != "command.request":
+                continue
+            data = frame.get("data", {})
+            command_id, command = data.get("command_id"), data.get("command")
+            log.info("command received: %s (%s)", command, command_id)
+
+            if command == "navigate_to_pose":
+                await self._preempt(ws, "A newer destination replaced this one.")
+                goal = data["goal"]
+                self.command = {"command_id": command_id}
+                self._command_arrived = False
+                self.mode = "commanded"
+                self.battery.charging = False
+                self.robot.set_goal((goal["x"], goal["y"]))
+                await ws.send(self.frame("command.ack",
+                                         {"command_id": command_id, "accepted": True}))
+            elif command == "stop":
+                await ws.send(self.frame("command.ack",
+                                         {"command_id": command_id, "accepted": True}))
+                await self._preempt(ws, "Stopped by the operator.")
+                self.mode = "idle"
+                self.robot.set_goal(None)
+                await ws.send(self.frame("command.result",
+                                         {"command_id": command_id, "outcome": "succeeded",
+                                          "detail": "The robot has stopped."}))
+            elif command == "set_initial_pose":
+                goal = data["goal"]
+                self.robot.x, self.robot.y = goal["x"], goal["y"]
+                if goal.get("yaw") is not None:
+                    self.robot.yaw = goal["yaw"]
+                await ws.send(self.frame("command.ack",
+                                         {"command_id": command_id, "accepted": True}))
+                await ws.send(self.frame("command.result",
+                                         {"command_id": command_id, "outcome": "succeeded",
+                                          "detail": "Robot location updated."}))
+            else:
+                await ws.send(self.frame("command.ack",
+                                         {"command_id": command_id, "accepted": False,
+                                          "reason": f"Unknown command: {command}"}))
+
+    async def _preempt(self, ws, detail: str) -> None:
+        if self.command is not None:
+            await ws.send(self.frame("command.result",
+                                     {"command_id": self.command["command_id"],
+                                      "outcome": "canceled", "detail": detail}))
+            self.command = None
+
+    async def _command_progress(self, ws) -> None:
+        if self.command is None:
+            return
+        if self._command_arrived:
+            await ws.send(self.frame("command.result",
+                                     {"command_id": self.command["command_id"],
+                                      "outcome": "succeeded",
+                                      "detail": "Arrived at the destination."}))
+            self.command = None
+            self._command_arrived = False
+            self.mode = "idle"
+            return
+        goal = self.robot.goal
+        if goal is not None:
+            distance = math.hypot(goal[0] - self.robot.x, goal[1] - self.robot.y)
+            await ws.send(self.frame("command.progress",
+                                     {"command_id": self.command["command_id"],
+                                      "stage": "navigating",
+                                      "detail": "Heading to the destination",
+                                      "distance_remaining": round(distance, 2)}))
 
     async def _disconnect_watch(self) -> None:
         while True:

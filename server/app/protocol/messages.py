@@ -124,6 +124,37 @@ class MapData(BaseModel):
     rle: list[tuple[int, int]]
 
 
+# ---- Commands (browser -> server -> robot, responses flow back) -----------
+
+CommandType = Literal["navigate_to_pose", "set_initial_pose", "stop"]
+CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
+
+
+class CommandRequestData(BaseModel):
+    command_id: str  # UUID minted by the browser; correlates the whole lifecycle
+    command: CommandType
+    goal: GoalData | None = None  # required for navigate_to_pose / set_initial_pose
+
+
+class CommandAckData(BaseModel):
+    command_id: str
+    accepted: bool
+    reason: str | None = None
+
+
+class CommandProgressData(BaseModel):
+    command_id: str
+    stage: str
+    detail: str | None = None
+    distance_remaining: float | None = None
+
+
+class CommandResultData(BaseModel):
+    command_id: str
+    outcome: CommandOutcome
+    detail: str | None = None
+
+
 # ---- Server -> robot ------------------------------------------------------
 
 class HelloAckData(BaseModel):
@@ -196,10 +227,13 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "state.robot_status": RobotStatusData,
     "state.system_health": SystemHealthData,
     "event.append": EventData,
+    "command.request": CommandRequestData,
+    "command.ack": CommandAckData,
+    "command.progress": CommandProgressData,
+    "command.result": CommandResultData,
 }
 
-# Reserved for Phase 3; gateways must reject these until implemented.
-RESERVED_COMMAND_PREFIX = "command."
+COMMAND_PREFIX = "command."
 
 
 # ---- Occupancy grid RLE ---------------------------------------------------

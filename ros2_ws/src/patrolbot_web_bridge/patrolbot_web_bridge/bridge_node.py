@@ -6,12 +6,16 @@ normalizes them, throttles, and streams them over an OUTBOUND WebSocket to
 the dashboard server. It never opens connections to the SBC — SBC health is
 whatever /patrolbot/base_state already reports.
 
-No motion commands: this node has no publishers and no action/service
-clients. Phase 3 adds a separately reviewed command path.
+Motion commands (Phase 3) are OFF by default: without
+WEB_BRIDGE_ENABLE_COMMANDS=1 this node has no publishers and no
+action/service clients, and every command.request is declined. When enabled,
+commands are goal-based only (Nav2 NavigateToPose, /initialpose, cancel) —
+never /cmd_vel, and never anything that talks to the SBC.
 """
 from __future__ import annotations
 
 import os
+from collections import deque
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
@@ -28,6 +32,7 @@ from rclpy.qos import (
 from sensor_msgs.msg import BatteryState, LaserScan
 
 from . import normalizers, resources
+from .commands import DISABLED_REASON, CommandExecutor
 from .throttle import Throttle
 from .ws_client import WsClient
 
@@ -67,8 +72,17 @@ class WebBridgeNode(Node):
         token = os.environ.get("WEB_BRIDGE_TOKEN", get["token"])
         self.cfg = get
 
-        self.ws = WsClient(server_url, token, get["robot_id"], on_map_wanted=self._resend_map)
+        self._command_queue: deque[dict] = deque(maxlen=16)
+        self.ws = WsClient(server_url, token, get["robot_id"],
+                           on_map_wanted=self._resend_map,
+                           on_command=self._command_queue.append)
         self.ws.start()
+
+        self._commands: CommandExecutor | None = None
+        if os.environ.get("WEB_BRIDGE_ENABLE_COMMANDS", "0") == "1":
+            self._commands = CommandExecutor(self, self.ws)
+        self._latest_base_state: dict | None = None
+        self.create_timer(0.1, self._drain_commands)
 
         self._latest_odom: Odometry | None = None
         self._latest_amcl: PoseWithCovarianceStamped | None = None
@@ -146,7 +160,9 @@ class WebBridgeNode(Node):
         self.ws.send("telemetry.diagnostics", normalizers.normalize_diagnostics(msg))
 
     def _on_base_state(self, msg) -> None:
-        self.ws.send("telemetry.base_state", normalizers.normalize_base_state(msg))
+        payload = normalizers.normalize_base_state(msg)
+        self._latest_base_state = payload
+        self.ws.send("telemetry.base_state", payload)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         signature = normalizers.map_signature(msg)
@@ -169,6 +185,21 @@ class WebBridgeNode(Node):
         # Called from the WS thread after (re)connect when the server wants
         # the map; WsClient.send is thread-safe.
         self._send_map()
+
+    def _drain_commands(self) -> None:
+        while self._command_queue:
+            data = self._command_queue.popleft()
+            if self._commands is None:
+                self.ws.send("command.ack", {
+                    "command_id": str(data.get("command_id", "")),
+                    "accepted": False, "reason": DISABLED_REASON,
+                })
+                continue
+            current_yaw = None
+            if self._latest_amcl is not None:
+                q = self._latest_amcl.pose.pose.orientation
+                current_yaw = normalizers.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+            self._commands.handle(data, self._latest_base_state, current_yaw)
 
     def _slow_tick(self) -> None:
         uptime = (self.get_clock().now() - self._start).nanoseconds / 1e9

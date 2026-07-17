@@ -49,10 +49,14 @@ whole Phase 1 development story.
 - **Localization degradation**: with Nav2/AMCL down the bridge sends
   odom-frame poses marked `localized: false`; the UI says the position is
   approximate instead of lying.
-- **Commands are reserved, not implemented**: `command.*` envelope types are
-  documented in `shared/schemas/protocol.md`; gateways reject them; the
-  Navigation widget renders disabled. Phase 3 adds them server-side with
-  acks, audit and duplicate protection.
+- **Commands are goal-based only** (Phase 3): `command.request/ack/progress/
+  result` flow browser → CommandBroker → robot and back. The broker validates,
+  audits every request to SQLite, rejects duplicates, and closes out missing
+  acks (5 s) and results (120 s) with synthesized timeouts. There is no
+  velocity teleop path anywhere in the stack, and the bridge executes
+  commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1` — otherwise it declines
+  each request with a plain-language reason. "Return to Dock" stays disabled
+  because the robot has no autonomous dock-in (only a guarded `Undock`).
 
 ## Protocol contract
 

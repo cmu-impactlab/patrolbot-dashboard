@@ -1,27 +1,89 @@
-import { Anchor, Crosshair, MapPin, Octagon } from "lucide-react";
+import { Anchor, Crosshair, MapPin, Octagon, X } from "lucide-react";
+import { useCommandStore } from "../stores/commandStore";
+import { useTelemetryStore } from "../stores/telemetryStore";
+
+const OUTCOME_COPY: Record<string, string> = {
+  succeeded: "Done",
+  failed: "Failed",
+  rejected: "Not accepted",
+  canceled: "Canceled",
+  timeout: "Timed out",
+};
 
 /**
- * Rendered but intentionally disabled: motion commands are Phase 3. There is
- * deliberately no mock-only command path — the widget must never teach users
- * interactions the real robot doesn't support yet.
+ * Goal-based commands only (send-to-destination, set-location, stop). There is
+ * deliberately no joystick/velocity control, and "Return to Dock" stays
+ * disabled because the robot has no autonomous dock-in — enabling it would
+ * teach users an interaction the robot doesn't support.
  */
 export function NavControlsWidget() {
+  const connection = useTelemetryStore((state) => state.connection);
+  const active = useCommandStore((state) => state.active);
+  const lastResult = useCommandStore((state) => state.lastResult);
+  const pickMode = useCommandStore((state) => state.pickMode);
+  const setPickMode = useCommandStore((state) => state.setPickMode);
+  const send = useCommandStore((state) => state.send);
+
+  const online = connection.state === "online";
+
   return (
     <div>
-      <div className="nav-disabled-banner">
-        Motion commands arrive in Phase 3. This dashboard is currently view-only.
-      </div>
+      {!online && (
+        <div className="nav-disabled-banner">
+          The robot is not connected — commands are unavailable.
+        </div>
+      )}
+      {online && pickMode !== "none" && (
+        <div className="nav-pick-banner">
+          {pickMode === "goal"
+            ? "Click a spot on the Live Map to send the robot there."
+            : "Click the robot's true position on the Live Map."}
+          <button className="btn" onClick={() => setPickMode("none")} title="Cancel">
+            <X size={13} /> Cancel
+          </button>
+        </div>
+      )}
+      {online && active && (
+        <div className="nav-active-banner">
+          <span className="spinner" />
+          {active.phase === "sending"
+            ? "Sending command…"
+            : active.stage ?? "The robot accepted the command."}
+          {active.distanceRemaining != null && ` — ${active.distanceRemaining.toFixed(1)} m left`}
+        </div>
+      )}
+      {online && !active && lastResult && (
+        <div className={`nav-result-banner outcome-${lastResult.outcome}`}>
+          {OUTCOME_COPY[lastResult.outcome] ?? lastResult.outcome}
+          {lastResult.detail ? ` — ${lastResult.detail}` : ""}
+        </div>
+      )}
       <div className="nav-buttons">
-        <button className="btn wide primary" disabled title="Available in Phase 3">
+        <button
+          className={`btn wide primary ${pickMode === "goal" ? "active" : ""}`}
+          disabled={!online}
+          onClick={() => setPickMode(pickMode === "goal" ? "none" : "goal")}
+          title="Pick a destination on the map"
+        >
           <MapPin size={15} /> Send Robot Here
         </button>
-        <button className="btn" disabled title="Available in Phase 3">
+        <button
+          className={`btn ${pickMode === "initialpose" ? "active" : ""}`}
+          disabled={!online}
+          onClick={() => setPickMode(pickMode === "initialpose" ? "none" : "initialpose")}
+          title="Tell the robot where it actually is on the map"
+        >
           <Crosshair size={15} /> Set Robot Location
         </button>
-        <button className="btn" disabled title="Available in Phase 3">
+        <button className="btn" disabled title="This robot has no automatic docking — drive it onto the dock manually">
           <Anchor size={15} /> Return to Dock
         </button>
-        <button className="btn wide" disabled title="Available in Phase 3">
+        <button
+          className="btn wide danger"
+          disabled={!online}
+          onClick={() => send("stop")}
+          title="Cancel navigation and stop the robot"
+        >
           <Octagon size={15} /> Stop Robot
         </button>
       </div>

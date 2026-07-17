@@ -31,6 +31,7 @@ log = logging.getLogger("hub")
 PROTECTED_TYPES = {
     "server.snapshot", "state.connection", "state.robot_status",
     "state.system_health", "event.append", "telemetry.map",
+    "command.ack", "command.progress", "command.result",
 }
 
 
@@ -65,10 +66,13 @@ class BrowserClient:
 
 class TelemetryHub:
     def __init__(self, settings: Settings, db: "Database | None" = None) -> None:
+        from ..commands.broker import CommandBroker
+
         self.settings = settings
         self.db = db
         self.robots: dict[str, RobotSession] = {}
         self.browsers: set[BrowserClient] = set()
+        self.commands = CommandBroker(self)
         self._sequence = 0
         self._monitor_task: asyncio.Task | None = None
         self._event_id_seed = 1
@@ -85,6 +89,7 @@ class TelemetryHub:
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:
+        await self.commands.shutdown()
         if self._monitor_task is not None:
             self._monitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -167,6 +172,13 @@ class TelemetryHub:
             self.publish(t, session.robot_id, data_out)
         await self._emit_events(session, events)
         self._emit_derived(session)
+
+    async def handle_robot_command_reply(self, session: RobotSession, envelope: Envelope, payload: Any) -> None:
+        session.state.record_heartbeat()
+        await self.commands.handle_robot_reply(session, envelope, payload)
+
+    async def emit_event(self, session: RobotSession, severity: str, title: str, message: str) -> None:
+        await self._emit_events(session, [session.state.add_event(severity, title, message)])
 
     # -- browser side ----------------------------------------------------------
 

@@ -85,6 +85,11 @@ ssh robot-pi 'cd patrolbot-repo/docker && docker compose up -d web-bridge'
 
 ## Safety posture
 
-The bridge is read-only: it has no publishers, no service or action clients,
-and rejects inbound `command.*` frames. Motion control continues to require
-the existing joystick path and physical E-stop.
+The bridge is read-only by default: without `WEB_BRIDGE_ENABLE_COMMANDS=1`
+it has no publishers, no service or action clients, and declines every
+inbound `command.request` with a plain-language reason. Setting the flag
+enables the goal-based command path only — Nav2 `NavigateToPose`,
+`/initialpose`, and goal cancel — with pre-checks that fail closed on
+e-stop pressed, motors off, or missing/invalid base_state. There is no
+`/cmd_vel` path. Enable the flag only with someone physically present at
+the robot; the physical E-stop remains the only emergency stop.

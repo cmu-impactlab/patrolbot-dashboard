@@ -1,7 +1,7 @@
 """Browser-facing WebSocket endpoint: /ws/ui.
 
-Browsers are read-only in Phases 1–2: any inbound frame other than a ping is
-ignored, and command.* frames are explicitly rejected until Phase 3.
+Inbound frames from browsers are ignored except command.request, which is
+routed through the CommandBroker (validated, audited, timeout-protected).
 """
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ import contextlib
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from ..protocol.envelope import ProtocolError, decode
+from ..protocol.messages import CommandRequestData
 
 log = logging.getLogger("ui_gateway")
 router = APIRouter()
@@ -24,8 +27,15 @@ async def ui_ws(websocket: WebSocket) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
-            if '"command.' in raw:
-                log.warning("browser sent a command frame; commands arrive in Phase 3 — ignored")
+            try:
+                envelope, payload = decode(raw)
+            except ProtocolError as exc:
+                log.warning("dropping bad browser frame: %s", exc)
+                continue
+            if envelope.type == "command.request" and isinstance(payload, CommandRequestData):
+                await hub.commands.handle_browser_request(envelope, payload)
+            else:
+                log.warning("ignoring unexpected browser frame: %s", envelope.type)
     except WebSocketDisconnect:
         pass
     finally:

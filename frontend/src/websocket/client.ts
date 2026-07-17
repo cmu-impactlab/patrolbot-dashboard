@@ -49,6 +49,13 @@ export class DashboardSocket {
     socket.onerror = () => socket.close();
   }
 
+  /** Send a frame if the socket is open; returns whether it was sent. */
+  send(frame: string): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(frame);
+    return true;
+  }
+
   close(): void {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);

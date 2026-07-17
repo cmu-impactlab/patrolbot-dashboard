@@ -58,12 +58,34 @@ All robot telemetry types are re-broadcast unchanged, plus:
 Connection staleness (server-side, from heartbeat age): `<3 s` online,
 `3–10 s` stale, `>10 s` (or socket closed) offline.
 
-## Reserved for Phase 3 — commands (NOT implemented)
+## Commands (Phase 3)
 
-`command.request`, `command.ack`, `command.progress`, `command.result`.
-Each carries a unique `command_id` (UUID) for correlation, and will require:
-immediate ack, progress updates, final result, timeout, audit entry, and
-duplicate-command protection. Gateways currently reject `command.*` frames.
+Browser → server → robot; responses flow back along the same path. Every
+frame carries a `command_id` (UUID minted by the browser) for correlation.
+
+| type | direction | data |
+|---|---|---|
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop, `goal?` `{x, y, yaw?}` |
+| `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
+| `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
+| `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
+
+Server-side broker rules:
+
+- A request is **rejected by the server** (synthesized `command.ack`
+  `accepted=false`) when the robot is not online, the payload is invalid,
+  `goal` is missing for a command that needs one, or the `command_id` was
+  already seen (duplicate protection).
+- Every request is written to the `command_audit` table before forwarding.
+- If no `command.ack` arrives within 5 s, or no `command.result` within 120 s,
+  the server synthesizes `command.result` `outcome=timeout` and closes out the
+  command. Late robot replies for a closed command are dropped.
+- A new `navigate_to_pose` while one is active implicitly replaces it
+  (Nav2 preemption semantics); `stop` cancels any active navigation.
+- There is **no velocity teleop command** — goal-based navigation only, by
+  design. The physical e-stop is the only emergency stop.
+- The bridge executes commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1`;
+  otherwise it acks `accepted=false` with an explanatory reason.
 
 ## Transport rules
 

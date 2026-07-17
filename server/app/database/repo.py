@@ -48,6 +48,17 @@ CREATE TABLE IF NOT EXISTS battery_samples (
     current REAL,
     charging INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS command_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    robot_id TEXT NOT NULL,
+    command_id TEXT NOT NULL UNIQUE,
+    command TEXT NOT NULL,
+    goal TEXT,
+    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    outcome TEXT,
+    detail TEXT,
+    completed_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts);
 """
@@ -133,6 +144,31 @@ class Database:
             rows = [dict(row) for row in await cur.fetchall()]
         rows.reverse()
         return rows
+
+    # -- command audit -----------------------------------------------------------
+
+    async def add_command_audit(self, robot_id: str, command_id: str, command: str,
+                                goal: dict[str, Any] | None) -> None:
+        await self.db.execute(
+            "INSERT OR IGNORE INTO command_audit (robot_id, command_id, command, goal) VALUES (?,?,?,?)",
+            (robot_id, command_id, command, json.dumps(goal) if goal else None),
+        )
+        await self.db.commit()
+
+    async def complete_command_audit(self, command_id: str, outcome: str, detail: str) -> None:
+        await self.db.execute(
+            "UPDATE command_audit SET outcome = ?, detail = ?, completed_at = datetime('now') "
+            "WHERE command_id = ?",
+            (outcome, detail, command_id),
+        )
+        await self.db.commit()
+
+    async def get_command_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        async with self.db.execute(
+            "SELECT robot_id, command_id, command, goal, requested_at, outcome, detail, completed_at "
+            "FROM command_audit ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return [dict(row) for row in await cur.fetchall()]
 
     # -- layouts -----------------------------------------------------------------
 

@@ -171,6 +171,34 @@ export interface SnapshotData {
   events: EventData[];
 }
 
+export type CommandType = "navigate_to_pose" | "set_initial_pose" | "stop";
+export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
+
+export interface CommandRequestData {
+  command_id: string;
+  command: CommandType;
+  goal?: GoalData | null;
+}
+
+export interface CommandAckData {
+  command_id: string;
+  accepted: boolean;
+  reason?: string | null;
+}
+
+export interface CommandProgressData {
+  command_id: string;
+  stage: string;
+  detail?: string | null;
+  distance_remaining?: number | null;
+}
+
+export interface CommandResultData {
+  command_id: string;
+  outcome: CommandOutcome;
+  detail?: string | null;
+}
+
 export type AnyFrame =
   | Envelope<"server.snapshot", SnapshotData>
   | Envelope<"state.connection", ConnectionData>
@@ -184,7 +212,10 @@ export type AnyFrame =
   | Envelope<"telemetry.base_state", BaseStateData>
   | Envelope<"telemetry.diagnostics", DiagnosticsData>
   | Envelope<"telemetry.resources", ResourcesData>
-  | Envelope<"telemetry.map", MapData>;
+  | Envelope<"telemetry.map", MapData>
+  | Envelope<"command.ack", CommandAckData>
+  | Envelope<"command.progress", CommandProgressData>
+  | Envelope<"command.result", CommandResultData>;
 
 /** Decode an RLE-encoded occupancy grid into a flat cell array. */
 export function decodeRle(rle: [number, number][]): Int8Array {

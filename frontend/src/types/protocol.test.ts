@@ -25,6 +25,7 @@ const KNOWN_TYPES = new Set([
   "telemetry.heartbeat", "telemetry.pose", "telemetry.lidar", "telemetry.path",
   "telemetry.battery", "telemetry.base_state", "telemetry.diagnostics",
   "telemetry.resources", "telemetry.map",
+  "command.request", "command.ack", "command.progress", "command.result",
 ]);
 
 describe("protocol fixtures", () => {

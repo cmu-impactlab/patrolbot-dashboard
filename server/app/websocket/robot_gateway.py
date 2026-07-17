@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..protocol.envelope import ProtocolError, decode, encode
-from ..protocol.messages import RESERVED_COMMAND_PREFIX, HelloAckData, HelloData
+from ..protocol.messages import COMMAND_PREFIX, HelloAckData, HelloData
 
 log = logging.getLogger("robot_gateway")
 router = APIRouter()
@@ -52,8 +52,8 @@ async def robot_ws(websocket: WebSocket) -> None:
             except ProtocolError as exc:
                 log.warning("dropping bad frame from %s: %s", session.robot_id, exc)
                 continue
-            if envelope.type.startswith(RESERVED_COMMAND_PREFIX):
-                log.warning("rejecting reserved command frame from robot: %s", envelope.type)
+            if envelope.type.startswith(COMMAND_PREFIX):
+                await hub.handle_robot_command_reply(session, envelope, payload)
                 continue
             await hub.handle_robot_message(session, envelope, payload)
     except WebSocketDisconnect:

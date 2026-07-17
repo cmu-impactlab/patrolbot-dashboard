@@ -2,11 +2,12 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, Crosshair, Layers, Maximize, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useMapQuery } from "../../api/queries";
+import { useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useUiStore, type MapLayers } from "../../stores/uiStore";
 import type { MapData } from "../../types/protocol";
 import { buildMapBitmap } from "./bitmap";
-import { fitView, followView, worldToScreen, zoomAt, type View } from "./transform";
+import { fitView, followView, screenToWorld, worldToScreen, zoomAt, type View } from "./transform";
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -137,6 +138,7 @@ export function LiveMapWidget() {
   const bitmapRef = useRef<{ key: string; bitmap: HTMLCanvasElement } | null>(null);
   const [panning, setPanning] = useState(false);
   const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
+  const pickMode = useCommandStore((state) => state.pickMode);
 
   const map = mapQuery.data ?? null;
 
@@ -206,9 +208,22 @@ export function LiveMapWidget() {
     };
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (event: React.PointerEvent) => {
+    const drag = dragRef.current;
     dragRef.current = null;
     setPanning(false);
+    // A press that barely moved is a click; when a pick mode is armed from
+    // the Navigation widget, convert it to world coordinates and send.
+    if (!drag || !viewRef.current) return;
+    const moved = Math.hypot(event.clientX - drag.sx, event.clientY - drag.sy);
+    const mode = useCommandStore.getState().pickMode;
+    if (moved > 5 || mode === "none") return;
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const [wx, wy] = screenToWorld(viewRef.current, event.clientX - rect.left, event.clientY - rect.top);
+    useCommandStore.getState().send(
+      mode === "goal" ? "navigate_to_pose" : "set_initial_pose",
+      { x: Math.round(wx * 100) / 100, y: Math.round(wy * 100) / 100, yaw: null },
+    );
   };
 
   const zoomButtons = (factor: number) => {
@@ -236,7 +251,7 @@ export function LiveMapWidget() {
     <div className="map-container">
       <canvas
         ref={canvasRef}
-        className={`map-canvas ${panning ? "panning" : ""}`}
+        className={`map-canvas ${panning ? "panning" : ""} ${pickMode !== "none" ? "picking" : ""}`}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

@@ -31,11 +31,13 @@ def utc_now() -> str:
 
 class WsClient:
     def __init__(self, server_url: str, token: str, robot_id: str,
-                 on_map_wanted: Callable[[], None]) -> None:
+                 on_map_wanted: Callable[[], None],
+                 on_command: Callable[[dict], None] | None = None) -> None:
         self.url = f"{server_url}?token={token}"
         self.server_url = server_url
         self.robot_id = robot_id
         self.on_map_wanted = on_map_wanted
+        self.on_command = on_command
         self.sequence = 0
         self.map_version = 0
         self.connected = threading.Event()
@@ -148,11 +150,11 @@ class WsClient:
                 reader.cancel()
 
     async def _drain_incoming(self, ws) -> None:
-        # Phase 3 will route command.* frames here; for now log-and-ignore.
         async for message in ws:
             try:
                 frame = json.loads(message)
             except json.JSONDecodeError:
                 continue
-            if str(frame.get("type", "")).startswith("command."):
-                log.warning("received %s but commands are not enabled (Phase 3)", frame["type"])
+            if frame.get("type") == "command.request" and self.on_command is not None:
+                # Callback runs on the WS thread — it must only enqueue.
+                self.on_command(frame.get("data", {}))

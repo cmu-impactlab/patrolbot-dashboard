@@ -133,6 +133,12 @@ button {
   color: var(--cmu-red);
 }
 
+/* An armed primary button must not paint red text on its red background. */
+.btn.primary.active {
+  color: #fff;
+  border-color: #fff;
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -424,6 +430,60 @@ button {
 }
 
 .nav-buttons .btn.wide { grid-column: span 2; }
+
+.nav-pick-banner,
+.nav-active-banner,
+.nav-result-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.nav-pick-banner {
+  background: var(--warn-bg);
+  color: var(--warn);
+  justify-content: space-between;
+}
+
+.nav-active-banner {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.nav-result-banner { background: var(--surface-2); color: var(--text); }
+.nav-result-banner.outcome-succeeded { background: var(--ok-bg); color: var(--ok); }
+.nav-result-banner.outcome-failed,
+.nav-result-banner.outcome-rejected,
+.nav-result-banner.outcome-timeout { background: var(--danger-bg); color: var(--danger); }
+
+.nav-active-banner .spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: nav-spin 0.9s linear infinite;
+}
+
+@keyframes nav-spin {
+  to { transform: rotate(360deg); }
+}
+
+.btn.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
+
+.map-canvas.picking { cursor: crosshair; }
 
 /* ---------- Widget library / dialogs ---------- */
 

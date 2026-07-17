@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "command.request",
+  "robot_id": "patrolbot-01",
+  "sequence": 1,
+  "timestamp": "2026-07-17T12:00:00.000Z",
+  "data": {
+    "command_id": "3f2b8a1c-9d4e-4f6a-b7c8-1a2b3c4d5e6f",
+    "command": "navigate_to_pose",
+    "goal": {"x": 4.25, "y": -1.5, "yaw": 1.571}
+  }
+}
