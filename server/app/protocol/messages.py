@@ -208,6 +208,7 @@ class SnapshotData(BaseModel):
     diagnostics: DiagnosticsData | None = None
     resources: ResourcesData | None = None
     path: PathData | None = None
+    last_known_pose: GoalData | None = None
     events: list[EventData] = Field(default_factory=list)
 
 

@@ -457,7 +457,8 @@ button {
 
 .nav-pick-banner,
 .nav-active-banner,
-.nav-result-banner {
+.nav-result-banner,
+.nav-gate-banner {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -466,6 +467,11 @@ button {
   font-size: 12.5px;
   font-weight: 500;
   margin-bottom: 10px;
+}
+
+.nav-gate-banner {
+  background: var(--warn-bg);
+  color: var(--warn);
 }
 
 .nav-pick-banner {
@@ -706,6 +712,22 @@ button {
 .dialog-content h2 {
   margin: 0 0 12px;
   font-size: 16px;
+}
+
+.restore-pose-facts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.restore-pose-facts span {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .library-item {

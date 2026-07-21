@@ -140,6 +140,10 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   handleResult: (data) => {
     const active = get().active;
     if (active?.commandId !== data.command_id) return;
+    // A successful "set location" satisfies the navigation gate for this session.
+    if (active.command === "set_initial_pose" && data.outcome === "succeeded") {
+      useTelemetryStore.getState().markPoseSet();
+    }
     set({
       active: null,
       lastResult: {

@@ -168,6 +168,7 @@ export interface SnapshotData {
   diagnostics?: DiagnosticsData | null;
   resources?: ResourcesData | null;
   path?: PathData | null;
+  last_known_pose?: GoalData | null;
   events: EventData[];
 }
 

@@ -18,6 +18,7 @@ const OUTCOME_COPY: Record<string, string> = {
  */
 export function NavControlsWidget() {
   const connection = useTelemetryStore((state) => state.connection);
+  const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
   const active = useCommandStore((state) => state.active);
   const lastResult = useCommandStore((state) => state.lastResult);
   const pickMode = useCommandStore((state) => state.pickMode);
@@ -28,12 +29,22 @@ export function NavControlsWidget() {
 
   const online = connection.state === "online";
   const offerResume = stoppedGoal !== null && active === null;
+  // Navigation is hard-blocked until the operator has set the robot's 2D
+  // location this session, so the robot is never sent anywhere from an
+  // unconfirmed pose.
+  const canNavigate = online && poseSetThisSession;
+  const gateHint = "Set the robot's 2D location before sending it anywhere.";
 
   return (
     <div>
       {!online && (
         <div className="nav-disabled-banner">
           The robot is not connected — commands are unavailable.
+        </div>
+      )}
+      {online && !poseSetThisSession && pickMode === "none" && (
+        <div className="nav-gate-banner">
+          <Crosshair size={13} /> {gateHint}
         </div>
       )}
       {online && pickMode !== "none" && (
@@ -64,9 +75,9 @@ export function NavControlsWidget() {
       <div className="nav-buttons">
         <button
           className={`btn wide primary ${pickMode === "goal" ? "active" : ""}`}
-          disabled={!online}
+          disabled={!canNavigate}
           onClick={() => setPickMode(pickMode === "goal" ? "none" : "goal")}
-          title="Pick a destination on the map"
+          title={canNavigate ? "Pick a destination on the map" : gateHint}
         >
           <MapPin size={15} /> Send Robot Here
         </button>
@@ -84,9 +95,9 @@ export function NavControlsWidget() {
         {offerResume ? (
           <button
             className="btn wide success"
-            disabled={!online}
+            disabled={!canNavigate}
             onClick={resume}
-            title="Send the robot back to the destination it was stopped on"
+            title={canNavigate ? "Send the robot back to the destination it was stopped on" : gateHint}
           >
             <Play size={15} /> Resume
           </button>

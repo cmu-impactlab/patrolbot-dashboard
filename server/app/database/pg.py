@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS command_audit (
     detail TEXT,
     completed_at TIMESTAMPTZ
 );
+CREATE TABLE IF NOT EXISTS robot_state (
+    robot_id TEXT PRIMARY KEY,
+    last_pose TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_samples_rec ON recording_samples(recording_id, id);
@@ -289,3 +294,18 @@ class PostgresDatabase:
         result = await self.pool.execute(
             "DELETE FROM layouts WHERE user_id = $1 AND name = $2 AND is_preset = 0", user_id, name)
         return result.endswith("1")
+
+    # -- robot state (last-known pose) -------------------------------------------
+
+    async def save_last_pose(self, robot_id: str, pose: dict[str, Any]) -> None:
+        await self.pool.execute(
+            "INSERT INTO robot_state (robot_id, last_pose, updated_at) VALUES ($1, $2, now()) "
+            "ON CONFLICT (robot_id) DO UPDATE SET last_pose = excluded.last_pose, updated_at = now()",
+            robot_id, json.dumps(pose))
+
+    async def get_last_pose(self, robot_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT last_pose FROM robot_state WHERE robot_id = $1", robot_id)
+        if row is None or row["last_pose"] is None:
+            return None
+        return json.loads(row["last_pose"])

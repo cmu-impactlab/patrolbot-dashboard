@@ -29,6 +29,7 @@ describe("telemetryStore", () => {
       pose: null, trajectory: [], events: [], mapVersion: 0,
       status: { status: "offline", detail: "" },
       connection: { state: "offline" }, wsConnected: false, frameCount: 0,
+      lastKnownPose: null, poseSetThisSession: false,
     });
   });
 
@@ -82,5 +83,35 @@ describe("telemetryStore", () => {
     const state = useTelemetryStore.getState();
     expect(state.connection.state).toBe("offline");
     expect(state.status.status).toBe("offline");
+  });
+
+  it("hydrates last-known pose and leaves the pose gate unset on snapshot", () => {
+    useTelemetryStore.setState({ poseSetThisSession: true });
+    useTelemetryStore.getState().handleFrame({
+      version: 1, type: "server.snapshot", robot_id: "patrolbot-01",
+      sequence: 1, timestamp: "2026-07-17T10:00:00Z",
+      data: { ...snapshot, last_known_pose: { x: 4, y: 5, yaw: 0.2 } },
+    });
+    const state = useTelemetryStore.getState();
+    expect(state.lastKnownPose).toEqual({ x: 4, y: 5, yaw: 0.2 });
+    expect(state.poseSetThisSession).toBe(false);
+  });
+
+  it("clears the pose gate when the socket drops and on reconnect", () => {
+    // A successful set-location satisfies the gate...
+    useTelemetryStore.getState().markPoseSet();
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(true);
+    // ...but a dropped socket ends the session.
+    useTelemetryStore.getState().setWsConnected(false);
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
+
+    // Set again, then a robot reconnect (offline -> online) resets it too.
+    useTelemetryStore.getState().markPoseSet();
+    useTelemetryStore.getState().handleFrame({
+      version: 1, type: "state.connection", robot_id: "patrolbot-01",
+      sequence: 2, timestamp: "2026-07-17T10:00:00Z",
+      data: { state: "online", last_seen: null },
+    });
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
   });
 });

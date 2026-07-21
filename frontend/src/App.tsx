@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useLayoutsQuery } from "./api/queries";
 import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
+import { RestorePosePrompt } from "./components/RestorePosePrompt";
 import { TopBar } from "./components/TopBar";
 import { useLayoutStore, type SavedLayout } from "./stores/layoutStore";
 import { useTelemetrySocket } from "./websocket/useTelemetrySocket";
@@ -24,6 +25,7 @@ function Dashboard() {
       <div className="dashboard-scroll">
         <DashboardGrid />
       </div>
+      <RestorePosePrompt />
     </div>
   );
 }

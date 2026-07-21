@@ -92,6 +92,8 @@ class TelemetryHub:
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:
+        for session in self.robots.values():
+            await self._persist_last_pose(session)
         await self.commands.shutdown()
         if self._monitor_task is not None:
             self._monitor_task.cancel()
@@ -192,12 +194,19 @@ class TelemetryHub:
     # -- browser side ----------------------------------------------------------
 
     async def browser_connected(self, websocket: WebSocket) -> BrowserClient:
+        from ..protocol.messages import GoalData
+
         client = BrowserClient(websocket)
         self.browsers.add(client)
         session = self.primary()
         robot_id = session.robot_id if session else self.settings.default_robot_id
         snapshot = (session.state.snapshot() if session else
                     RobotState(self.settings, robot_id).snapshot())
+        if self.db is not None:
+            with contextlib.suppress(Exception):
+                saved = await self.db.get_last_pose(robot_id)
+                if saved is not None:
+                    snapshot.last_known_pose = GoalData(**saved)
         client.offer(encode("server.snapshot", robot_id, self._next_seq(), snapshot), protected=True)
         return client
 
@@ -237,10 +246,25 @@ class TelemetryHub:
         else:
             new_state = "offline"
         if new_state != session.state.connection:
+            if new_state == "offline":
+                await self._persist_last_pose(session)
             events = session.state.set_connection(new_state)
             self.publish("state.connection", session.robot_id, session.state.connection_data())
             await self._emit_events(session, events)
             self._emit_derived(session)
+
+    async def _persist_last_pose(self, session: RobotSession) -> None:
+        """Save the robot's last-known pose so the next session can offer to
+        resume from where it left off. Called on the transition to offline."""
+        if self.db is None:
+            return
+        pose = session.state.pose.data
+        if pose is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.db.save_last_pose(session.robot_id, {
+                "x": pose.x, "y": pose.y, "yaw": pose.yaw,
+            })
 
     async def _monitor_loop(self) -> None:
         while True:

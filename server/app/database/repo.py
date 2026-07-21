@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS recording_samples (
     kind TEXT NOT NULL,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS robot_state (
+    robot_id TEXT PRIMARY KEY,
+    last_pose TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_samples_rec ON recording_samples(recording_id, id);
@@ -310,3 +315,24 @@ class Database:
         )
         await self.db.commit()
         return cur.rowcount > 0
+
+    # -- robot state (last-known pose) -------------------------------------------
+
+    async def save_last_pose(self, robot_id: str, pose: dict[str, Any]) -> None:
+        await self.db.execute(
+            "INSERT INTO robot_state (robot_id, last_pose, updated_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(robot_id) DO UPDATE SET last_pose = excluded.last_pose, "
+            "updated_at = datetime('now')",
+            (robot_id, json.dumps(pose)),
+        )
+        await self.db.commit()
+
+    async def get_last_pose(self, robot_id: str) -> dict[str, Any] | None:
+        async with self.db.execute(
+            "SELECT last_pose FROM robot_state WHERE robot_id = ?", (robot_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or row["last_pose"] is None:
+            return None
+        return json.loads(row["last_pose"])

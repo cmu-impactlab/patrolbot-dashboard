@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="PATROLBOT_TEST_PG_URL not se
 async def _wipe(db) -> None:
     async with db.pool.acquire() as conn:
         for table in ("recording_samples", "recordings", "command_audit",
-                      "battery_samples", "events", "layouts", "users"):
+                      "battery_samples", "events", "layouts", "users", "robot_state"):
             await conn.execute(f"DELETE FROM {table}")
 
 
@@ -73,6 +73,12 @@ async def test_repo_round_trips():
         assert audit[0]["outcome"] == "succeeded"
 
         await db.add_battery_sample("r1", "2026-07-17T00:00:00Z", 24.5, 80.0, -1.5, False)
+
+        assert await db.get_last_pose("r1") is None
+        await db.save_last_pose("r1", {"x": 1.5, "y": -2.0, "yaw": 0.5})
+        assert await db.get_last_pose("r1") == {"x": 1.5, "y": -2.0, "yaw": 0.5}
+        await db.save_last_pose("r1", {"x": 3.0, "y": 4.0, "yaw": None})  # upsert
+        assert await db.get_last_pose("r1") == {"x": 3.0, "y": 4.0, "yaw": None}
     finally:
         await db.close()
 

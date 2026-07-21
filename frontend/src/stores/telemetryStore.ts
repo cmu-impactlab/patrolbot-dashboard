@@ -6,6 +6,7 @@ import type {
   ConnectionData,
   DiagnosticsData,
   EventData,
+  GoalData,
   LidarData,
   PathData,
   PoseData,
@@ -56,11 +57,16 @@ export interface TelemetryState {
   lastFrameAt: string | null;
   /** Alert ids the user has read; read alerts move to the "Seen" section. */
   seenEventIds: number[];
+  /** Robot's last-known pose persisted server-side when it last went offline. */
+  lastKnownPose: GoalData | null;
+  /** Whether a 2D location has been set this session (gates navigation). */
+  poseSetThisSession: boolean;
 
   setWsConnected: (connected: boolean) => void;
   handleFrame: (frame: AnyFrame) => void;
   markSeen: (id: number) => void;
   markAllSeen: () => void;
+  markPoseSet: () => void;
 }
 
 function safeStorage(): Storage | null {
@@ -138,6 +144,8 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   frameCount: 0,
   lastFrameAt: null,
   seenEventIds: loadSeenIds(),
+  lastKnownPose: null,
+  poseSetThisSession: false,
 
   setWsConnected: (connected) =>
     set(
@@ -147,8 +155,12 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             wsConnected: false,
             connection: { state: "offline", last_seen: get().connection.last_seen },
             status: initialStatus,
+            // A dropped socket ends the session; the pose must be set again.
+            poseSetThisSession: false,
           },
     ),
+
+  markPoseSet: () => set({ poseSetThisSession: true }),
 
   markSeen: (id) => {
     const seen = get().seenEventIds;
@@ -184,10 +196,13 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           path: data.path ?? null,
           mapVersion: data.map_version,
           events: data.events,
+          lastKnownPose: data.last_known_pose ?? null,
           // A snapshot starts a fresh session — drop lines drawn for the
-          // previous robot/connection instead of mixing them in.
+          // previous robot/connection instead of mixing them in, and require
+          // the 2D location to be set again before navigating.
           trajectory: [],
           lidar: null,
+          poseSetThisSession: false,
         });
         break;
       }
@@ -195,8 +210,16 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         const wasOffline = get().connection.state === "offline";
         if (frame.data.state === "online" && wasOffline) {
           // The (re)connecting robot may be a different one (mock <-> real):
-          // clear per-robot overlays; live frames repopulate them.
-          set({ ...bump, connection: frame.data, trajectory: [], lidar: null, path: null });
+          // clear per-robot overlays; live frames repopulate them. A new
+          // connection is a new session, so the pose gate resets.
+          set({
+            ...bump,
+            connection: frame.data,
+            trajectory: [],
+            lidar: null,
+            path: null,
+            poseSetThisSession: false,
+          });
         } else {
           set({ ...bump, connection: frame.data });
         }
