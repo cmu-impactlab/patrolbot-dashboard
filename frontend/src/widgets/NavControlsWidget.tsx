@@ -26,6 +26,7 @@ export function NavControlsWidget() {
   const setPickMode = useCommandStore((state) => state.setPickMode);
   const stop = useCommandStore((state) => state.stop);
   const resume = useCommandStore((state) => state.resume);
+  const cancel = useCommandStore((state) => state.cancel);
 
   const online = connection.state === "online";
   const offerResume = stoppedGoal !== null && active === null;
@@ -93,14 +94,42 @@ export function NavControlsWidget() {
           <Anchor size={15} /> Return to Dock
         </button>
         {offerResume ? (
-          <button
-            className="btn wide success"
-            disabled={!canNavigate}
-            onClick={resume}
-            title={canNavigate ? "Send the robot back to the destination it was stopped on" : gateHint}
-          >
-            <Play size={15} /> Resume
-          </button>
+          <>
+            <button
+              className="btn success"
+              disabled={!canNavigate}
+              onClick={resume}
+              title={canNavigate ? "Send the robot back to the destination it was stopped on" : gateHint}
+            >
+              <Play size={15} /> Resume
+            </button>
+            <button
+              className="btn"
+              onClick={cancel}
+              title="Discard the paused destination — the robot stays put"
+            >
+              <X size={15} /> Cancel
+            </button>
+          </>
+        ) : active ? (
+          <>
+            <button
+              className="btn danger"
+              disabled={!online}
+              onClick={stop}
+              title="Pause the robot here; you can resume afterwards"
+            >
+              <Octagon size={15} /> Stop
+            </button>
+            <button
+              className="btn"
+              disabled={!online}
+              onClick={cancel}
+              title="Cancel the destination and stop the robot (no resume)"
+            >
+              <X size={15} /> Cancel
+            </button>
+          </>
         ) : (
           <button
             className="btn wide danger"

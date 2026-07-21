@@ -39,6 +39,7 @@ interface CommandState {
   send: (command: CommandType, goal?: GoalData) => void;
   stop: () => void;
   resume: () => void;
+  cancel: () => void;
   handleAck: (data: CommandAckData) => void;
   handleProgress: (data: CommandProgressData) => void;
   handleResult: (data: CommandResultData) => void;
@@ -72,6 +73,14 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     if (!goal) return;
     set({ stoppedGoal: null });
     get().send("navigate_to_pose", goal);
+  },
+
+  cancel: () => {
+    // Abandon the destination. If the robot is still driving, halt it; unlike
+    // Stop, this does not remember the goal, so no Resume is offered.
+    const wasActive = get().active !== null;
+    set({ stoppedGoal: null });
+    if (wasActive) get().send("stop");
   },
 
   send: (command, goal) => {
