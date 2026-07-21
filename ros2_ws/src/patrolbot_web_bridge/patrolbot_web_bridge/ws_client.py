@@ -29,6 +29,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _json_default(obj):
+    """Coerce numpy scalars/arrays that leak in from ROS messages (e.g. a
+    covariance-derived bool_ in the pose payload) to native Python types.
+    Duck-typed so the bridge needs no hard numpy import."""
+    item = getattr(obj, "item", None)
+    if callable(item):
+        return obj.item()
+    tolist = getattr(obj, "tolist", None)
+    if callable(tolist):
+        return obj.tolist()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 class WsClient:
     def __init__(self, server_url: str, token: str, robot_id: str,
                  on_map_wanted: Callable[[], None],
@@ -66,7 +79,7 @@ class WsClient:
             frame = json.dumps({
                 "version": 1, "type": type_, "robot_id": self.robot_id,
                 "sequence": self.sequence, "timestamp": utc_now(), "data": data,
-            }, separators=(",", ":"))
+            }, separators=(",", ":"), default=_json_default)
             if len(self._queue) >= QUEUE_LIMIT:
                 # Drop the oldest unprotected frame; give up only if the queue
                 # is somehow all-protected.

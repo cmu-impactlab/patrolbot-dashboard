@@ -39,9 +39,11 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> 
     if amcl_pose is not None:
         pose = amcl_pose.pose.pose
         covariance = list(amcl_pose.pose.covariance)
-        # x, y and yaw variance terms of the 6x6 covariance.
-        trace = covariance[0] + covariance[7] + covariance[35]
-        localized = trace < covariance_warn
+        # x, y and yaw variance terms of the 6x6 covariance. The covariance
+        # array is numpy-backed, so coerce to native Python types — a numpy
+        # bool_ (or float64) here would break json.dumps downstream.
+        trace = float(covariance[0] + covariance[7] + covariance[35])
+        localized = bool(trace < covariance_warn)
         frame = "map"
     elif odom is not None:
         pose = odom.pose.pose

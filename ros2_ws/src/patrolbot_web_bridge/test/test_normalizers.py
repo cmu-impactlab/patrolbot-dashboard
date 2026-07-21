@@ -4,6 +4,8 @@ import math
 import pathlib
 from types import SimpleNamespace as NS
 
+import pytest
+
 from patrolbot_web_bridge import normalizers
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[4] / "shared" / "schemas" / "fixtures"
@@ -46,6 +48,27 @@ def test_pose_uncertain_when_covariance_high():
     pose = normalizers.normalize_pose(make_amcl(var=0.5), make_odom())
     assert pose["localized"] is False
     assert pose["covariance_trace"] > 0.25
+
+
+def test_pose_payload_is_json_serializable_with_numpy_covariance():
+    """The real robot's AMCL covariance is numpy-backed; the derived
+    `localized` used to be a numpy bool_, which json.dumps cannot encode."""
+    np = pytest.importorskip("numpy")
+    amcl = make_amcl(var=0.01)
+    amcl.pose.covariance = np.array(amcl.pose.covariance, dtype=np.float64)
+    pose = normalizers.normalize_pose(amcl, make_odom())
+    assert type(pose["localized"]) is bool
+    # Must not raise "Object of type bool_ is not JSON serializable".
+    assert json.loads(json.dumps(pose))["localized"] is True
+
+
+def test_ws_client_json_default_coerces_numpy():
+    np = pytest.importorskip("numpy")
+    from patrolbot_web_bridge.ws_client import _json_default
+
+    assert _json_default(np.bool_(True)) is True
+    assert _json_default(np.float64(1.5)) == 1.5
+    assert _json_default(np.array([1, 2])) == [1, 2]
 
 
 def test_scan_decimation_and_no_returns():
