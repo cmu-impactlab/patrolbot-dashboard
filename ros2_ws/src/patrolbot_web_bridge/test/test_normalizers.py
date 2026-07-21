@@ -71,6 +71,25 @@ def test_ws_client_json_default_coerces_numpy():
     assert _json_default(np.array([1, 2])) == [1, 2]
 
 
+def test_scan_mirror_reverses_angular_direction():
+    """An upside-down laser (180deg roll) maps (r, theta) -> (r, -theta):
+    negate angle_min and angle_increment, ranges keep their order."""
+    scan = NS(angle_min=-math.pi / 2, angle_increment=0.01, range_min=0.05,
+              range_max=8.0, ranges=[1.0, 2.0, 3.0, 4.0])
+    plain = normalizers.normalize_scan(scan, max_points=360)
+    mirrored = normalizers.normalize_scan(scan, max_points=360, mirror=True)
+    assert mirrored["angle_min"] == -plain["angle_min"]
+    assert mirrored["angle_increment"] == -plain["angle_increment"]
+    assert mirrored["ranges"] == plain["ranges"]  # index order unchanged
+
+
+def test_scan_angle_offset_shifts_start():
+    scan = NS(angle_min=0.0, angle_increment=0.01, range_min=0.05,
+              range_max=8.0, ranges=[1.0, 2.0])
+    shifted = normalizers.normalize_scan(scan, max_points=360, angle_offset=1.0)
+    assert shifted["angle_min"] == 1.0
+
+
 def test_scan_decimation_and_no_returns():
     n = 720
     scan = NS(angle_min=-math.pi / 2, angle_increment=math.pi / n,

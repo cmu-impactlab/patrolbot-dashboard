@@ -66,6 +66,13 @@ class WebBridgeNode(Node):
             ("path_max_points", 200),
             ("map_name", "PatrolBot map"),
             ("covariance_warn_threshold", 0.25),
+            # Laser mounting relative to base_link. The dashboard projects the
+            # scan from the robot's base pose (it doesn't consume /tf), so a
+            # non-trivial laser mount must be applied here. scan_mirror handles
+            # an upside-down laser (180deg roll: rays (r, theta) -> (r, -theta));
+            # scan_angle_offset (radians) handles a laser mounted rotated in yaw.
+            ("scan_mirror", False),
+            ("scan_angle_offset", 0.0),
             # OFF by default: the 7 MB /map starves /scan when streamed off
             # the Pi (safety watchdog trips). The dashboard server serves a
             # local copy instead (PATROLBOT_STATIC_MAP_YAML).
@@ -148,7 +155,10 @@ class WebBridgeNode(Node):
     def _on_scan(self, msg: LaserScan) -> None:
         if self._scan_throttle.ready():
             self.ws.send("telemetry.lidar",
-                         normalizers.normalize_scan(msg, int(self.cfg["scan_max_points"])))
+                         normalizers.normalize_scan(
+                             msg, int(self.cfg["scan_max_points"]),
+                             angle_offset=float(self.cfg["scan_angle_offset"]),
+                             mirror=bool(self.cfg["scan_mirror"])))
 
     def _on_plan(self, msg: Path) -> None:
         if not self._path_throttle.ready():

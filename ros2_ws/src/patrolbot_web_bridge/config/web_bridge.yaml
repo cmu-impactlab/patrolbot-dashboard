@@ -27,5 +27,12 @@
     path_max_points: 200
     map_name: "CMU-Q Floor 1"
 
+    # Laser mounting. This robot's laser is mounted upside-down: the
+    # base_link -> laser_frame transform is a 180deg roll (RPY [pi, 0, 0]), so
+    # the scan must be mirrored to read correctly on the map. scan_angle_offset
+    # (radians) is for lasers mounted rotated in yaw instead.
+    scan_mirror: true
+    scan_angle_offset: 0.0
+
     # Pose covariance trace above which the UI shows "location uncertain".
     covariance_warn_threshold: 0.25

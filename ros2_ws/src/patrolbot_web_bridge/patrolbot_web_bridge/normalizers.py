@@ -67,16 +67,32 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> 
     }
 
 
-def normalize_scan(scan: Any, max_points: int = 360) -> dict:
+def normalize_scan(scan: Any, max_points: int = 360,
+                   angle_offset: float = 0.0, mirror: bool = False) -> dict:
+    """Decimate the scan and express its angles in the robot's base frame.
+
+    The dashboard projects points from the robot's base pose without /tf, so the
+    laser mounting is applied here. `mirror` handles an upside-down laser (a
+    180deg roll maps ray (r, theta) -> (r, -theta), i.e. reverse the angular
+    direction); `angle_offset` (radians) handles a yaw-mounted laser. Ranges
+    keep their index order — only the reported angles change.
+    """
     ranges = list(scan.ranges)
     stride = max(1, math.ceil(len(ranges) / max_points))
     decimated = [_finite(r, 2) for r in ranges[::stride]]
     # Values outside the sensor's valid band are no-returns.
     lo, hi = scan.range_min, scan.range_max
     decimated = [r if r is not None and lo <= r <= hi else None for r in decimated]
+
+    angle_min = scan.angle_min
+    angle_increment = scan.angle_increment * stride
+    if mirror:
+        angle_min = -angle_min
+        angle_increment = -angle_increment
+    angle_min += angle_offset
     return {
-        "angle_min": round(scan.angle_min, 6),
-        "angle_increment": round(scan.angle_increment * stride, 6),
+        "angle_min": round(angle_min, 6),
+        "angle_increment": round(angle_increment, 6),
         "ranges": decimated,
     }
 
