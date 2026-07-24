@@ -42,8 +42,15 @@ async def _discover(issuer: str) -> dict:
 
 
 def _role_for(settings: Settings, username: str) -> str:
+    """Command authorization is read-only by default: an authenticated user is
+    an observer unless explicitly listed as an operator or administrator."""
     admins = {name.strip() for name in settings.admin_usernames.split(",") if name.strip()}
-    return "administrator" if username in admins else "operator"
+    operators = {name.strip() for name in settings.operator_usernames.split(",") if name.strip()}
+    if username in admins:
+        return "administrator"
+    if username in operators:
+        return "operator"
+    return "observer"
 
 
 def _is_allowed(settings: Settings, username: str) -> bool:
@@ -51,6 +58,19 @@ def _is_allowed(settings: Settings, username: str) -> bool:
     a valid Andrew ID is not enough — it must also be on the list."""
     allowed = {name.strip() for name in settings.allowed_usernames.split(",") if name.strip()}
     return not allowed or username in allowed
+
+
+def _domain_ok(settings: Settings, email: str | None, email_verified: object) -> bool:
+    """Google returns the Workspace email; require a *verified* address ending
+    in "@<oidc_email_domain>". The leading "@" anchor rejects look-alikes such
+    as ...@notandrew.cmu.edu and ...@andrew.cmu.edu.evil.com."""
+    domain = settings.oidc_email_domain.strip().lower()
+    if not domain:
+        return True  # check disabled (production startup refuses this — see main.py)
+    if not email:
+        return False
+    verified = email_verified is True or str(email_verified).lower() == "true"
+    return verified and email.strip().lower().endswith("@" + domain)
 
 
 _DENIED_PAGE = """<!doctype html><html><head><title>Not authorized</title>
@@ -83,13 +103,17 @@ async def login(request: Request):
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        # Force Google's account chooser so a shared machine can't silently
+        # reuse a previous session (matches the CMU-Q oauth-example).
+        "prompt": "select_account",
     })
     response = RedirectResponse(f"{config['authorization_endpoint']}?{query}")
     # The verifier/state round-trip through a short-lived signed cookie, so
     # no server-side state is needed.
     response.set_cookie("patrolbot_oidc", issue(settings.session_secret,
                         {"state": state, "verifier": verifier}, _STATE_TTL_S),
-                        httponly=True, max_age=_STATE_TTL_S, path="/auth")
+                        httponly=True, secure=settings.cookie_secure, samesite="lax",
+                        max_age=_STATE_TTL_S, path="/auth")
     return response
 
 
@@ -117,7 +141,17 @@ async def callback(request: Request, code: str = "", state: str = ""):
         userinfo_response.raise_for_status()
         info = userinfo_response.json()
 
-    username = info.get("preferred_username") or info.get("email") or info["sub"]
+    # Access gate: a verified email in the configured domain. This is the
+    # primary authorization (the FastAPI equivalent of the oauth-example's
+    # request.user.email.endswith("@andrew.cmu.edu") check).
+    email = info.get("email")
+    if not _domain_ok(settings, email, info.get("email_verified")):
+        shown = email or info.get("preferred_username") or info.get("sub", "unknown")
+        log.warning("user %s rejected: email not a verified %s address",
+                    shown, settings.oidc_email_domain)
+        return HTMLResponse(_DENIED_PAGE.format(username=shown), status_code=403)
+
+    username = info.get("preferred_username") or email or info["sub"]
     # Andrew IDs may arrive as andrewid@andrew.cmu.edu — compare the local part.
     username = username.split("@", 1)[0].lower()
     display_name = info.get("name") or username
@@ -127,11 +161,13 @@ async def callback(request: Request, code: str = "", state: str = ""):
     user_id = await request.app.state.db.get_or_create_user(username, display_name)
     log.info("user %s logged in (id=%s)", username, user_id)
 
+    # A fresh session cookie is issued here (session rotation on login).
     response = RedirectResponse("/")
     response.set_cookie(COOKIE_NAME, issue(settings.session_secret, {
         "id": user_id, "username": username, "display_name": display_name,
         "role": _role_for(settings, username),
-    }, settings.session_ttl_s), httponly=True, max_age=settings.session_ttl_s, path="/")
+    }, settings.session_ttl_s), httponly=True, secure=settings.cookie_secure,
+        samesite="lax", max_age=settings.session_ttl_s, path="/")
     response.delete_cookie("patrolbot_oidc", path="/auth")
     return response
 

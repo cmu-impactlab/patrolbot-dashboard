@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .api import health, history, layouts, recordings, snapshot
 from .authentication import oidc
 from .database import create_database
-from .settings import Settings
+from .settings import Settings, validate_startup
 from .telemetry.hub import TelemetryHub
 from .websocket import robot_gateway, ui_gateway
 
@@ -21,6 +21,7 @@ STATIC_CANDIDATES = ("static", "../frontend/dist")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
+    validate_startup(settings)  # fail closed on insecure production config
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -69,10 +69,14 @@ def make_idp() -> FastAPI:
     def userinfo(request: Request):
         if request.headers.get("Authorization") != "Bearer test-access":
             return JSONResponse({"error": "bad token"}, status_code=401)
+        email = idp.state.email or f"{idp.state.username}@andrew.cmu.edu"
         return {"sub": "abc123", "preferred_username": idp.state.username,
-                "name": "Test User", "email": f"{idp.state.username}@andrew.cmu.edu"}
+                "name": "Test User", "email": email,
+                "email_verified": idp.state.email_verified}
 
     idp.state.username = "yousefh"
+    idp.state.email = None  # None -> {username}@andrew.cmu.edu
+    idp.state.email_verified = True
     return idp
 
 
@@ -81,8 +85,11 @@ class Idp:
         self.url = url
         self.app = app
 
-    def sign_in_as(self, username: str) -> None:
+    def sign_in_as(self, username: str, email: str | None = None,
+                   email_verified: bool = True) -> None:
         self.app.state.username = username
+        self.app.state.email = email
+        self.app.state.email_verified = email_verified
 
 
 @pytest.fixture()
@@ -156,7 +163,8 @@ def test_full_oidc_flow(tmp_path, idp):
 def test_allowlist(tmp_path, idp):
     settings = oidc_settings(tmp_path, idp,
                              allowed_usernames="yousefh,efeoflus",
-                             admin_usernames="yousefh")
+                             admin_usernames="yousefh",
+                             operator_usernames="efeoflus")
     with TestClient(create_app(settings)) as client:
         # Both listed Andrew IDs get in with the right roles.
         idp.sign_in_as("yousefh")
@@ -179,6 +187,25 @@ def test_allowlist(tmp_path, idp):
         assert client.get("/auth/me").status_code == 401
 
 
+def test_single_user_allowlist_admits_only_yousefh(tmp_path, idp):
+    # Production intent: only yousefh@andrew.cmu.edu may sign in, as an admin.
+    settings = oidc_settings(tmp_path, idp, allowed_usernames="yousefh",
+                             admin_usernames="yousefh")
+    with TestClient(create_app(settings)) as client:
+        # yousefh gets in as administrator.
+        idp.sign_in_as("yousefh", email="yousefh@andrew.cmu.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["role"] == "administrator"
+        client.get("/auth/logout")
+
+        # Another perfectly valid andrew.cmu.edu account is refused — no session.
+        idp.sign_in_as("efeoflus", email="efeoflus@andrew.cmu.edu")
+        denied = sign_in(client)
+        assert denied.status_code == 403
+        assert "efeoflus" in denied.text
+        assert client.get("/auth/me").status_code == 401
+
+
 def test_email_style_username_is_normalized(tmp_path, idp):
     settings = oidc_settings(tmp_path, idp, allowed_usernames="yousefh")
     with TestClient(create_app(settings)) as client:
@@ -193,3 +220,143 @@ def test_callback_rejects_forged_state(tmp_path, idp):
         client.get("/auth/login", follow_redirects=False)
         assert client.get("/auth/callback?code=test-code&state=forged",
                           follow_redirects=False).status_code == 400
+
+
+# -- Google domain restriction (@andrew.cmu.edu) ---------------------------
+
+def test_login_uses_select_account_prompt(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        login = client.get("/auth/login", follow_redirects=False)
+        query = parse_qs(urlparse(login.headers["location"]).query)
+        assert query["prompt"] == ["select_account"]
+
+
+def test_accepts_configured_domain(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)  # default domain andrew.cmu.edu
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("newperson", email="newperson@andrew.cmu.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["username"] == "newperson"
+
+
+def test_rejects_foreign_domain(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("outsider", email="outsider@gmail.com")
+        denied = sign_in(client)
+        assert denied.status_code == 403
+        assert "Not authorized" in denied.text
+        assert client.get("/auth/me").status_code == 401  # no session issued
+
+
+@pytest.mark.parametrize("email", [
+    "attacker@notandrew.cmu.edu",       # superdomain look-alike
+    "attacker@andrew.cmu.edu.evil.com",  # subdomain suffix look-alike
+    "attackerandrew.cmu.edu",            # missing @, endswith-only bypass attempt
+    "attacker@ANDREW.CMU.EDU.evil.com",  # case variant of the above
+])
+def test_rejects_lookalike_domains(tmp_path, idp, email):
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("attacker", email=email)
+        assert sign_in(client).status_code == 403
+        assert client.get("/auth/me").status_code == 401
+
+
+def test_domain_check_is_case_insensitive(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("mixedcase", email="MixedCase@Andrew.CMU.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["username"] == "mixedcase"
+
+
+def test_requires_verified_email(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("spoofer", email="spoofer@andrew.cmu.edu",
+                       email_verified=False)
+        assert sign_in(client).status_code == 403
+        assert client.get("/auth/me").status_code == 401
+
+
+# -- Roles: read-only (observer) by default --------------------------------
+
+def test_default_role_is_observer(tmp_path, idp):
+    # No admin_usernames / operator_usernames configured: a valid andrew.cmu.edu
+    # user gets in, but as a read-only observer.
+    settings = oidc_settings(tmp_path, idp)
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("viewer", email="viewer@andrew.cmu.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["role"] == "observer"
+
+
+def test_operator_username_grants_operator(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp, operator_usernames="driver")
+    with TestClient(create_app(settings)) as client:
+        idp.sign_in_as("driver", email="driver@andrew.cmu.edu")
+        assert sign_in(client).status_code == 307
+        assert client.get("/auth/me").json()["role"] == "operator"
+
+
+# -- Fail-closed production startup & secure cookies -----------------------
+
+def _prod_settings(tmp_path, **overrides) -> Settings:
+    base = dict(
+        database_path=str(tmp_path / "t.db"),
+        environment="production", auth_mode="oidc",
+        session_secret="a-real-secret", robot_token="a-real-robot-token",
+        oidc_issuer="https://accounts.google.com", oidc_client_id="cid",
+        oidc_client_secret="csecret",
+        oidc_redirect_url="https://dash.example.edu/auth/callback",
+        oidc_email_domain="andrew.cmu.edu",
+        allowed_origins="https://dash.example.edu",
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_production_startup_ok(tmp_path):
+    create_app(_prod_settings(tmp_path))  # a complete secure config must not raise
+
+
+def test_development_tolerates_dev_defaults(tmp_path):
+    # Default environment=development: dev secrets are not fatal.
+    create_app(Settings(database_path=str(tmp_path / "t.db"), auth_mode="oidc",
+                        session_secret="dev-session-secret"))
+
+
+@pytest.mark.parametrize("overrides,needle", [
+    ({"session_secret": "dev-session-secret"}, "SESSION_SECRET"),
+    ({"robot_token": "dev-token"}, "ROBOT_TOKEN"),
+    ({"allowed_origins": ""}, "ALLOWED_ORIGINS"),
+    ({"oidc_client_secret": ""}, "OIDC_CLIENT_SECRET"),
+    ({"auth_mode": "local"}, "AUTH_MODE"),
+    ({"oidc_email_domain": "", "allowed_usernames": ""}, "sign in"),
+    ({"oidc_redirect_url": "http://dash.example.edu/auth/callback"}, "https"),
+])
+def test_production_fails_closed(tmp_path, overrides, needle):
+    with pytest.raises(RuntimeError, match=needle):
+        create_app(_prod_settings(tmp_path, **overrides))
+
+
+def test_cookie_secure_property():
+    assert Settings(environment="production").cookie_secure is True
+    assert Settings(oidc_redirect_url="https://x/cb").cookie_secure is True
+    assert Settings().cookie_secure is False
+
+
+def test_session_cookie_flags(tmp_path, idp):
+    settings = oidc_settings(tmp_path, idp)  # dev over http
+    with TestClient(create_app(settings)) as client:
+        login = client.get("/auth/login", follow_redirects=False)
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        cb = client.get(f"/auth/callback?code=test-code&state={state}",
+                        follow_redirects=False)
+        cookies = " ".join(cb.headers.get_list("set-cookie")).lower()
+        assert "httponly" in cookies
+        assert "samesite=lax" in cookies
+        # Dev over http: NOT Secure, so the http TestClient still returns it.
+        assert "secure" not in cookies
