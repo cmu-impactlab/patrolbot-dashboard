@@ -28,6 +28,15 @@ def test_unknown_type_rejected():
         decode(frame)
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_pose_rejects_non_finite(bad):
+    frame = encode("telemetry.pose", "patrolbot-01", 1, {
+        "x": bad, "y": 0.0, "yaw": 0.0, "linear_velocity": 0.0, "angular_velocity": 0.0,
+    })
+    with pytest.raises(ProtocolError):
+        decode(frame)
+
+
 def test_wrong_version_rejected():
     frame = json.dumps({"version": 2, "type": "telemetry.heartbeat", "robot_id": "r", "sequence": 1,
                         "timestamp": "2026-07-17T00:00:00Z", "data": {"uptime_s": 1.0}})

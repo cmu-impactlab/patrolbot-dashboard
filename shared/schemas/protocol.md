@@ -65,7 +65,7 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop, `goal?` `{x, y, yaw?}` |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |

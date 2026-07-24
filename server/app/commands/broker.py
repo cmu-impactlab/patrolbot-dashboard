@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -56,6 +57,8 @@ class ActiveCommand:
 class CommandBroker:
     def __init__(self, hub: "TelemetryHub", ack_timeout_s: float = 5.0,
                  result_timeout_s: float = 120.0) -> None:
+        from .lease import OperatorLease, RateLimiter
+
         self.hub = hub
         self.ack_timeout_s = ack_timeout_s
         self.result_timeout_s = result_timeout_s
@@ -63,30 +66,80 @@ class CommandBroker:
         # Every command_id ever seen (bounded) — duplicate protection must
         # cover finished commands too, or a replayed frame re-runs them.
         self._seen: OrderedDict[str, None] = OrderedDict()
+        self.lease = OperatorLease()
+        self.rate = RateLimiter(hub.settings.command_rate_per_min)
 
     # -- browser side ---------------------------------------------------------
 
-    async def handle_browser_request(self, envelope: Envelope, payload: CommandRequestData) -> None:
+    async def handle_browser_request(self, client: Any, envelope: Envelope,
+                                     payload: CommandRequestData) -> None:
         command_id = payload.command_id
-        if command_id in self._seen:
-            self._reject(envelope.robot_id, command_id, "Duplicate command — already received.")
+        robot_id = envelope.robot_id
+        user = getattr(client, "user", None)
+
+        command = payload.command
+
+        # 1. Role gate: command authorization is read-only by default. Reject
+        #    observers (and any unauthenticated client) before touching state.
+        if user is None or not getattr(user, "can_command", False):
+            await self._reject_audited(client, robot_id, command_id, command,
+                                       "Your account has read-only access — "
+                                       "you cannot send robot commands.")
+            return
+
+        # 2. Per-operator rate limit — a stuck or hostile client cannot flood
+        #    the robot with commands.
+        if not self.rate.allow(user.id):
+            await self._reject_audited(client, robot_id, command_id, command,
+                                       "Too many commands too quickly — "
+                                       "wait a moment and try again.")
+            return
+
+        # 3. Single-operator lease: a different operator must explicitly take
+        #    over before they can send, stop, resume, or cancel.
+        if not self.lease.can_command(robot_id, user.id):
+            holder = self.lease.holder(robot_id)
+            if not payload.takeover:
+                who = holder.username if holder else "another operator"
+                await self._reject_audited(client, robot_id, command_id, command,
+                                           f"{who} is currently in control of the robot. "
+                                           "Take over to send commands.")
+                return
+            log.info("operator %s took over control of %s from %s", user.username,
+                     robot_id, holder.username if holder else "-")
+        self.lease.acquire(robot_id, user.id, user.username, client)
+
+        # 4. Duplicate protection — in-memory fast path plus a DB lookup so a
+        #    replayed command_id is caught even after a server restart.
+        if command_id in self._seen or (
+                self.hub.db is not None and await self.hub.db.command_recorded(command_id)):
+            await self._reject_audited(client, robot_id, command_id, command,
+                                       "Duplicate command — already received.")
             return
         self._remember(command_id)
 
-        if payload.command in GOAL_REQUIRED and payload.goal is None:
-            self._reject(envelope.robot_id, command_id, "This command needs a destination.")
-            return
+        if command in GOAL_REQUIRED:
+            if payload.goal is None:
+                await self._reject_audited(client, robot_id, command_id, command,
+                                           "This command needs a destination.")
+                return
+            reason = self._validate_goal(robot_id, payload.goal)
+            if reason is not None:
+                await self._reject_audited(client, robot_id, command_id, command, reason)
+                return
 
         session = self.hub.robots.get(envelope.robot_id)
         if session is None or session.websocket is None or session.state.connection != "online":
-            self._reject(envelope.robot_id, command_id,
-                         "The robot is not connected right now — try again once it is online.")
+            await self._reject_audited(client, robot_id, command_id, command,
+                                       "The robot is not connected right now — "
+                                       "try again once it is online.")
             return
 
         if self.hub.db is not None:
             await self.hub.db.add_command_audit(
-                envelope.robot_id, command_id, payload.command,
+                envelope.robot_id, command_id, command,
                 payload.goal.model_dump() if payload.goal else None,
+                **self._identity(client, robot_id),
             )
 
         entry = ActiveCommand(command_id=command_id, command=payload.command,
@@ -131,6 +184,29 @@ class CommandBroker:
 
     # -- internals ------------------------------------------------------------
 
+    def _validate_goal(self, robot_id: str, goal: Any) -> str | None:
+        """Reject non-finite or out-of-bounds coordinates before they reach
+        Nav2. Bounds come from the robot's occupancy map when it has streamed
+        one; otherwise a coarse sanity limit applies."""
+        if not (math.isfinite(goal.x) and math.isfinite(goal.y)):
+            return "The destination coordinates are invalid."
+        if goal.yaw is not None and not math.isfinite(goal.yaw):
+            return "The destination heading is invalid."
+
+        session = self.hub.robots.get(robot_id)
+        map_data = session.state.map.data if session is not None else None
+        if map_data is not None:
+            min_x, min_y = map_data.origin.x, map_data.origin.y
+            max_x = min_x + map_data.width * map_data.resolution
+            max_y = min_y + map_data.height * map_data.resolution
+            if not (min_x <= goal.x <= max_x and min_y <= goal.y <= max_y):
+                return "That destination is outside the known map."
+        else:
+            limit = self.hub.settings.max_map_coordinate_m
+            if abs(goal.x) > limit or abs(goal.y) > limit:
+                return "That destination is too far away to be valid."
+        return None
+
     def _remember(self, command_id: str) -> None:
         self._seen[command_id] = None
         while len(self._seen) > 512:
@@ -140,6 +216,27 @@ class CommandBroker:
         self.hub.publish("command.ack", robot_id,
                          CommandAckData(command_id=command_id, accepted=False, reason=reason))
         log.info("rejected command %s: %s", command_id, reason)
+
+    def _identity(self, client: Any, robot_id: str) -> dict[str, Any]:
+        """Requesting user, source IP, and the robot's session generation — the
+        full identity recorded with every command attempt."""
+        user = getattr(client, "user", None)
+        session = self.hub.robots.get(robot_id)
+        base_state = session.state.base_state.data if session is not None else None
+        return {
+            "user_id": getattr(user, "id", None),
+            "username": getattr(user, "username", None),
+            "source_ip": getattr(client, "source_ip", None),
+            "session_generation": getattr(base_state, "session_generation", None),
+        }
+
+    async def _reject_audited(self, client: Any, robot_id: str, command_id: str,
+                              command: str, reason: str) -> None:
+        """Reject and record the attempt (who, from where, why) in the audit."""
+        self._reject(robot_id, command_id, reason)
+        if self.hub.db is not None:
+            await self.hub.db.add_command_rejection(
+                robot_id, command_id, command, reason, **self._identity(client, robot_id))
 
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)

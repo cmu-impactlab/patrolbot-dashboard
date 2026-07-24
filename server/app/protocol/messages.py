@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 DiagLevel = Literal["OK", "WARN", "ERROR", "STALE"]
 ConnectionState = Literal["online", "stale", "offline"]
@@ -33,6 +33,9 @@ class HeartbeatData(BaseModel):
 
 
 class PoseData(BaseModel):
+    # Reject NaN/Inf outright: a non-finite pose would poison the map render
+    # and any downstream geometry.
+    model_config = ConfigDict(allow_inf_nan=False)
     frame_id: str = "map"
     x: float
     y: float
@@ -135,6 +138,9 @@ class CommandRequestData(BaseModel):
     command_id: str  # UUID minted by the browser; correlates the whole lifecycle
     command: CommandType
     goal: GoalData | None = None  # required for navigate_to_pose / set_initial_pose
+    # Set only when the operator has explicitly confirmed taking control away
+    # from whoever currently holds the single-operator lease.
+    takeover: bool = False
 
 
 class CommandAckData(BaseModel):
