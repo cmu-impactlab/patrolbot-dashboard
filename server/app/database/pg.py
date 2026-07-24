@@ -76,7 +76,12 @@ CREATE TABLE IF NOT EXISTS command_audit (
     requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     outcome TEXT,
     detail TEXT,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    user_id BIGINT,
+    username TEXT,
+    source_ip TEXT,
+    session_generation BIGINT,
+    rejection_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS robot_state (
     robot_id TEXT PRIMARY KEY,
@@ -100,9 +105,18 @@ class PostgresDatabase:
         self._pool: asyncpg.Pool | None = None
 
     async def init(self) -> None:
-        self._pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
+        # Explicit timeouts so an unreachable database fails fast instead of
+        # hanging startup (or a test run) indefinitely.
+        self._pool = await asyncpg.create_pool(
+            self.dsn, min_size=1, max_size=5, timeout=10, command_timeout=30)
         async with self._pool.acquire() as conn:
             await conn.execute(SCHEMA)
+            # Migration for command_audit identity columns (added during hardening).
+            for column, decl in (("user_id", "BIGINT"), ("username", "TEXT"),
+                                 ("source_ip", "TEXT"), ("session_generation", "BIGINT"),
+                                 ("rejection_reason", "TEXT")):
+                await conn.execute(
+                    f"ALTER TABLE command_audit ADD COLUMN IF NOT EXISTS {column} {decl}")
             await conn.execute(
                 "INSERT INTO users (id, username, display_name) VALUES (1, 'local', 'Local Operator') "
                 "ON CONFLICT (id) DO NOTHING")
@@ -242,11 +256,33 @@ class PostgresDatabase:
     # -- command audit -----------------------------------------------------------
 
     async def add_command_audit(self, robot_id: str, command_id: str, command: str,
-                                goal: dict[str, Any] | None) -> None:
+                                goal: dict[str, Any] | None, user_id: int | None = None,
+                                username: str | None = None, source_ip: str | None = None,
+                                session_generation: int | None = None) -> None:
         await self.pool.execute(
-            "INSERT INTO command_audit (robot_id, command_id, command, goal) VALUES ($1,$2,$3,$4) "
+            "INSERT INTO command_audit "
+            "(robot_id, command_id, command, goal, user_id, username, source_ip, session_generation) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (command_id) DO NOTHING",
+            robot_id, command_id, command, json.dumps(goal) if goal else None,
+            user_id, username, source_ip, session_generation)
+
+    async def add_command_rejection(self, robot_id: str, command_id: str, command: str,
+                                    reason: str, user_id: int | None = None,
+                                    username: str | None = None, source_ip: str | None = None,
+                                    session_generation: int | None = None) -> None:
+        await self.pool.execute(
+            "INSERT INTO command_audit "
+            "(robot_id, command_id, command, outcome, detail, rejection_reason, completed_at, "
+            " user_id, username, source_ip, session_generation) "
+            "VALUES ($1,$2,$3,'rejected',$4,$5, now(), $6,$7,$8,$9) "
             "ON CONFLICT (command_id) DO NOTHING",
-            robot_id, command_id, command, json.dumps(goal) if goal else None)
+            robot_id, command_id, command, reason, reason,
+            user_id, username, source_ip, session_generation)
+
+    async def command_recorded(self, command_id: str) -> bool:
+        row = await self.pool.fetchrow(
+            "SELECT 1 FROM command_audit WHERE command_id = $1 LIMIT 1", command_id)
+        return row is not None
 
     async def complete_command_audit(self, command_id: str, outcome: str, detail: str) -> None:
         await self.pool.execute(
@@ -255,7 +291,8 @@ class PostgresDatabase:
 
     async def get_command_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
-            "SELECT robot_id, command_id, command, goal, requested_at, outcome, detail, completed_at "
+            "SELECT robot_id, command_id, command, goal, requested_at, outcome, detail, "
+            "completed_at, user_id, username, source_ip, session_generation, rejection_reason "
             "FROM command_audit ORDER BY id DESC LIMIT $1", limit)
         return [{**dict(row),
                  "requested_at": _iso(row["requested_at"]),

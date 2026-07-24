@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS command_audit (
     requested_at TEXT NOT NULL DEFAULT (datetime('now')),
     outcome TEXT,
     detail TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    user_id INTEGER,
+    username TEXT,
+    source_ip TEXT,
+    session_generation INTEGER,
+    rejection_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS recordings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +110,15 @@ class Database:
             await self._db.execute(
                 "ALTER TABLE recordings ADD COLUMN channels TEXT NOT NULL "
                 "DEFAULT '[\"pose\",\"battery\",\"event\"]'")
+        # Migration for command_audit identity columns (added during hardening).
+        async with self._db.execute("PRAGMA table_info(command_audit)") as cur:
+            audit_columns = {row[1] for row in await cur.fetchall()}
+        for column, decl in (("user_id", "INTEGER"), ("username", "TEXT"),
+                             ("source_ip", "TEXT"), ("session_generation", "INTEGER"),
+                             ("rejection_reason", "TEXT")):
+            if column not in audit_columns:
+                await self._db.execute(
+                    f"ALTER TABLE command_audit ADD COLUMN {column} {decl}")
         await self._db.execute(
             "INSERT OR IGNORE INTO users (id, username, display_name) VALUES (1, 'local', 'Local Operator')"
         )
@@ -253,12 +267,41 @@ class Database:
     # -- command audit -----------------------------------------------------------
 
     async def add_command_audit(self, robot_id: str, command_id: str, command: str,
-                                goal: dict[str, Any] | None) -> None:
+                                goal: dict[str, Any] | None, user_id: int | None = None,
+                                username: str | None = None, source_ip: str | None = None,
+                                session_generation: int | None = None) -> None:
         await self.db.execute(
-            "INSERT OR IGNORE INTO command_audit (robot_id, command_id, command, goal) VALUES (?,?,?,?)",
-            (robot_id, command_id, command, json.dumps(goal) if goal else None),
+            "INSERT OR IGNORE INTO command_audit "
+            "(robot_id, command_id, command, goal, user_id, username, source_ip, session_generation) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (robot_id, command_id, command, json.dumps(goal) if goal else None,
+             user_id, username, source_ip, session_generation),
         )
         await self.db.commit()
+
+    async def add_command_rejection(self, robot_id: str, command_id: str, command: str,
+                                    reason: str, user_id: int | None = None,
+                                    username: str | None = None, source_ip: str | None = None,
+                                    session_generation: int | None = None) -> None:
+        """Record a rejected command attempt. INSERT OR IGNORE so a replayed
+        command_id (already audited) does not create a second row."""
+        await self.db.execute(
+            "INSERT OR IGNORE INTO command_audit "
+            "(robot_id, command_id, command, outcome, detail, rejection_reason, completed_at, "
+            " user_id, username, source_ip, session_generation) "
+            "VALUES (?,?,?, 'rejected', ?, ?, datetime('now'), ?,?,?,?)",
+            (robot_id, command_id, command, reason, reason,
+             user_id, username, source_ip, session_generation),
+        )
+        await self.db.commit()
+
+    async def command_recorded(self, command_id: str) -> bool:
+        """True if this command_id already exists — restart-persistent duplicate
+        protection that survives the in-memory cache being cleared."""
+        async with self.db.execute(
+            "SELECT 1 FROM command_audit WHERE command_id = ? LIMIT 1", (command_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
 
     async def complete_command_audit(self, command_id: str, outcome: str, detail: str) -> None:
         await self.db.execute(
@@ -270,7 +313,8 @@ class Database:
 
     async def get_command_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         async with self.db.execute(
-            "SELECT robot_id, command_id, command, goal, requested_at, outcome, detail, completed_at "
+            "SELECT robot_id, command_id, command, goal, requested_at, outcome, detail, "
+            "completed_at, user_id, username, source_ip, session_generation, rejection_reason "
             "FROM command_audit ORDER BY id DESC LIMIT ?", (limit,)
         ) as cur:
             return [dict(row) for row in await cur.fetchall()]

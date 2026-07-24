@@ -26,3 +26,9 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Fail loudly instead of hanging if a test blocks on an unavailable service,
+# and surface the slowest tests so regressions in determinism are visible.
+addopts = "--durations=10 -ra"
+markers = [
+    "external: needs an external service (e.g. PostgreSQL); excluded from the default hermetic run",
+]

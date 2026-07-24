@@ -18,7 +18,12 @@ from app.settings import Settings
 
 PG_URL = os.environ.get("PATROLBOT_TEST_PG_URL", "")
 
-pytestmark = pytest.mark.skipif(not PG_URL, reason="PATROLBOT_TEST_PG_URL not set")
+# `external`: excluded from the default hermetic `make test-server` run, which
+# uses -m "not external". Also skipped entirely when no test DB is provided.
+pytestmark = [
+    pytest.mark.external,
+    pytest.mark.skipif(not PG_URL, reason="PATROLBOT_TEST_PG_URL not set"),
+]
 
 
 async def _wipe(db) -> None:
