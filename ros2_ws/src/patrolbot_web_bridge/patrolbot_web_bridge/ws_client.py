@@ -46,8 +46,11 @@ class WsClient:
     def __init__(self, server_url: str, token: str, robot_id: str,
                  on_map_wanted: Callable[[], None],
                  on_command: Callable[[dict], None] | None = None) -> None:
-        self.url = f"{server_url}?token={token}"
+        # The token travels in the Authorization header (see _connect) so it
+        # never lands in reverse-proxy access logs. self.url stays clean.
+        self.url = server_url
         self.server_url = server_url
+        self.token = token
         self.robot_id = robot_id
         self.on_map_wanted = on_map_wanted
         self.on_command = on_command
@@ -118,9 +121,19 @@ class WsClient:
                 log.warning("connection lost (%s); retrying in %.1f s", exc, delay)
                 await asyncio.sleep(delay)
 
+    def _connect(self):
+        """Open the socket with the token in the Authorization header. The
+        header kwarg was renamed extra_headers -> additional_headers across
+        websockets releases, so try the modern name and fall back."""
+        headers = {"Authorization": f"Bearer {self.token}"}
+        kwargs = dict(max_size=16 * 1024 * 1024, ping_interval=20, ping_timeout=10)
+        try:
+            return websockets.connect(self.url, additional_headers=headers, **kwargs)
+        except TypeError:
+            return websockets.connect(self.url, extra_headers=headers, **kwargs)
+
     async def _session(self) -> None:
-        async with websockets.connect(self.url, max_size=16 * 1024 * 1024,
-                                      ping_interval=20, ping_timeout=10) as ws:
+        async with self._connect() as ws:
             hello = json.dumps({
                 "version": 1, "type": "robot.hello", "robot_id": self.robot_id,
                 "sequence": 0, "timestamp": utc_now(),

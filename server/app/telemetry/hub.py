@@ -43,8 +43,11 @@ class RobotSession:
 
 
 class BrowserClient:
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, user: Any = None,
+                 source_ip: str | None = None) -> None:
         self.websocket = websocket
+        self.user = user  # authentication.local.User (identity + role)
+        self.source_ip = source_ip
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=64)
 
     def offer(self, frame: str, protected: bool) -> None:
@@ -193,10 +196,11 @@ class TelemetryHub:
 
     # -- browser side ----------------------------------------------------------
 
-    async def browser_connected(self, websocket: WebSocket) -> BrowserClient:
+    async def browser_connected(self, websocket: WebSocket, user: Any = None,
+                                source_ip: str | None = None) -> BrowserClient:
         from ..protocol.messages import GoalData
 
-        client = BrowserClient(websocket)
+        client = BrowserClient(websocket, user=user, source_ip=source_ip)
         self.browsers.add(client)
         session = self.primary()
         robot_id = session.robot_id if session else self.settings.default_robot_id
@@ -212,6 +216,9 @@ class TelemetryHub:
 
     def browser_disconnected(self, client: BrowserClient) -> None:
         self.browsers.discard(client)
+        # Free the command lease if this client held it, so another operator
+        # can take control without a takeover.
+        self.commands.lease.release_client(client)
 
     # -- fan-out ---------------------------------------------------------------
 
