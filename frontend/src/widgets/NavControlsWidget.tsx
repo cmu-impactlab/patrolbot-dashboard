@@ -27,8 +27,14 @@ export function NavControlsWidget() {
   const stop = useCommandStore((state) => state.stop);
   const resume = useCommandStore((state) => state.resume);
   const cancel = useCommandStore((state) => state.cancel);
+  const takeOver = useCommandStore((state) => state.takeOver);
 
   const online = connection.state === "online";
+  // A rejection from the single-operator lease — offer an explicit takeover.
+  const leaseBlocked =
+    active === null &&
+    lastResult?.outcome === "rejected" &&
+    (lastResult.detail ?? "").includes("in control of the robot");
   const offerResume = stoppedGoal !== null && active === null;
   // Navigation is hard-blocked until the operator has set the robot's 2D
   // location this session, so the robot is never sent anywhere from an
@@ -71,6 +77,15 @@ export function NavControlsWidget() {
         <div className={`nav-result-banner outcome-${lastResult.outcome}`}>
           {OUTCOME_COPY[lastResult.outcome] ?? lastResult.outcome}
           {lastResult.detail ? ` — ${lastResult.detail}` : ""}
+          {leaseBlocked && (
+            <button
+              className="btn"
+              onClick={takeOver}
+              title="Take control from the current operator and re-send your command"
+            >
+              Take over
+            </button>
+          )}
         </div>
       )}
       <div className="nav-buttons">

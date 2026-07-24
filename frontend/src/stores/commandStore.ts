@@ -34,12 +34,16 @@ interface CommandState {
   /** Where the robot was heading when the operator pressed Stop; offering
    *  "Resume" re-sends this destination. */
   stoppedGoal: GoalData | null;
+  /** The most recent command intent, remembered so "Take over" can re-send it
+   *  with the takeover flag after a single-operator-lease rejection. */
+  lastAttempt: { command: CommandType; goal?: GoalData } | null;
 
   setPickMode: (mode: PickMode) => void;
-  send: (command: CommandType, goal?: GoalData) => void;
+  send: (command: CommandType, goal?: GoalData, takeover?: boolean) => void;
   stop: () => void;
   resume: () => void;
   cancel: () => void;
+  takeOver: () => void;
   handleAck: (data: CommandAckData) => void;
   handleProgress: (data: CommandProgressData) => void;
   handleResult: (data: CommandResultData) => void;
@@ -58,6 +62,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   lastResult: null,
   pickMode: "none",
   stoppedGoal: null,
+  lastAttempt: null,
 
   setPickMode: (mode) => set({ pickMode: mode }),
 
@@ -83,11 +88,19 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     if (wasActive) get().send("stop");
   },
 
-  send: (command, goal) => {
+  takeOver: () => {
+    const attempt = get().lastAttempt;
+    if (!attempt) return;
+    get().send(attempt.command, attempt.goal, true);
+  },
+
+  send: (command, goal, takeover = false) => {
     // A fresh destination invalidates any pending Resume offer.
     if (command === "navigate_to_pose" && get().stoppedGoal && goal !== undefined) {
       set({ stoppedGoal: null });
     }
+    // Remember the intent so a lease rejection can be retried as a takeover.
+    set({ lastAttempt: { command, goal } });
     const commandId = crypto.randomUUID();
     const frame = JSON.stringify({
       version: 1,
@@ -95,7 +108,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       robot_id: useTelemetryStore.getState().robotId,
       sequence: ++sequence,
       timestamp: new Date().toISOString(),
-      data: { command_id: commandId, command, goal: goal ?? null },
+      data: { command_id: commandId, command, goal: goal ?? null, takeover },
     });
     if (!sendFrame?.(frame)) {
       set({

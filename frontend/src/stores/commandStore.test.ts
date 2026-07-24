@@ -32,3 +32,64 @@ describe("commandStore.cancel", () => {
     expect(useCommandStore.getState().stoppedGoal).toBeNull(); // nothing to resume
   });
 });
+
+describe("commandStore.takeOver", () => {
+  beforeEach(() => {
+    useCommandStore.setState({
+      active: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
+    });
+    registerCommandSender(null);
+  });
+
+  it("re-sends the last attempted command with takeover=true", () => {
+    const sent: string[] = [];
+    registerCommandSender((frame) => {
+      sent.push(frame);
+      return true;
+    });
+
+    // First attempt (no takeover) — remembered as the last attempt.
+    useCommandStore.getState().send("navigate_to_pose", { x: 3, y: 4, yaw: 0 });
+    const first = JSON.parse(sent[0]);
+    expect(first.data.takeover).toBe(false);
+
+    // Operator confirms takeover: same command + goal, takeover flag set.
+    useCommandStore.getState().takeOver();
+    const second = JSON.parse(sent[1]);
+    expect(second.data.command).toBe("navigate_to_pose");
+    expect(second.data.goal).toEqual({ x: 3, y: 4, yaw: 0 });
+    expect(second.data.takeover).toBe(true);
+  });
+
+  it("does nothing when there is no prior attempt", () => {
+    const sender = vi.fn(() => true);
+    registerCommandSender(sender);
+
+    useCommandStore.getState().takeOver();
+
+    expect(sender).not.toHaveBeenCalled();
+  });
+});
+
+describe("commandStore reconnect safety", () => {
+  beforeEach(() => {
+    useCommandStore.setState({
+      active: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
+    });
+    registerCommandSender(null);
+  });
+
+  it("does not auto-resume a stopped goal when the socket reconnects", () => {
+    const sender = vi.fn(() => true);
+    // A destination is paused (Stop was pressed) and Resume is on offer.
+    useCommandStore.setState({ stoppedGoal: { x: 1, y: 2, yaw: 0 } });
+
+    // A socket reconnect re-registers the sender (see useTelemetrySocket).
+    registerCommandSender(sender);
+
+    // Nothing is sent implicitly — a goal is only re-sent on an explicit action.
+    expect(sender).not.toHaveBeenCalled();
+    useCommandStore.getState().resume();
+    expect(sender).toHaveBeenCalledTimes(1);
+  });
+});

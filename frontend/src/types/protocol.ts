@@ -179,6 +179,9 @@ export interface CommandRequestData {
   command_id: string;
   command: CommandType;
   goal?: GoalData | null;
+  /** Set only when the operator confirms taking control from the current
+   *  lease holder. */
+  takeover?: boolean;
 }
 
 export interface CommandAckData {
