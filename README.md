@@ -146,9 +146,21 @@ server/.venv/bin/python scripts/dev_idp.py --port 9100   # stand-in IdP (dev onl
 
 With `infrastructure/.env` set to OIDC (as in `.env.example`), the login
 screen appears first; sign in, and allowed users reach the dashboard while
-everyone else gets a 403. When CMU issues real credentials, point
-`PATROLBOT_OIDC_ISSUER` / client ID / secret / redirect at CMU's IdP and drop
-the dev IdP entirely.
+everyone else gets a 403.
+
+**Production auth is Google OAuth2 restricted to `@andrew.cmu.edu`.** Google is
+a standard OIDC provider, so the same code+PKCE flow is used — point
+`PATROLBOT_OIDC_ISSUER=https://accounts.google.com`, set the client ID/secret
+from the Google Cloud Console, register `https://<host>/auth/callback` as the
+authorized redirect URI, and keep `PATROLBOT_OIDC_EMAIL_DOMAIN=andrew.cmu.edu`.
+Sign-in requires a **verified** email ending in `@andrew.cmu.edu`; the
+leading-`@` anchor rejects look-alike domains. See
+`infrastructure/.env.example` for the full Cloud Console walkthrough.
+
+**Roles are read-only by default.** An authenticated user is an *observer*
+(telemetry only) unless listed in `PATROLBOT_OPERATOR_USERNAMES` (operator) or
+`PATROLBOT_ADMIN_USERNAMES` (administrator). Only operators/administrators may
+send navigation, pose, or stop commands.
 
 ### Scenario E — Production (nginx + TLS)
 

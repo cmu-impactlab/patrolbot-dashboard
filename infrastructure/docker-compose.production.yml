@@ -22,7 +22,22 @@ services:
       network: host
     network_mode: host
     environment:
+      # Fail closed on insecure config (dev secrets, missing OIDC/origins/TLS).
+      PATROLBOT_ENVIRONMENT: production
+      PATROLBOT_AUTH_MODE: oidc
       PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:?set a real robot token}
+      PATROLBOT_SESSION_SECRET: ${PATROLBOT_SESSION_SECRET:?set a non-default session secret}
+      PATROLBOT_OIDC_ISSUER: ${PATROLBOT_OIDC_ISSUER:-https://accounts.google.com}
+      PATROLBOT_OIDC_CLIENT_ID: ${PATROLBOT_OIDC_CLIENT_ID:?set the Google OAuth client id}
+      PATROLBOT_OIDC_CLIENT_SECRET: ${PATROLBOT_OIDC_CLIENT_SECRET:?set the Google OAuth client secret}
+      PATROLBOT_OIDC_REDIRECT_URL: ${PATROLBOT_OIDC_REDIRECT_URL:?set the https callback url}
+      PATROLBOT_OIDC_EMAIL_DOMAIN: ${PATROLBOT_OIDC_EMAIL_DOMAIN:-andrew.cmu.edu}
+      PATROLBOT_ALLOWED_ORIGINS: ${PATROLBOT_ALLOWED_ORIGINS:?set the dashboard origin(s)}
+      # Restrict sign-in to specific Andrew IDs (e.g. "yousefh"); empty = anyone
+      # with a verified @andrew.cmu.edu account.
+      PATROLBOT_ALLOWED_USERNAMES: ${PATROLBOT_ALLOWED_USERNAMES:-}
+      PATROLBOT_OPERATOR_USERNAMES: ${PATROLBOT_OPERATOR_USERNAMES:-}
+      PATROLBOT_ADMIN_USERNAMES: ${PATROLBOT_ADMIN_USERNAMES:-}
       PATROLBOT_DATABASE_PATH: /data/patrolbot.db
       PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
     volumes:

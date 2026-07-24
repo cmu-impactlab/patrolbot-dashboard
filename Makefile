@@ -1,7 +1,7 @@
 PY := server/.venv/bin/python
 PIP := server/.venv/bin/pip
 
-.PHONY: setup server mock frontend test test-server test-mock test-frontend smoke lint
+.PHONY: setup server mock frontend test test-server test-server-external test-mock test-bridge test-frontend smoke lint
 
 setup:
 	python3 -m venv server/.venv
@@ -18,10 +18,15 @@ mock:
 frontend:
 	cd frontend && npm run dev
 
+# Default run is hermetic: no external services, bounded, progress-printing.
 test: test-server test-mock test-bridge test-frontend
 
 test-server:
-	cd server && .venv/bin/python -m pytest tests -q
+	cd server && .venv/bin/python -m pytest tests -m "not external"
+
+# Opt-in external-service tests (PostgreSQL). Requires PATROLBOT_TEST_PG_URL.
+test-server-external:
+	cd server && .venv/bin/python -m pytest tests -m external
 
 test-mock:
 	cd mock-robot && ../server/.venv/bin/python -m pytest tests -q
