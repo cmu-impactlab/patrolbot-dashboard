@@ -3,9 +3,11 @@ from __future__ import annotations
 import io
 import json
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+
+from ..recordings.export import CHANNEL_FILES, build_zip
 
 router = APIRouter()
 
@@ -92,6 +94,39 @@ async def export_recording(request: Request, recording_id: int) -> StreamingResp
     filename = f"recording-{recording_id}.csv"
     return StreamingResponse(buffer, media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@router.get("/api/recordings/{recording_id}/export.zip")
+async def export_recording_zip(
+    request: Request,
+    recording_id: int,
+    channels: str | None = Query(
+        default=None,
+        description="Comma-separated channels to include; omit for everything recorded."),
+) -> Response:
+    """A zip of one CSV per channel — see the bundled README for the layout."""
+    db = request.app.state.db
+    row = await db.get_recording(recording_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="recording not found")
+
+    wanted: list[str] | None = None
+    if channels is not None:
+        wanted = [c.strip() for c in channels.split(",") if c.strip()]
+        unknown = [c for c in wanted if c not in CHANNEL_FILES]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"unknown channel(s): {', '.join(unknown)}")
+        if not wanted:
+            raise HTTPException(status_code=400, detail="no channels selected")
+
+    samples = await db.get_recording_samples(recording_id)
+    payload, filename = build_zip(row, samples, wanted)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/api/recordings/{recording_id}")

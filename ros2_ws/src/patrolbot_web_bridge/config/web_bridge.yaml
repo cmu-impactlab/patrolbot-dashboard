@@ -36,3 +36,37 @@
 
     # Pose covariance trace above which the UI shows "location uncertain".
     covariance_warn_threshold: 0.25
+
+    # Undock (patrolbot_dock_manager's /patrolbot/undock action). These are
+    # node config, never browser input; the dock manager bounds them again
+    # with its own hard caps. Only used when WEB_BRIDGE_ENABLE_COMMANDS=1 and
+    # the dock manager is running — otherwise the bridge never advertises the
+    # "undock" capability and the dashboard keeps the control greyed out.
+    #
+    # NOTE: the deployed container starts the node with inline -p overrides and
+    # no --params-file, so THIS FILE IS NOT READ on the robot — bridge_node.py's
+    # declare_parameters defaults are what actually run. These values are kept
+    # equal to those defaults so the file does not misinform anyone reading it;
+    # change both together.
+    #
+    # Must match the dock manager's own dock_id parameter exactly, or it
+    # rejects the goal ("unknown dock ID"). Currently "main_charger".
+    undock_dock_id: "main_charger"
+    # validation_mode is NOT a zero-motion dry run — it clamps to 0.10 m /
+    # 0.05 m/s and REJECTS rather than clamps anything above. The dock
+    # manager's hard caps (patrolbot_dock_manager/contracts.py::validate_goal)
+    # are 0.70 m and 0.10 m/s. Commissioned 2026-07-26 on the real robot:
+    # full reverse, validation mode off.
+    undock_reverse_distance: 0.60
+    undock_reverse_speed: 0.10
+    undock_validation_mode: false
+
+    # Charge-signal conditioning. A charger latching against marginal dock
+    # contacts inverted charge_state every few seconds on 2026-07-28, and the
+    # battery driver's status bit claimed "charging" for 81 consecutive
+    # samples at a flat 25.9 V after the robot had backed clear of the dock.
+    # A charge reading must hold this long before it is published...
+    charge_settle_s: 4.0
+    # ...and "charging" below this voltage is not believed at all. The charger
+    # holds ~29.7 V; a resting pack sits near 26 V.
+    charge_voltage_min: 27.5

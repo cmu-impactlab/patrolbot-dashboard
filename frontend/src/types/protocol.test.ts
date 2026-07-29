@@ -21,7 +21,8 @@ const FIXTURES = join(
 
 const KNOWN_TYPES = new Set([
   "robot.hello", "server.hello_ack", "server.snapshot",
-  "state.connection", "state.robot_status", "state.system_health", "event.append",
+  "state.connection", "state.robot_status", "state.system_health",
+  "state.capabilities", "event.append",
   "telemetry.heartbeat", "telemetry.pose", "telemetry.lidar", "telemetry.path",
   "telemetry.battery", "telemetry.base_state", "telemetry.diagnostics",
   "telemetry.resources", "telemetry.map",

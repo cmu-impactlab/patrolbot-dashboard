@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "state.capabilities",
+  "robot_id": "patrolbot-01",
+  "sequence": 3,
+  "timestamp": "2026-07-17T10:31:20.400Z",
+  "data": {
+    "capabilities": [
+      "pose", "lidar", "path", "battery", "base_state", "diagnostics",
+      "resources", "map", "charge_release", "motor_enable", "dock", "undock"
+    ]
+  }
+}

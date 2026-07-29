@@ -25,7 +25,14 @@ from .world import DOCK, MAP_ORIGIN, RESOLUTION, Robot, World
 log = logging.getLogger("mock_robot")
 
 PROTOCOL_VERSION = 1
-CAPABILITIES = ["pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map"]
+CAPABILITIES = ["pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map",
+                # The dashboard only offers dock/undock to a robot that claims
+                # them; the mock claims them so the flow is exercisable locally.
+                "charge_release", "motor_enable", "dock", "undock"]
+
+# Undocking reverses straight back off the contacts — no turning on the dock.
+UNDOCK_DISTANCE_M = 1.2
+UNDOCK_SPEED_MS = 0.15
 
 
 def utc_now() -> str:
@@ -55,8 +62,12 @@ class MockRobot:
         self.sequence = 0
         self.map_version = 1
         self.session_generation = 1
-        self.mode = "patrol"  # patrol | to_dock | charging | commanded | idle
-        self.command: dict | None = None  # active navigate command {command_id}
+        self.mode = "patrol"  # patrol | to_dock | charging | commanded | idle | undocking
+        # Physically on the charger's contacts. Stays true after the charge is
+        # released — releasing the charger is not the same as leaving the dock.
+        self.on_dock = False
+        self.motors_enabled = True
+        self.command: dict | None = None  # active command {command_id, kind}
         self.robot.set_goal(self.robot.next_waypoint())
 
     def elapsed(self) -> float:
@@ -85,11 +96,20 @@ class MockRobot:
     def step(self, dt: float) -> None:
         elapsed = self.elapsed()
         estop = self.scenario.estop_active(elapsed)
-        moving_allowed = not estop and self.mode != "charging"
+        # Same interlocks the real base has: no motion while the charger is
+        # engaged, the e-stop is pressed, or the motors are off.
+        moving_allowed = not estop and not self.battery.charging and self.motors_enabled
+
+        if self.mode == "undocking":
+            # Straight back off the contacts, keeping the heading it docked at.
+            self._step_reverse(dt, moving_allowed)
+            self.battery.step(dt, discharging_allowed=True)
+            return
+
         arrived = self.robot.step(dt, moving_allowed=moving_allowed)
         self.battery.step(dt, discharging_allowed=self.mode != "charging")
 
-        if self.mode in ("patrol", "idle") and self.battery.needs_charge:
+        if self.mode in ("patrol", "idle") and self.battery.needs_charge and not self.on_dock:
             self.mode = "to_dock"
             self.robot.set_goal(DOCK)
             log.info("battery low (%.0f%%) — heading to dock", self.battery.percentage)
@@ -100,12 +120,18 @@ class MockRobot:
         elif self.mode == "commanded" and arrived:
             self._command_arrived = True
         elif self.mode == "to_dock" and arrived:
-            self.mode = "charging"
-            self.battery.charging = True
-            self.robot.set_goal(None)
-            log.info("docked, charging")
-        elif self.mode == "charging" and not self.battery.charging:
+            # An operator-requested dock settles in _command_progress, which
+            # reports the result in the same tick it lands.
+            if self.command is not None:
+                self._command_arrived = True
+            else:
+                self._settle_on_dock()
+                log.info("docked, charging")
+        elif self.mode == "charging" and not self.battery.charging and self.command is None:
+            # Charged up on its own: leave the dock and go back to work.
             self.mode = "patrol"
+            self.on_dock = False
+            self.motors_enabled = True
             self.robot.set_goal(self.robot.next_waypoint())
             log.info("charged — resuming patrol")
 
@@ -117,6 +143,32 @@ class MockRobot:
 
     _map_dirty = False
     _command_arrived = False
+
+    _undock_remaining = 0.0
+
+    def _step_reverse(self, dt: float, moving_allowed: bool) -> None:
+        """Reverse in a straight line until clear of the dock."""
+        if not moving_allowed:
+            self.robot.speed = 0.0
+            self.robot.yaw_rate = 0.0
+            return
+        travel = min(UNDOCK_SPEED_MS * dt, self._undock_remaining)
+        self.robot.x -= travel * math.cos(self.robot.yaw)
+        self.robot.y -= travel * math.sin(self.robot.yaw)
+        self.robot.speed = -UNDOCK_SPEED_MS
+        self.robot.yaw_rate = 0.0
+        self._undock_remaining -= travel
+        if self._undock_remaining <= 0.0:
+            self.robot.speed = 0.0
+            self._command_arrived = True
+
+    def _settle_on_dock(self) -> None:
+        """Arrive on the charger: charging on, motors off, standing still."""
+        self.mode = "charging"
+        self.on_dock = True
+        self.battery.charging = True
+        self.motors_enabled = False
+        self.robot.set_goal(None)
 
     # -- emission loops --------------------------------------------------------
 
@@ -205,8 +257,10 @@ class MockRobot:
             await ws.send(self.frame("telemetry.base_state", base_state_payload(
                 session_generation=self.session_generation,
                 charging=self.battery.charging,
-                docked=self.mode == "charging",
+                docked=self.on_dock,
                 estop=estop, bumper_front=front, bumper_rear=rear,
+                motors_enabled=self.motors_enabled,
+                undock_active=self.mode == "undocking",
             )))
             await ws.send(self.frame("telemetry.diagnostics",
                                      diagnostics_payload(elapsed, self.battery.level, front or rear)))
@@ -241,10 +295,11 @@ class MockRobot:
             if command == "navigate_to_pose":
                 await self._preempt(ws, "A newer destination replaced this one.")
                 goal = data["goal"]
-                self.command = {"command_id": command_id}
+                self.command = {"command_id": command_id, "kind": "navigate"}
                 self._command_arrived = False
                 self.mode = "commanded"
                 self.battery.charging = False
+                self.on_dock = False
                 self.robot.set_goal((goal["x"], goal["y"]))
                 await ws.send(self.frame("command.ack",
                                          {"command_id": command_id, "accepted": True}))
@@ -267,10 +322,82 @@ class MockRobot:
                 await ws.send(self.frame("command.result",
                                          {"command_id": command_id, "outcome": "succeeded",
                                           "detail": "Robot location updated."}))
+            elif command in ("charge_release", "motor_enable", "dock", "undock"):
+                await self._handle_dock_command(ws, command, command_id)
             else:
                 await ws.send(self.frame("command.ack",
                                          {"command_id": command_id, "accepted": False,
                                           "reason": f"Unknown command: {command}"}))
+
+    async def _handle_dock_command(self, ws, command: str, command_id: str) -> None:
+        """Charging, motor power and dock steps.
+
+        The robot re-checks its own preconditions rather than trusting the
+        server's: the dashboard's gate can only ever be as fresh as the last
+        telemetry frame, and this is the side that actually owns the hardware.
+        """
+        async def refuse(reason: str) -> None:
+            await ws.send(self.frame("command.ack", {
+                "command_id": command_id, "accepted": False, "reason": reason}))
+
+        async def accept() -> None:
+            await ws.send(self.frame("command.ack",
+                                     {"command_id": command_id, "accepted": True}))
+
+        async def done(detail: str) -> None:
+            await ws.send(self.frame("command.result", {
+                "command_id": command_id, "outcome": "succeeded", "detail": detail}))
+
+        if self.scenario.estop_active(self.elapsed()) and command != "charge_release":
+            await refuse("The emergency stop is pressed on the robot.")
+            return
+
+        if command == "charge_release":
+            if not self.battery.charging:
+                await refuse("The robot is not on charge.")
+                return
+            await accept()
+            # Zero-motion by construction: the charger opens, the motors stay
+            # off, and the robot is still sitting on the dock afterwards.
+            self.battery.charging = False
+            self.motors_enabled = False
+            self.mode = "idle"
+            await done("Charging released. The robot is still on its dock with the motors off.")
+        elif command == "motor_enable":
+            if self.battery.charging:
+                await refuse("The robot is still on charge — release charging first.")
+                return
+            await accept()
+            self.motors_enabled = True
+            await done("Motors are on.")
+        elif command == "undock":
+            if not self.on_dock:
+                await refuse("The robot is not on its dock.")
+                return
+            await self._preempt(ws, "Undocking replaced this destination.")
+            await accept()
+            # One operator action: the robot opens its own charger and powers
+            # its own motors before reversing. The dashboard does not sequence
+            # this — it only asks for the result.
+            self.battery.charging = False
+            self.motors_enabled = True
+            self.command = {"command_id": command_id, "kind": "undock"}
+            self._command_arrived = False
+            self._undock_remaining = UNDOCK_DISTANCE_M
+            self.mode = "undocking"
+            self.robot.set_goal(None)
+        elif command == "dock":
+            if self.battery.charging:
+                await refuse("The robot is already charging.")
+                return
+            await self._preempt(ws, "Docking replaced this destination.")
+            await accept()
+            self.motors_enabled = True
+            self.command = {"command_id": command_id, "kind": "dock"}
+            self._command_arrived = False
+            self.mode = "to_dock"
+            self.on_dock = False
+            self.robot.set_goal(DOCK)
 
     async def _preempt(self, ws, detail: str) -> None:
         if self.command is not None:
@@ -279,26 +406,46 @@ class MockRobot:
                                       "outcome": "canceled", "detail": detail}))
             self.command = None
 
+    # Per command kind: (arrival detail, in-flight stage detail).
+    _COMMAND_COPY = {
+        "navigate": ("Arrived at the destination.", "Heading to the destination"),
+        "dock": ("On the dock and charging.", "Driving to the charging dock"),
+        "undock": ("Clear of the dock.", "Reversing off the dock"),
+    }
+
     async def _command_progress(self, ws) -> None:
         if self.command is None:
             return
+        kind = self.command.get("kind", "navigate")
+        arrived_detail, stage_detail = self._COMMAND_COPY.get(
+            kind, self._COMMAND_COPY["navigate"])
         if self._command_arrived:
+            if kind == "dock":
+                self._settle_on_dock()
+            else:
+                if kind == "undock":
+                    self.on_dock = False
+                self.mode = "idle"
             await ws.send(self.frame("command.result",
                                      {"command_id": self.command["command_id"],
                                       "outcome": "succeeded",
-                                      "detail": "Arrived at the destination."}))
+                                      "detail": arrived_detail}))
             self.command = None
             self._command_arrived = False
-            self.mode = "idle"
             return
+        # Undocking has no goal pose — it reverses a fixed distance.
         goal = self.robot.goal
-        if goal is not None:
-            distance = math.hypot(goal[0] - self.robot.x, goal[1] - self.robot.y)
-            await ws.send(self.frame("command.progress",
-                                     {"command_id": self.command["command_id"],
-                                      "stage": "navigating",
-                                      "detail": "Heading to the destination",
-                                      "distance_remaining": round(distance, 2)}))
+        if kind == "undock":
+            remaining = self._undock_remaining
+        elif goal is not None:
+            remaining = math.hypot(goal[0] - self.robot.x, goal[1] - self.robot.y)
+        else:
+            return
+        await ws.send(self.frame("command.progress",
+                                 {"command_id": self.command["command_id"],
+                                  "stage": kind if kind != "navigate" else "navigating",
+                                  "detail": stage_detail,
+                                  "distance_remaining": round(remaining, 2)}))
 
     async def _disconnect_watch(self) -> None:
         while True:

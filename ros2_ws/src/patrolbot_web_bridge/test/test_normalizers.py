@@ -127,6 +127,25 @@ def test_battery_fractional_percentage_scaled():
     assert result["charging"] is True
 
 
+def test_battery_charging_disbelieved_below_charge_voltage():
+    """The 2026-07-28 demo: the driver flagged charging for 81 consecutive
+    samples at a flat 25.9 V, after the robot had backed clear of the dock."""
+    battery = NS(voltage=25.9, current=0.0, percentage=float("nan"), power_supply_status=1)
+    assert normalizers.normalize_battery(battery)["charging"] is True
+    assert normalizers.normalize_battery(battery, charge_voltage_min=27.5)["charging"] is False
+
+
+def test_battery_charging_believed_at_charge_voltage():
+    battery = NS(voltage=29.7, current=0.0, percentage=float("nan"), power_supply_status=1)
+    assert normalizers.normalize_battery(battery, charge_voltage_min=27.5)["charging"] is True
+
+
+def test_battery_voltage_never_invents_charging():
+    """The cross-check only ever clears the flag."""
+    battery = NS(voltage=29.7, current=0.0, percentage=float("nan"), power_supply_status=0)
+    assert normalizers.normalize_battery(battery, charge_voltage_min=27.5)["charging"] is False
+
+
 def test_base_state_charge_names_and_invalid_bumpers():
     state = NS(session_generation=4, link_connected=True, telemetry_age=0.12,
                hardware_state_valid=True, charge_state=3, charge_state_valid=True,
@@ -137,6 +156,44 @@ def test_base_state_charge_names_and_invalid_bumpers():
     assert result["charge_state"] == "float"
     # Unmapped bumpers must fail closed to "not pressed", not garbage.
     assert result["bumpers_front"] is False
+
+
+def test_base_state_carries_authoritative_dock_observer_state():
+    state = NS(
+        session_generation=4, link_connected=True, telemetry_age=0.12,
+        hardware_state_valid=True, charge_state=3, charge_state_valid=True,
+        motors_enabled=False, estop_pressed=False, flags=0, fault_flags=0,
+        stall_value=0, bumpers_valid=True,
+        front_bumper_pressed=False, rear_bumper_pressed=False,
+        dock_state="CLEAR_CONFIRMED", dock_state_valid=True,
+        dock_phase=0, dock_phase_name="IDLE", undock_active=False,
+        undock_release_attempts=1, minimum_rear_range=0.72,
+        rear_sonar_usable=True, redock_inhibited=True,
+        redock_inhibit_remaining=21.4, undock_profile_commissioned=True,
+    )
+    result = normalizers.normalize_base_state(state)
+
+    # Raw charge state can remain at float after a proven departure. The
+    # dashboard must retain the observer's stronger CLEAR_CONFIRMED evidence.
+    assert result["charge_state"] == "float"
+    assert result["dock_state"] == "CLEAR_CONFIRMED"
+    assert result["dock_state_valid"] is True
+    assert result["undock_active"] is False
+    assert result["undock_profile_commissioned"] is True
+    assert result["minimum_rear_range"] == 0.72
+
+
+def test_base_state_without_dock_observer_fails_closed():
+    state = NS(session_generation=4, link_connected=True, telemetry_age=0.12,
+               hardware_state_valid=True, charge_state=3, charge_state_valid=True,
+               motors_enabled=True, estop_pressed=False, flags=0, fault_flags=0,
+               stall_value=0, bumpers_valid=True,
+               front_bumper_pressed=False, rear_bumper_pressed=False)
+    result = normalizers.normalize_base_state(state)
+
+    assert result["dock_state"] == "UNKNOWN"
+    assert result["dock_state_valid"] is False
+    assert result["undock_profile_commissioned"] is False
 
 
 def test_diagnostics_levels_and_dedupe():

@@ -91,6 +91,20 @@ class BaseStateData(BaseModel):
     stall_value: int
     bumpers_front: bool
     bumpers_rear: bool
+    # The SBC dock observer is the source of truth for physical clearance.
+    # These remain optional so a dashboard can still read recordings and
+    # fixtures produced before that observer was commissioned.
+    dock_state: str | None = None
+    dock_state_valid: bool | None = None
+    dock_phase: int | None = None
+    dock_phase_name: str | None = None
+    undock_active: bool = False
+    undock_release_attempts: int | None = None
+    minimum_rear_range: float | None = None
+    rear_sonar_usable: bool | None = None
+    redock_inhibited: bool | None = None
+    redock_inhibit_remaining: float | None = None
+    undock_profile_commissioned: bool | None = None
 
 
 class DiagnosticItem(BaseModel):
@@ -130,7 +144,14 @@ class MapData(BaseModel):
 
 # ---- Commands (browser -> server -> robot, responses flow back) -----------
 
-CommandType = Literal["navigate_to_pose", "set_initial_pose", "stop"]
+CommandType = Literal[
+    "navigate_to_pose", "set_initial_pose", "stop",
+    # Charging / motor power / dock. Deliberately four distinct commands, not
+    # one "unlock wheels": charge release is zero-motion and leaves the motors
+    # off, enabling the motors is a separate explicit request, and dock/undock
+    # are the guarded motion operations on top of both.
+    "charge_release", "motor_enable", "dock", "undock",
+]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 
 
@@ -141,6 +162,10 @@ class CommandRequestData(BaseModel):
     # Set only when the operator has explicitly confirmed taking control away
     # from whoever currently holds the single-operator lease.
     takeover: bool = False
+    # Stamped by the server from the verified session role before forwarding,
+    # and ignored on the way in — a browser cannot authorize itself. The robot
+    # requires it for guarded motion (the dock manager's Undock goal).
+    operator_authorized: bool = False
 
 
 class CommandAckData(BaseModel):
@@ -180,6 +205,17 @@ class RobotStatusData(BaseModel):
     detail: str
 
 
+class CapabilitiesData(BaseModel):
+    """What the connected robot says it can do (from robot.hello).
+
+    Controls for an uncommissioned capability — dock/undock in particular —
+    stay visibly disabled rather than hidden, so an operator can see the
+    control exists and why it is unavailable. This is presentation only:
+    the server gates every command on its own.
+    """
+    capabilities: list[str] = Field(default_factory=list)
+
+
 class Subsystem(BaseModel):
     id: str
     label: str
@@ -215,6 +251,7 @@ class SnapshotData(BaseModel):
     resources: ResourcesData | None = None
     path: PathData | None = None
     last_known_pose: GoalData | None = None
+    capabilities: list[str] = Field(default_factory=list)
     events: list[EventData] = Field(default_factory=list)
 
 
@@ -234,6 +271,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "state.connection": ConnectionData,
     "state.robot_status": RobotStatusData,
     "state.system_health": SystemHealthData,
+    "state.capabilities": CapabilitiesData,
     "event.append": EventData,
     "command.request": CommandRequestData,
     "command.ack": CommandAckData,

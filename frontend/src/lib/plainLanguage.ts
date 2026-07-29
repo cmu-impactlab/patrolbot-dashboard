@@ -3,7 +3,9 @@
  * has an entry here; a vitest checks completeness. No ROS terminology —
  * technical names live only inside collapsible "technical details" sections.
  */
-import type { ConnectionState, EventSeverity, HealthLevel, RobotStatus } from "../types/protocol";
+import type {
+  CommandType, ConnectionState, EventSeverity, HealthLevel, RobotStatus,
+} from "../types/protocol";
 
 export const STATUS_COPY: Record<RobotStatus, { label: string; tone: string }> = {
   ready: { label: "Ready", tone: "ok" },
@@ -34,6 +36,17 @@ export const SEVERITY_COPY: Record<EventSeverity, { label: string; tone: string 
   info: { label: "Info", tone: "info" },
   warning: { label: "Warning", tone: "warn" },
   critical: { label: "Critical", tone: "danger" },
+};
+
+/** What each command is called when the dashboard reports on it. */
+export const COMMAND_COPY: Record<CommandType, string> = {
+  navigate_to_pose: "Send to destination",
+  set_initial_pose: "Set robot location",
+  stop: "Stop",
+  charge_release: "Release charging",
+  motor_enable: "Turn motors on",
+  dock: "Send to dock",
+  undock: "Undock",
 };
 
 export const ESTIMATE_COPY: Record<string, string> = {

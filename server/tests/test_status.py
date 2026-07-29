@@ -59,6 +59,35 @@ def test_docked_not_charging():
     assert result.status == "docked"
 
 
+def test_clear_dock_observer_overrides_stale_float_charge_state():
+    result = derive_status(
+        connection="online",
+        base_state=base_state(
+            charge_state="float",
+            dock_state="CLEAR_CONFIRMED",
+            dock_state_valid=True,
+            motors_enabled=False,
+        ),
+        diagnostics=None, pose=None, path=None,
+    )
+    assert result.status == "paused"
+
+
+def test_undock_active_has_specific_status():
+    result = derive_status(
+        connection="online",
+        base_state=base_state(
+            charge_state="float",
+            dock_state="DEPARTING",
+            dock_state_valid=True,
+            undock_active=True,
+        ),
+        diagnostics=None, pose=None, path=None,
+    )
+    assert result.status == "navigating"
+    assert "charging dock" in result.detail
+
+
 def test_paused_when_motors_off():
     result = derive_status(connection="online", base_state=base_state(motors_enabled=False),
                            diagnostics=None, pose=None, path=None)

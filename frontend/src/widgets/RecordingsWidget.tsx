@@ -1,15 +1,16 @@
-import { Circle, Download, Pause, Play, Square, Trash2, X } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Check, Circle, Download, Play, Square, Trash2 } from "lucide-react";
 import { useState } from "react";
 import {
-  fetchRecordingDetail,
   useDeleteRecording,
   useRecordings,
   useStartRecording,
   useStopRecording,
 } from "../api/queries";
-import { useReplayStore, type RecordingRow } from "../stores/replayStore";
+import type { RecordingRow } from "../stores/replayStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { formatTime } from "../lib/format";
+import { openReplayTab } from "../lib/replayTab";
 
 /** Plain-language channel labels; ids match the server's recorder channels. */
 const CHANNELS: { id: string; label: string; default: boolean }[] = [
@@ -21,6 +22,8 @@ const CHANNELS: { id: string; label: string; default: boolean }[] = [
   { id: "diagnostics", label: "System reports", default: false },
   { id: "event", label: "Alerts", default: true },
 ];
+
+const CHANNEL_LABELS = new Map(CHANNELS.map((channel) => [channel.id, channel.label]));
 
 /** SQLite datetime('now') → parseable ISO ("YYYY-MM-DD HH:MM:SS" is UTC). */
 function iso(sqlite: string): string {
@@ -34,36 +37,73 @@ function durationLabel(row: RecordingRow): string {
   return `${Math.round(seconds / 60)} min`;
 }
 
-function ReplayBar() {
-  const recording = useReplayStore((state) => state.recording);
-  const playing = useReplayStore((state) => state.playing);
-  const durationMs = useReplayStore((state) => state.durationMs);
-  // Subscribe to tMs so pausing re-renders with the frozen position.
-  useReplayStore((state) => state.tMs);
-  const store = useReplayStore.getState();
-  if (!recording) return null;
-  const t = store.now();
+/**
+ * Download picker: a zip holding one CSV per channel.
+ *
+ * The channels are opt-out rather than opt-in — the common case is "give me
+ * everything I recorded" — but a lidar scan dwarfs every other channel put
+ * together, so being able to leave it out is what makes the rest usable.
+ */
+function DownloadMenu({ row }: { row: RecordingRow }) {
+  const available = (row.channels ?? []).filter((id) => CHANNEL_LABELS.has(id));
+  const [excluded, setExcluded] = useState<string[]>([]);
+  const selected = available.filter((id) => !excluded.includes(id));
+
+  const href = selected.length === available.length
+    ? `/api/recordings/${row.id}/export.zip`
+    : `/api/recordings/${row.id}/export.zip?channels=${selected.join(",")}`;
+
+  // A recording from before channels were tracked has nothing to pick from;
+  // the plain link still exports everything the server finds.
+  if (available.length === 0) {
+    return (
+      <a className="btn icon" title="Download data (.zip of CSVs)"
+         href={`/api/recordings/${row.id}/export.zip`} download>
+        <Download size={14} />
+      </a>
+    );
+  }
 
   return (
-    <div className="replay-bar">
-      <button className="btn icon" onClick={() => (playing ? store.pause() : store.play())}
-              title={playing ? "Pause replay" : "Play replay"}>
-        {playing ? <Pause size={14} /> : <Play size={14} />}
-      </button>
-      <input
-        type="range"
-        min={0}
-        max={Math.max(1, durationMs)}
-        value={Math.round(t)}
-        onChange={(event) => store.seek(Number(event.target.value))}
-      />
-      <span className="subtext" style={{ whiteSpace: "nowrap" }}>
-        {(t / 1000).toFixed(0)}/{(durationMs / 1000).toFixed(0)} s
-      </span>
-      <button className="btn icon" onClick={store.close} title="Close replay">
-        <X size={14} />
-      </button>
-    </div>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button className="btn icon" title="Download data (.zip of CSVs)">
+          <Download size={14} />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="dropdown-content" sideOffset={4} align="end">
+          <DropdownMenu.Label className="dropdown-label">
+            One CSV per channel
+          </DropdownMenu.Label>
+          {available.map((id) => (
+            <DropdownMenu.Item
+              key={id}
+              className={`dropdown-item ${excluded.includes(id) ? "" : "checked"}`}
+              onSelect={(event) => {
+                event.preventDefault();
+                setExcluded((current) =>
+                  current.includes(id) ? current.filter((c) => c !== id) : [...current, id]);
+              }}
+            >
+              {excluded.includes(id) ? <span style={{ width: 14 }} /> : <Check size={14} />}
+              {CHANNEL_LABELS.get(id)}
+            </DropdownMenu.Item>
+          ))}
+          <DropdownMenu.Separator className="dropdown-separator" />
+          <DropdownMenu.Item asChild disabled={selected.length === 0}>
+            <a className="dropdown-item" href={href} download
+               aria-disabled={selected.length === 0}
+               onClick={(event) => { if (selected.length === 0) event.preventDefault(); }}>
+              <Download size={14} />
+              {selected.length === 0
+                ? "Pick at least one channel"
+                : `Download ${selected.length} CSV${selected.length === 1 ? "" : "s"} (.zip)`}
+            </a>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -73,7 +113,6 @@ export function RecordingsWidget() {
   const stopMutation = useStopRecording();
   const remove = useDeleteRecording();
   const online = useTelemetryStore((state) => state.connection.state === "online");
-  const replayingId = useReplayStore((state) => state.recording?.id ?? null);
   const [name, setName] = useState("");
   const [channels, setChannels] = useState<string[]>(
     CHANNELS.filter((channel) => channel.default).map((channel) => channel.id));
@@ -98,11 +137,6 @@ export function RecordingsWidget() {
   };
 
   const finish = () => stopMutation.mutate(undefined, { onSuccess: () => listQuery.refetch() });
-
-  const play = async (row: RecordingRow) => {
-    const detail = await fetchRecordingDetail(row.id);
-    useReplayStore.getState().load(row, detail.samples);
-  };
 
   return (
     <div>
@@ -151,22 +185,19 @@ export function RecordingsWidget() {
       )}
       {error && <p className="subtext" style={{ color: "var(--danger)" }}>{error}</p>}
 
-      <ReplayBar />
-
       {rows.filter((row) => row.status === "done").map((row) => (
-        <div className={`rec-row ${replayingId === row.id ? "replaying" : ""}`} key={row.id}>
+        <div className="rec-row" key={row.id}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{row.name}</div>
             <div className="subtext">
               {formatTime(iso(row.started_at))} · {durationLabel(row)} · {row.sample_count} samples
             </div>
           </div>
-          <button className="btn icon" title="Replay on the Live Map" onClick={() => play(row)}>
+          <button className="btn icon" title="Replay in a new tab"
+                  onClick={() => openReplayTab(row.id)}>
             <Play size={14} />
           </button>
-          <a className="btn icon" title="Download CSV" href={`/api/recordings/${row.id}/export.csv`} download>
-            <Download size={14} />
-          </a>
+          <DownloadMenu row={row} />
           <button className="btn icon" title="Delete recording"
                   onClick={() => remove.mutate(row.id, { onSuccess: () => listQuery.refetch() })}>
             <Trash2 size={14} />

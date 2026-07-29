@@ -87,6 +87,20 @@ export interface BaseStateData {
   stall_value: number;
   bumpers_front: boolean;
   bumpers_rear: boolean;
+  /** Authoritative SBC dock observer. charge_state can remain latched after
+   * physical departure, so a valid CLEAR_CONFIRMED wins over it. Optional for
+   * recordings and robots from before the observer was added. */
+  dock_state?: string | null;
+  dock_state_valid?: boolean | null;
+  dock_phase?: number | null;
+  dock_phase_name?: string | null;
+  undock_active?: boolean;
+  undock_release_attempts?: number | null;
+  minimum_rear_range?: number | null;
+  rear_sonar_usable?: boolean | null;
+  redock_inhibited?: boolean | null;
+  redock_inhibit_remaining?: number | null;
+  undock_profile_commissioned?: boolean | null;
 }
 
 export interface DiagnosticItem {
@@ -134,6 +148,12 @@ export interface RobotStatusData {
   detail: string;
 }
 
+/** What the connected robot declared in robot.hello. Optional controls
+ *  (dock/undock) stay visibly disabled when the robot doesn't advertise them. */
+export interface CapabilitiesData {
+  capabilities: string[];
+}
+
 export interface Subsystem {
   id: string;
   label: string;
@@ -169,10 +189,15 @@ export interface SnapshotData {
   resources?: ResourcesData | null;
   path?: PathData | null;
   last_known_pose?: GoalData | null;
+  capabilities?: string[];
   events: EventData[];
 }
 
-export type CommandType = "navigate_to_pose" | "set_initial_pose" | "stop";
+export type CommandType =
+  | "navigate_to_pose" | "set_initial_pose" | "stop"
+  // The guarded UI sends `undock` as one action. The two service-level
+  // commands remain in the protocol for robot-side diagnostics and recovery.
+  | "charge_release" | "motor_enable" | "dock" | "undock";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {
@@ -182,6 +207,9 @@ export interface CommandRequestData {
   /** Set only when the operator confirms taking control from the current
    *  lease holder. */
   takeover?: boolean;
+  /** Server-stamped from the verified session role on the way to the robot.
+   *  Browsers never set this; anything sent here is overwritten. */
+  operator_authorized?: boolean;
 }
 
 export interface CommandAckData {
@@ -208,6 +236,7 @@ export type AnyFrame =
   | Envelope<"state.connection", ConnectionData>
   | Envelope<"state.robot_status", RobotStatusData>
   | Envelope<"state.system_health", SystemHealthData>
+  | Envelope<"state.capabilities", CapabilitiesData>
   | Envelope<"event.append", EventData>
   | Envelope<"telemetry.pose", PoseData>
   | Envelope<"telemetry.lidar", LidarData>

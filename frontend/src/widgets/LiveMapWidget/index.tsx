@@ -3,61 +3,118 @@ import { Check, Crosshair, Layers, Maximize, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useMapQuery } from "../../api/queries";
 import { useCommandStore } from "../../stores/commandStore";
-import { useReplayStore } from "../../stores/replayStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useUiStore, type MapLayers } from "../../stores/uiStore";
 import type { MapData } from "../../types/protocol";
+import {
+  ROBOT_LENGTH_M, ROBOT_SWING_RADIUS_M, WHEEL_HALF_LENGTH_M, WHEEL_Y_M, traceFootprint,
+} from "../../lib/robotGeometry";
 import { buildMapBitmap } from "./bitmap";
+import { cssVar } from "./colors";
 import { fitView, followView, screenToWorld, worldToScreen, zoomAt, type View } from "./transform";
-
-function cssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
 
 /** Longest the orientation arrow can stretch on screen. */
 const MAX_ARROW_PX = 80;
 
-/** Semi-transparent top-down robot drawn under the pointer while picking a
- *  pose — the operator places "the robot" rather than an abstract cursor.
- *  Matches the PatrolBot's real octagonal footprint (589 x 483 mm, manual
- *  Fig. 8-1), like the Bumpers widget. `angle` is the screen-space heading
- *  (radians); the front faces along +x before rotation. */
-function drawRobotGhost(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number): void {
-  const s = 15; // half-length front-to-back; width is wider (589:483)
-  const w = s * 1.22;
+/** Below this on-screen footprint length the robot is too small to read as a
+ *  shape, so a fixed-size heading marker is drawn on top of it. The footprint
+ *  itself is never inflated — an operator judging clearance must be looking at
+ *  the robot's true size. */
+const MIN_LEGIBLE_ROBOT_PX = 16;
+
+/** Wheels and the heading wedge only earn their space above this. */
+const MIN_DETAIL_ROBOT_PX = 28;
+
+/**
+ * The robot's true footprint, drawn to scale in world metres.
+ *
+ * `pxPerM` is the view's zoom, so the shape covers exactly the floor area the
+ * robot covers: at 30 px/m it is ~15 px long, at 200 px/m ~102 px. Geometry
+ * comes from lib/robotGeometry (the same octagon Nav2 plans with).
+ * `angle` is the screen-space heading in radians (i.e. -yaw).
+ */
+function drawRobotBody(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  pxPerM: number,
+  { fill, stroke, accent, ghost = false }:
+    { fill: string; stroke: string; accent: string; ghost?: boolean },
+): void {
+  const lengthPx = ROBOT_LENGTH_M * pxPerM;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
-  ctx.globalAlpha = 0.8;
-  // Octagon with the front facet at +x: corners follow the manual's drawing.
-  ctx.beginPath();
-  ctx.moveTo(s, -w * 0.46);        // front face, left corner
-  ctx.lineTo(s, w * 0.46);         // front face, right corner
-  ctx.lineTo(s * 0.33, w);         // front-right diagonal -> right face
-  ctx.lineTo(-s * 0.33, w);        // right face (wheel side)
-  ctx.lineTo(-s, w * 0.46);        // rear-right diagonal
-  ctx.lineTo(-s, -w * 0.46);       // rear face
-  ctx.lineTo(-s * 0.33, -w);       // rear-left diagonal -> left face
-  ctx.lineTo(s * 0.33, -w);        // left face (wheel side)
-  ctx.closePath();
-  ctx.fillStyle = cssVar("--surface-2");
-  ctx.strokeStyle = cssVar("--muted");
-  ctx.lineWidth = 1.6;
+  if (ghost) ctx.globalAlpha = 0.8;
+
+  traceFootprint(ctx, pxPerM);
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  // Hairline once the robot is small, so the outline cannot swamp the shape.
+  ctx.lineWidth = Math.max(0.75, Math.min(1.8, lengthPx / 24));
   ctx.fill();
   ctx.stroke();
-  // Drive wheels on the flat side faces
-  ctx.fillStyle = cssVar("--muted");
-  ctx.fillRect(-s * 0.3, -w - 1.5, s * 0.6, 3);
-  ctx.fillRect(-s * 0.3, w - 1.5, s * 0.6, 3);
-  // Heading wedge toward the front
+
+  // Detail that only helps once there is room for it.
+  if (lengthPx >= MIN_DETAIL_ROBOT_PX) {
+    // Drive wheels on the two flat side faces.
+    const wheelHalf = WHEEL_HALF_LENGTH_M * pxPerM;
+    const wheelY = WHEEL_Y_M * pxPerM;
+    const wheelThickness = Math.max(1.5, lengthPx * 0.055);
+    ctx.fillStyle = stroke;
+    ctx.fillRect(-wheelHalf, -wheelY - wheelThickness / 2, wheelHalf * 2, wheelThickness);
+    ctx.fillRect(-wheelHalf, wheelY - wheelThickness / 2, wheelHalf * 2, wheelThickness);
+
+    // Heading wedge pointing at the front face, in the contrasting colour —
+    // on the live robot the body is already CMU red.
+    ctx.beginPath();
+    ctx.moveTo(0.21 * pxPerM, 0);
+    ctx.lineTo(-0.02 * pxPerM, 0.10 * pxPerM);
+    ctx.lineTo(-0.02 * pxPerM, -0.10 * pxPerM);
+    ctx.closePath();
+    ctx.fillStyle = accent;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** Fixed-size arrow drawn on top of the footprint when the robot is too small
+ *  on screen to find by eye. A locator, deliberately distinct from the body. */
+function drawRobotLocator(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number): void {
+  const size = 7;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
   ctx.beginPath();
-  ctx.moveTo(s * 0.8, 0);
-  ctx.lineTo(s * 0.1, w * 0.4);
-  ctx.lineTo(s * 0.1, -w * 0.4);
+  ctx.moveTo(size * 1.4, 0);
+  ctx.lineTo(-size * 0.8, size * 0.75);
+  ctx.lineTo(-size * 0.8, -size * 0.75);
   ctx.closePath();
   ctx.fillStyle = cssVar("--cmu-red");
   ctx.fill();
+  ctx.strokeStyle = cssVar("--surface");
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
   ctx.restore();
+}
+
+/** Semi-transparent robot under the pointer while picking a pose — the
+ *  operator places "the robot", at its true size, rather than an abstract
+ *  cursor, so it is obvious whether it fits where they are aiming. */
+function drawRobotGhost(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  angle: number,
+  pxPerM: number,
+): void {
+  drawRobotBody(ctx, x, y, angle, pxPerM, {
+    fill: cssVar("--surface-2"),
+    stroke: cssVar("--muted"),
+    accent: cssVar("--cmu-red"),
+    ghost: true,
+  });
 }
 
 interface PickArrow {
@@ -165,52 +222,9 @@ function drawScene(
     ctx.fill();
   }
 
-  // Recording replay overlay: full route (muted), progress, and a ghost
-  // marker at the playhead. Distinct from the live robot (blue outline).
-  const replay = useReplayStore.getState();
-  if (replay.recording && replay.poses.length > 1) {
-    const t = replay.now();
-    ctx.beginPath();
-    for (let i = 0; i < replay.poses.length; i++) {
-      const [sx, sy] = worldToScreen(view, replay.poses[i].x, replay.poses[i].y);
-      if (i === 0) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-    }
-    ctx.strokeStyle = cssVar("--muted");
-    ctx.lineWidth = 1.2;
-    ctx.setLineDash([2, 4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.beginPath();
-    for (let i = 0; i < replay.poses.length && replay.poses[i].tMs <= t; i++) {
-      const [sx, sy] = worldToScreen(view, replay.poses[i].x, replay.poses[i].y);
-      if (i === 0) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-    }
-    ctx.strokeStyle = cssVar("--active");
-    ctx.lineWidth = 2.4;
-    ctx.stroke();
-
-    const ghost = replay.poseAt(t);
-    if (ghost) {
-      const [gx, gy] = worldToScreen(view, ghost.x, ghost.y);
-      const size = Math.max(7, Math.min(16, 0.32 * view.zoom));
-      ctx.save();
-      ctx.translate(gx, gy);
-      ctx.rotate(-ghost.yaw);
-      ctx.beginPath();
-      ctx.moveTo(size * 1.4, 0);
-      ctx.lineTo(-size * 0.8, size * 0.75);
-      ctx.lineTo(-size * 0.8, -size * 0.75);
-      ctx.closePath();
-      ctx.strokeStyle = cssVar("--active");
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
+  // Recording replay is deliberately absent here: it opens in its own tab
+  // (pages/ReplayPage) so a past route can never be read as the robot's
+  // current position. See widgets/LiveMapWidget/ReplayMap.
   const pose = state.pose;
 
   // LiDAR points (polar -> world using the latest pose)
@@ -230,40 +244,38 @@ function drawScene(
     }
   }
 
-  // Robot marker: CMU-red triangle + heading + uncertainty ring
+  // The robot, drawn as its real 510 x 426 mm octagonal footprint to scale,
+  // plus an uncertainty ring and — when it is too small on screen to spot — a
+  // fixed-size locator arrow.
   if (pose) {
     const [rx, ry] = worldToScreen(view, pose.x, pose.y);
     if (pose.localized === false || (pose.covariance_trace ?? 0) > 0.25) {
+      // Uncertainty ring: at least the robot's own swing circle, so it never
+      // reads as tighter than the space the robot needs to turn around in.
       ctx.beginPath();
-      ctx.arc(rx, ry, Math.max(14, 0.6 * view.zoom), 0, Math.PI * 2);
+      ctx.arc(rx, ry, Math.max(14, ROBOT_SWING_RADIUS_M * 2 * view.zoom), 0, Math.PI * 2);
       ctx.fillStyle = "rgba(196, 18, 48, 0.12)";
       ctx.fill();
     }
-    const size = Math.max(7, Math.min(16, 0.32 * view.zoom));
-    ctx.save();
-    ctx.translate(rx, ry);
-    ctx.rotate(-pose.yaw); // screen y is flipped
-    ctx.beginPath();
-    ctx.moveTo(size * 1.4, 0);
-    ctx.lineTo(-size * 0.8, size * 0.75);
-    ctx.lineTo(-size * 0.8, -size * 0.75);
-    ctx.closePath();
-    ctx.fillStyle = cssVar("--cmu-red");
-    ctx.fill();
-    ctx.strokeStyle = cssVar("--surface");
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.restore();
+    const angle = -pose.yaw; // screen y is flipped
+    drawRobotBody(ctx, rx, ry, angle, view.zoom, {
+      fill: cssVar("--cmu-red"),
+      stroke: cssVar("--surface"),
+      accent: cssVar("--surface"),
+    });
+    if (ROBOT_LENGTH_M * view.zoom < MIN_LEGIBLE_ROBOT_PX) {
+      drawRobotLocator(ctx, rx, ry, angle);
+    }
   }
 
   if (pickArrow) {
     const angle = Math.hypot(pickArrow.ex - pickArrow.ax, pickArrow.ey - pickArrow.ay) > 8
       ? Math.atan2(pickArrow.ey - pickArrow.ay, pickArrow.ex - pickArrow.ax)
       : 0;
-    drawRobotGhost(ctx, pickArrow.ax, pickArrow.ay, angle);
+    drawRobotGhost(ctx, pickArrow.ax, pickArrow.ay, angle, view.zoom);
     drawPickArrow(ctx, pickArrow);
   } else if (pickHover) {
-    drawRobotGhost(ctx, pickHover[0], pickHover[1], 0);
+    drawRobotGhost(ctx, pickHover[0], pickHover[1], 0, view.zoom);
   }
 }
 
@@ -277,6 +289,8 @@ export function LiveMapWidget() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View | null>(null);
   const bitmapRef = useRef<{ key: string; bitmap: HTMLCanvasElement } | null>(null);
+  // Last drawn scene signature; identical means there is nothing new to paint.
+  const signatureRef = useRef<string>("");
   const [panning, setPanning] = useState(false);
   const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
   const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
@@ -296,9 +310,11 @@ export function LiveMapWidget() {
       const dpr = window.devicePixelRatio || 1;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
-      if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
+      const pixelWidth = Math.round(width * dpr);
+      const pixelHeight = Math.round(height * dpr);
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth;
+        canvas.height = pixelHeight;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -309,12 +325,33 @@ export function LiveMapWidget() {
       if (!viewRef.current) {
         viewRef.current = fitView(map, width, height);
       }
-      if (useUiStore.getState().followRobot) {
-        const pose = useTelemetryStore.getState().pose;
-        if (pose) viewRef.current = followView(viewRef.current, width, height, pose.x, pose.y);
+      const ui = useUiStore.getState();
+      const telemetry = useTelemetryStore.getState();
+      if (ui.followRobot && telemetry.pose) {
+        viewRef.current = followView(
+          viewRef.current, width, height, telemetry.pose.x, telemetry.pose.y);
       }
-      drawScene(ctx, viewRef.current, map, bitmapRef.current.bitmap, useUiStore.getState().mapLayers,
-                pickArrowRef.current, pickHoverRef.current);
+
+      // Redraw only when something actually changed. The scene rescales a
+      // multi-megapixel map bitmap, which is cheap on the mock's 120x120 grid
+      // and expensive on the real 3192x2205 one — at an unconditional 60 fps
+      // that alone made the tab sluggish. Telemetry arrives at ~15-20 Hz, so
+      // this drops most frames while staying instant on pan, zoom and picking.
+      const view = viewRef.current;
+      const pick = pickArrowRef.current;
+      const signature = [
+        telemetry.frameCount, theme, canvas.width, canvas.height,
+        view.zoom, view.panX, view.panY,
+        ui.mapLayers.lidar, ui.mapLayers.plannedPath,
+        ui.mapLayers.trajectory, ui.mapLayers.goal,
+        pick && `${pick.ax},${pick.ay},${pick.ex},${pick.ey}`,
+        pickHoverRef.current?.join(","),
+      ].join("|");
+      if (signature !== signatureRef.current) {
+        signatureRef.current = signature;
+        drawScene(ctx, view, map, bitmapRef.current.bitmap, ui.mapLayers,
+                  pick, pickHoverRef.current);
+      }
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);

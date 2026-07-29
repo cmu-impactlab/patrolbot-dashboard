@@ -44,6 +44,33 @@ def test_precheck_fails_closed_without_base_state():
     assert precheck("set_initial_pose", {"x": 1, "y": 2}, None) is None
 
 
+def test_precheck_names_the_charger_when_it_cut_the_motors():
+    """The base cuts motor power while the charger is engaged. Saying "enable
+    the motors" to an operator who has just enabled them sent them round that
+    loop five times on 2026-07-28."""
+    on_charge = dict(GOOD_BASE, motors_enabled=False, charge_state="charging")
+    reason = precheck("navigate_to_pose", {"x": 1, "y": 2}, on_charge)
+    assert reason is not None and "charger" in reason.lower()
+    assert "enable" not in reason.lower()
+
+    off_charge = dict(GOOD_BASE, motors_enabled=False, charge_state="not_charging")
+    reason = precheck("navigate_to_pose", {"x": 1, "y": 2}, off_charge)
+    assert reason is not None and "motors are off" in reason.lower()
+
+
+def test_precheck_trusts_clear_dock_observer_over_stale_charge():
+    clear = dict(
+        GOOD_BASE,
+        motors_enabled=False,
+        charge_state="float",
+        dock_state="CLEAR_CONFIRMED",
+        dock_state_valid=True,
+    )
+    reason = precheck("navigate_to_pose", {"x": 1, "y": 2}, clear)
+    assert reason is not None and "motors are off" in reason.lower()
+    assert "charger is engaged" not in reason.lower()
+
+
 def test_precheck_blocks_estop_and_motors_off():
     estop = dict(GOOD_BASE, estop_pressed=True)
     motors_off = dict(GOOD_BASE, motors_enabled=False)

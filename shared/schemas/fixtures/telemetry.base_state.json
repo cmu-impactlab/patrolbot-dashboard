@@ -15,6 +15,17 @@
     "fault_flags": 0,
     "stall_value": 0,
     "bumpers_front": false,
-    "bumpers_rear": false
+    "bumpers_rear": false,
+    "dock_state": "CLEAR_CONFIRMED",
+    "dock_state_valid": true,
+    "dock_phase": 0,
+    "dock_phase_name": "IDLE",
+    "undock_active": false,
+    "undock_release_attempts": 1,
+    "minimum_rear_range": 0.72,
+    "rear_sonar_usable": true,
+    "redock_inhibited": true,
+    "redock_inhibit_remaining": 18.4,
+    "undock_profile_commissioned": true
   }
 }

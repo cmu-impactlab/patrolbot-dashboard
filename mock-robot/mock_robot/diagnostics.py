@@ -38,13 +38,19 @@ def diagnostics_payload(elapsed: float, battery_level: float, bumper_active: boo
 
 def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
                        estop: bool, bumper_front: bool, bumper_rear: bool,
-                       motors_enabled: bool = True) -> dict:
+                       motors_enabled: bool = True,
+                       undock_active: bool = False) -> dict:
     if charging:
         charge_state = "charging"
     elif docked:
         charge_state = "docked"
     else:
         charge_state = "not_charging"
+    dock_state = (
+        "DEPARTING" if undock_active
+        else "DOCKED_CONFIRMED" if docked
+        else "CLEAR_CONFIRMED"
+    )
     return {
         "session_generation": session_generation,
         "link_connected": True,
@@ -57,4 +63,15 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
         "stall_value": 0,
         "bumpers_front": bumper_front,
         "bumpers_rear": bumper_rear,
+        "dock_state": dock_state,
+        "dock_state_valid": True,
+        "dock_phase": 1 if undock_active else 0,
+        "dock_phase_name": "MOVING" if undock_active else "IDLE",
+        "undock_active": undock_active,
+        "undock_release_attempts": 0,
+        "minimum_rear_range": 2.0,
+        "rear_sonar_usable": True,
+        "redock_inhibited": not docked,
+        "redock_inhibit_remaining": 30.0 if not docked else 0.0,
+        "undock_profile_commissioned": True,
     }

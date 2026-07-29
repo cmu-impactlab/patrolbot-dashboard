@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import WebSocket
 
 from ..protocol.envelope import Envelope, encode
-from ..protocol.messages import BatteryData, EventData
+from ..protocol.messages import BatteryData, CapabilitiesData, EventData
 from ..settings import Settings
 from .store import RobotState
 
@@ -30,7 +30,7 @@ log = logging.getLogger("hub")
 # Message types that must never be dropped from browser queues.
 PROTECTED_TYPES = {
     "server.snapshot", "state.connection", "state.robot_status",
-    "state.system_health", "event.append", "telemetry.map",
+    "state.system_health", "state.capabilities", "event.append", "telemetry.map",
     "command.ack", "command.progress", "command.result",
 }
 
@@ -147,7 +147,16 @@ class TelemetryHub:
         data_out: Any = envelope.data
 
         t = envelope.type
-        if t == "telemetry.heartbeat":
+        if t == "robot.hello":
+            # A later hello is a re-announcement, not a new session: the robot
+            # is telling us its capability set changed (e.g. its dock manager
+            # came up after the bridge did). Update and fan out so an open
+            # dashboard enables the matching controls without a reload.
+            state.set_capabilities(payload.capabilities)
+            self.publish("state.capabilities", session.robot_id,
+                         CapabilitiesData(capabilities=payload.capabilities))
+            rebroadcast = False
+        elif t == "telemetry.heartbeat":
             rebroadcast = False
         elif t == "telemetry.pose":
             events = state.record_pose(payload)

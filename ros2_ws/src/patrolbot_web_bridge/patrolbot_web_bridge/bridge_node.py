@@ -32,8 +32,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import BatteryState, LaserScan
 
 from . import normalizers, resources
-from .commands import DISABLED_REASON, CommandExecutor
-from .throttle import Throttle
+from .commands import CHARGING_STATES, DISABLED_REASON, CommandExecutor
+from .throttle import Debounce, Throttle
 from .ws_client import WsClient
 
 try:
@@ -71,37 +71,118 @@ class WebBridgeNode(Node):
             # non-trivial laser mount must be applied here. scan_mirror handles
             # an upside-down laser (180deg roll: rays (r, theta) -> (r, -theta));
             # scan_angle_offset (radians) handles a laser mounted rotated in yaw.
-            ("scan_mirror", False),
+            ("scan_mirror", True),
             ("scan_angle_offset", 0.0),
             # OFF by default: the 7 MB /map starves /scan when streamed off
             # the Pi (safety watchdog trips). The dashboard server serves a
             # local copy instead (PATROLBOT_STATIC_MAP_YAML).
             ("subscribe_map", False),
+            # Undock goal parameters. Deliberately node config, never browser
+            # input; the dock manager bounds them again with its own hard caps.
+            #
+            # These DEFAULTS have to be correct on their own: the deployed
+            # container starts the node with inline -p overrides and no
+            # --params-file, so config/web_bridge.yaml is not read at all and
+            # anything not overridden falls back to here.
+            #
+            # dock_id must equal the dock manager's own dock_id parameter or it
+            # rejects the goal outright ("unknown dock ID"). Distance/speed sit
+            # on the manager's validation-mode caps (0.10 m, 0.05 m/s), which
+            # it rejects rather than clamps.
+            ("undock_dock_id", "main_charger"),
+            # Commissioned 2026-07-26 after a validation-capped undock was
+            # accepted on the real robot: full reverse, validation mode off.
+            # 0.60 m sits under the manager's 0.70 m hard cap; 0.10 m/s is the
+            # cap. The manager still reverses via Nav2 BackUp and then turns
+            # (undock_turn_yaw), so the robot ends up clear of the dock.
+            ("undock_reverse_distance", 0.60),
+            # 0.10 m/s is the SBC's reverse authorization ceiling, not a
+            # cautious default — 0.20 got the motors cut mid-reverse.
+            ("undock_reverse_speed", 0.10),
+            # validation_mode is NOT a dry run — it just clamps to 0.10 m /
+            # 0.05 m/s and REJECTS anything above. Off now that the real
+            # sequence has been exercised.
+            ("undock_validation_mode", False),
+            # The dock is a fixed place, so a robot that reports charging is by
+            # definition at the dock pose. Ask the dock manager to seed
+            # localization from its configured dock pose when we see charging
+            # without a valid AMCL fix. The service is guarded — it runs its
+            # own zero-motion dock checks and refuses if the robot is not
+            # genuinely docked — so this can only ever confirm the truth.
+            #
+            # Was briefly OFF (2026-07-26): seeding worked, but a converged
+            # AMCL pose then killed the dock manager — _localization_health()
+            # derived its booleans from the numpy-backed covariance array, so
+            # rosidl's DockReadiness/Undock-feedback converter hit
+            # PyBool_Check -> SIGABRT, and the 20 s retry made it a crash loop.
+            # Fixed in patrolbot_dock_manager (bool() around valid/at_dock),
+            # same bug class as this repo's commit 3961041, so back ON.
+            ("auto_dock_pose_on_charge", True),
+            ("auto_dock_pose_retry_s", 20.0),
+            # How old an AMCL fix may be and still count as localized for the
+            # purposes of seeding. Generous: AMCL goes quiet on a stationary
+            # robot, so this is about detecting a dead/restarted AMCL, not
+            # ordinary idle silence.
+            ("localization_max_age_s", 30.0),
+            # A charger latching against marginal dock contacts inverts
+            # charge_state every few seconds. Everything downstream — the dock
+            # button's meaning, the command gates, the charging event log,
+            # auto_dock_pose_on_charge — treated each frame as truth. A charge
+            # reading now has to hold this long before it is published; real
+            # dock/undock transitions are one-way and settle immediately.
+            ("charge_settle_s", 4.0),
+            # Below this the pack is not under charge, whatever the battery
+            # driver's status bit claims. The charger holds ~29.7 V; a resting
+            # pack sits near 26 V. See normalizers.normalize_battery.
+            ("charge_voltage_min", 27.5),
         ])
         get = {param.name: param.value for param in p}
         server_url = os.environ.get("WEB_BRIDGE_SERVER_URL", get["server_url"])
         token = os.environ.get("WEB_BRIDGE_TOKEN", get["token"])
         self.cfg = get
 
+        # Every attribute the WsClient's callbacks can touch must exist before
+        # the socket thread starts: the server answers robot.hello with
+        # want_map almost immediately, and that lands on _resend_map from the
+        # ws thread. Starting the socket first left a window where the reply
+        # beat these assignments and the thread died on AttributeError.
         self._command_queue: deque[dict] = deque(maxlen=16)
-        self.ws = WsClient(server_url, token, get["robot_id"],
-                           on_map_wanted=self._resend_map,
-                           on_command=self._command_queue.append)
-        self.ws.start()
-
-        self._commands: CommandExecutor | None = None
-        if os.environ.get("WEB_BRIDGE_ENABLE_COMMANDS", "0") == "1":
-            self._commands = CommandExecutor(self, self.ws)
         self._latest_base_state: dict | None = None
-        self.create_timer(0.1, self._drain_commands)
-
         self._latest_odom: Odometry | None = None
         self._latest_amcl: PoseWithCovarianceStamped | None = None
+        self._latest_amcl_at = 0.0
         self._latest_map: OccupancyGrid | None = None
         self._map_signature: tuple | None = None
         self._map_version = 0
+
+        self.ws = WsClient(server_url, token, get["robot_id"],
+                           on_map_wanted=self._resend_map,
+                           on_command=self._command_queue.append)
+
+        self._commands: CommandExecutor | None = None
+        self._announced_capabilities: list[str] | None = None
+        self._last_dock_pose_attempt = 0.0
+        if os.environ.get("WEB_BRIDGE_ENABLE_COMMANDS", "0") == "1":
+            self._commands = CommandExecutor(self, self.ws, undock_config={
+                "dock_id": get["undock_dock_id"],
+                "reverse_distance": get["undock_reverse_distance"],
+                "reverse_speed": get["undock_reverse_speed"],
+                "validation_mode": get["undock_validation_mode"],
+            })
+            # Re-advertise as dock-manager servers come and go: capabilities
+            # are what the dashboard gates its controls on, and the manager may
+            # start after this node does.
+            self.create_timer(2.0, self._refresh_capabilities)
+        self.create_timer(0.1, self._drain_commands)
+
         self._last_path_points: list | None = None
         self._start = self.get_clock().now()
+
+        # Both charge signals reach the dashboard on separate topics, so both
+        # need settling — otherwise a debounced charge_state still sits beside
+        # a battery widget flickering "Charging" on and off.
+        self._charge_state_debounce = Debounce(float(get["charge_settle_s"]))
+        self._charging_debounce = Debounce(float(get["charge_settle_s"]))
 
         self._pose_throttle = Throttle(float(get["pose_interval"]))
         self._scan_throttle = Throttle(float(get["scan_interval"]))
@@ -130,6 +211,10 @@ class WebBridgeNode(Node):
                 "patrolbot_interfaces not available — base_state telemetry disabled")
 
         self.create_timer(float(get["slow_interval"]), self._slow_tick)
+
+        # Last: the socket thread can call back into this node the moment it
+        # connects, so everything it touches is in place before it starts.
+        self.ws.start()
         self.get_logger().info(f"web bridge up; streaming to {server_url}")
 
     # -- callbacks -------------------------------------------------------------
@@ -140,6 +225,7 @@ class WebBridgeNode(Node):
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
         self._latest_amcl = msg
+        self._latest_amcl_at = self.get_clock().now().nanoseconds / 1e9
         self._maybe_send_pose()
 
     def _maybe_send_pose(self) -> None:
@@ -169,15 +255,67 @@ class WebBridgeNode(Node):
             self.ws.send("telemetry.path", payload)
 
     def _on_battery(self, msg: BatteryState) -> None:
-        self.ws.send("telemetry.battery", normalizers.normalize_battery(msg))
+        payload = normalizers.normalize_battery(
+            msg, charge_voltage_min=float(self.cfg["charge_voltage_min"]))
+        payload["charging"] = self._charging_debounce.update(payload["charging"])
+        self.ws.send("telemetry.battery", payload)
 
     def _on_diagnostics(self, msg: DiagnosticArray) -> None:
         self.ws.send("telemetry.diagnostics", normalizers.normalize_diagnostics(msg))
 
     def _on_base_state(self, msg) -> None:
         payload = normalizers.normalize_base_state(msg)
+        # Settle before anything reads it: _latest_base_state feeds the local
+        # command prechecks, the payload feeds the server's gates and the UI,
+        # and _maybe_seed_dock_pose re-seeds localization off it.
+        payload["charge_state"] = self._charge_state_debounce.update(payload["charge_state"])
         self._latest_base_state = payload
         self.ws.send("telemetry.base_state", payload)
+        self._maybe_seed_dock_pose(payload)
+
+    def _maybe_seed_dock_pose(self, base_state: dict) -> None:
+        """A charging robot is, by definition, at the dock — and the dock does
+        not move. So when we see charging without a usable localization fix,
+        ask the dock manager to seed the pose it has configured.
+
+        Deliberately routed through /patrolbot/initialize_dock_pose rather than
+        publishing /initialpose here: that service re-checks that the robot is
+        really docked and stationary before it publishes anything, so a stale
+        or wrong charge reading cannot teleport the robot's estimate.
+        """
+        if self._commands is None or not bool(self.cfg["auto_dock_pose_on_charge"]):
+            return
+        # Retries stop on their own once AMCL has a tight enough fix, so there
+        # is no "already done" flag to get out of sync with reality.
+        if base_state.get("charge_state") not in CHARGING_STATES:
+            return
+        if self._localization_is_usable():
+            return
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self._last_dock_pose_attempt < float(self.cfg["auto_dock_pose_retry_s"]):
+            return
+        self._last_dock_pose_attempt = now
+        if self._commands.initialize_dock_pose(str(self.cfg["undock_dock_id"])):
+            self.get_logger().info(
+                "charging without a localization fix — seeding the dock pose")
+
+    def _localization_is_usable(self) -> bool:
+        """A tight covariance is not enough — the fix has to be recent too.
+
+        Nav2 restarting leaves this node holding the last pose AMCL ever sent,
+        which still looks confident. Judging on covariance alone meant the
+        bridge believed localization was fine and never re-seeded the dock
+        pose, while the dock manager (which does check age) sat refusing to
+        undock with "localization invalid".
+        """
+        if self._latest_amcl is None:
+            return False
+        age = self.get_clock().now().nanoseconds / 1e9 - self._latest_amcl_at
+        if age > float(self.cfg["localization_max_age_s"]):
+            return False
+        covariance = self._latest_amcl.pose.covariance
+        trace = float(covariance[0] + covariance[7] + covariance[35])
+        return trace <= float(self.cfg["covariance_warn_threshold"])
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         signature = normalizers.map_signature(msg)
@@ -215,6 +353,29 @@ class WebBridgeNode(Node):
                 q = self._latest_amcl.pose.pose.orientation
                 current_yaw = normalizers.quaternion_to_yaw(q.x, q.y, q.z, q.w)
             self._commands.handle(data, self._latest_base_state, current_yaw)
+
+    def _refresh_capabilities(self) -> None:
+        """Tell the dashboard which dock operations are actually available.
+
+        Advertising is the commissioning switch: the dashboard greys out any
+        control whose capability the robot has not claimed, so nothing is
+        offered until the dock manager is genuinely up and answering.
+        """
+        if self._commands is None:
+            return
+        # Same 2 s tick releases an undock whose action server died holding the
+        # goal; otherwise the bridge refuses every later attempt with "already
+        # undocking" until the container is restarted.
+        self._commands.check_undock_health()
+        available = self._commands.available_capabilities()
+        # Log through the ROS logger, not the stdlib one: nothing configures a
+        # stdlib handler in the container, so log.info there goes nowhere and
+        # this transition is exactly what an operator needs to see.
+        if available != self._announced_capabilities:
+            self._announced_capabilities = available
+            self.get_logger().info(
+                f"dock capabilities: {', '.join(available) if available else 'none available'}")
+        self.ws.set_dock_capabilities(available)
 
     def _slow_tick(self) -> None:
         uptime = (self.get_clock().now() - self._start).nanoseconds / 1e9

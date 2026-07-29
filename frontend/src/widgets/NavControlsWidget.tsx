@@ -1,6 +1,11 @@
-import { Anchor, Crosshair, MapPin, Octagon, Play, X } from "lucide-react";
+import {
+  Anchor, ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, X,
+} from "lucide-react";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import {
+  dockAction, dockReason, factsFrom, undockReason,
+} from "../lib/dockGates";
 
 const OUTCOME_COPY: Record<string, string> = {
   succeeded: "Done",
@@ -11,14 +16,23 @@ const OUTCOME_COPY: Record<string, string> = {
 };
 
 /**
- * Goal-based commands only (send-to-destination, set-location, stop). There is
- * deliberately no joystick/velocity control, and "Return to Dock" stays
- * disabled because the robot has no autonomous dock-in — enabling it would
- * teach users an interaction the robot doesn't support.
+ * Goal-based commands only (send-to-destination, set-location, stop, dock and
+ * undock). There is deliberately no joystick/velocity control — undock
+ * included, which is an action the robot executes rather than velocity
+ * published from a browser.
+ *
+ * Dock and undock share one button, because they are never both available:
+ * the robot is either on its charger or it isn't. The label follows the
+ * robot's actual state, so the button always reads as the thing that would
+ * change it.
  */
 export function NavControlsWidget() {
   const connection = useTelemetryStore((state) => state.connection);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
+  const baseState = useTelemetryStore((state) => state.baseState);
+  const pose = useTelemetryStore((state) => state.pose);
+  const capabilities = useTelemetryStore((state) => state.capabilities);
+  const send = useCommandStore((state) => state.send);
   const active = useCommandStore((state) => state.active);
   const lastResult = useCommandStore((state) => state.lastResult);
   const pickMode = useCommandStore((state) => state.pickMode);
@@ -41,6 +55,19 @@ export function NavControlsWidget() {
   // unconfirmed pose.
   const canNavigate = online && poseSetThisSession;
   const gateHint = "Set the robot's 2D location before sending it anywhere.";
+
+  // One button, two commands: whichever one the robot's current state makes
+  // meaningful. Its disabled reason is the same sentence the server would
+  // reject with, so the UI never silently disagrees with the robot.
+  const facts = factsFrom(connection.state, baseState, pose, capabilities,
+    active?.command === "navigate_to_pose");
+  const dockCommand = dockAction(facts);
+  const undocking = dockCommand === "undock";
+  const dockBlockedReason = undocking ? undockReason(facts) : dockReason(facts);
+  const dockBusy =
+    active?.command === "dock"
+    || active?.command === "undock"
+    || facts.undockActive;
 
   return (
     <div>
@@ -105,8 +132,19 @@ export function NavControlsWidget() {
         >
           <Crosshair size={15} /> Set Robot Location
         </button>
-        <button className="btn" disabled title="This robot has no automatic docking — drive it onto the dock manually">
-          <Anchor size={15} /> Return to Dock
+        <button
+          className={`btn ${undocking ? "danger" : ""}`}
+          disabled={dockBlockedReason !== null || dockBusy}
+          onClick={() => send(dockCommand)}
+          title={
+            dockBlockedReason
+              ?? (undocking
+                ? "Move the robot clear of its charging dock and turn it around"
+                : "Send the robot to its charging dock and charge")
+          }
+        >
+          {undocking ? <ArrowUpFromDot size={15} /> : <Anchor size={15} />}
+          {facts.undockActive ? "Undocking…" : undocking ? "Undock" : "Dock & Charge"}
         </button>
         {offerResume ? (
           <>
@@ -156,6 +194,11 @@ export function NavControlsWidget() {
           </button>
         )}
       </div>
+      {online && !dockBusy && dockBlockedReason && (
+        <p className="subtext nav-dock-reason">
+          {undocking ? "Undock" : "Dock & Charge"} — {dockBlockedReason}
+        </p>
+      )}
       <p className="subtext" style={{ marginTop: 10 }}>
         In an actual emergency always use the red physical emergency-stop button on the robot —
         never rely on a software button.

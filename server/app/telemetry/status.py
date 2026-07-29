@@ -47,6 +47,17 @@ def derive_status(
 ) -> RobotStatusData:
     status = "ready"
     detail = STATUS_DETAILS["ready"]
+    custom_detail = False
+    on_dock = False
+    if base_state is not None:
+        if base_state.dock_state_valid is not None:
+            on_dock = (
+                base_state.dock_state_valid
+                and (base_state.dock_state or "").strip().upper()
+                == "DOCKED_CONFIRMED"
+            )
+        else:
+            on_dock = base_state.charge_state.lower() in DOCKED_STATES
 
     if connection == "offline":
         status = "offline"
@@ -64,9 +75,14 @@ def derive_status(
         status = "needs_attention"
         worst = next(item for item in diagnostics.items if item.level == "ERROR")
         detail = f"A system reported a problem: {worst.message}"
-    elif base_state is not None and base_state.charge_state.lower() in CHARGING_STATES:
+    elif base_state is not None and base_state.undock_active:
+        status = "navigating"
+        detail = "The robot is moving clear of its charging dock."
+        custom_detail = True
+    elif (base_state is not None and on_dock
+          and base_state.charge_state.lower() in CHARGING_STATES):
         status = "charging"
-    elif base_state is not None and base_state.charge_state.lower() in DOCKED_STATES:
+    elif base_state is not None and on_dock:
         status = "docked"
     elif base_state is not None and not base_state.motors_enabled:
         status = "paused"
@@ -77,7 +93,7 @@ def derive_status(
     elif path is not None and path.goal is not None and pose is not None and abs(pose.linear_velocity) > 0.02:
         status = "navigating"
 
-    if status in STATUS_DETAILS and status not in {"needs_attention"}:
+    if status in STATUS_DETAILS and status != "needs_attention" and not custom_detail:
         detail = STATUS_DETAILS[status]
     return RobotStatusData(status=status, detail=detail)
 

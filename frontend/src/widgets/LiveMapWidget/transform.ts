@@ -35,6 +35,45 @@ export function fitView(map: MapData, canvasWidth: number, canvasHeight: number,
   };
 }
 
+/**
+ * Frame a set of world points (a recorded route) rather than the whole map.
+ *
+ * A patrol usually covers a small part of the building, so fitting the map
+ * would leave the robot as a speck. The zoom is capped so a stationary
+ * recording does not end up magnified to absurdity.
+ */
+export function fitPoints(
+  points: [number, number][],
+  canvasWidth: number,
+  canvasHeight: number,
+  padding = 48,
+): View {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  }
+  if (!Number.isFinite(minX)) return { zoom: 30, panX: canvasWidth / 2, panY: canvasHeight / 2 };
+  // A floor is at least this wide, so a robot that barely moved still gets
+  // useful surroundings instead of a blank close-up.
+  const worldWidth = Math.max(maxX - minX, 4);
+  const worldHeight = Math.max(maxY - minY, 4);
+  const zoom = Math.min(
+    120,
+    Math.max(2,
+      Math.min((canvasWidth - padding * 2) / worldWidth,
+               (canvasHeight - padding * 2) / worldHeight)),
+  );
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  return {
+    zoom,
+    panX: canvasWidth / 2 - centerX * zoom,
+    panY: canvasHeight / 2 + centerY * zoom,
+  };
+}
+
 export function zoomAt(view: View, sx: number, sy: number, factor: number): View {
   const [wx, wy] = screenToWorld(view, sx, sy);
   const zoom = Math.min(400, Math.max(2, view.zoom * factor));

@@ -61,6 +61,8 @@ export interface TelemetryState {
   lastKnownPose: GoalData | null;
   /** Whether a 2D location has been set this session (gates navigation). */
   poseSetThisSession: boolean;
+  /** Capabilities the connected robot declared; gates the dock/undock controls. */
+  capabilities: string[];
 
   setWsConnected: (connected: boolean) => void;
   handleFrame: (frame: AnyFrame) => void;
@@ -146,6 +148,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   seenEventIds: loadSeenIds(),
   lastKnownPose: null,
   poseSetThisSession: false,
+  capabilities: [],
 
   setWsConnected: (connected) =>
     set(
@@ -157,6 +160,9 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             status: initialStatus,
             // A dropped socket ends the session; the pose must be set again.
             poseSetThisSession: false,
+            // Whatever reconnects may be a different robot — the snapshot
+            // that follows re-declares what it can do.
+            capabilities: [],
           },
     ),
 
@@ -197,6 +203,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           mapVersion: data.map_version,
           events: data.events,
           lastKnownPose: data.last_known_pose ?? null,
+          capabilities: data.capabilities ?? [],
           // A snapshot starts a fresh session — drop lines drawn for the
           // previous robot/connection instead of mixing them in, and require
           // the 2D location to be set again before navigating.
@@ -230,6 +237,9 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         break;
       case "state.system_health":
         set({ ...bump, health: frame.data });
+        break;
+      case "state.capabilities":
+        set({ ...bump, capabilities: frame.data.capabilities });
         break;
       case "event.append":
         set({ ...bump, events: [frame.data, ...get().events].slice(0, 200) });

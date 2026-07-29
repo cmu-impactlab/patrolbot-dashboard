@@ -1,8 +1,12 @@
 """Command lifecycle broker: browser request -> robot, replies -> browsers.
 
 Safety posture:
-- Goal-based commands only (navigate_to_pose, set_initial_pose, stop);
-  there is deliberately no velocity teleop path.
+- Goal-based commands only (navigate_to_pose, set_initial_pose, stop) plus the
+  discrete charging/motor/dock steps (charge_release, motor_enable, dock,
+  undock); there is deliberately no velocity teleop path — undock included,
+  which is an action on the robot, never browser-published velocity.
+- The charging/motor/dock steps are additionally gated on live hardware
+  telemetry by commands.gates before they are forwarded.
 - Fail-closed: anything not explicitly valid is rejected with a synthesized
   command.ack, and the browser is never left waiting — missing acks and
   results are closed out by server-side timeouts.
@@ -19,6 +23,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from . import gates
 from ..protocol.envelope import Envelope, encode
 from ..protocol.messages import (
     CommandAckData,
@@ -37,6 +42,10 @@ COMMAND_LABELS = {
     "navigate_to_pose": "Send robot to a destination",
     "set_initial_pose": "Set robot location on the map",
     "stop": "Stop the robot",
+    "charge_release": "Release charging",
+    "motor_enable": "Enable motors",
+    "dock": "Send robot to its charging dock",
+    "undock": "Move robot off its charging dock",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
 
@@ -135,6 +144,14 @@ class CommandBroker:
                                        "try again once it is online.")
             return
 
+        # 5. Hardware-state gate for the charging/motor/dock commands. The UI
+        #    greys these out for the same reasons, but a hidden button is not
+        #    authorization — the decision is made here, from telemetry.
+        reason = self._validate_robot_state(session, command)
+        if reason is not None:
+            await self._reject_audited(client, robot_id, command_id, command, reason)
+            return
+
         if self.hub.db is not None:
             await self.hub.db.add_command_audit(
                 envelope.robot_id, command_id, command,
@@ -148,7 +165,11 @@ class CommandBroker:
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
 
-        frame = encode("command.request", envelope.robot_id, self.hub._next_seq(), payload)
+        # Stamp authorization from the verified session, overwriting whatever
+        # the browser sent. The robot's guarded operations trust this flag, so
+        # it must never be attacker-controlled.
+        forwarded = payload.model_copy(update={"operator_authorized": True})
+        frame = encode("command.request", envelope.robot_id, self.hub._next_seq(), forwarded)
         try:
             await session.websocket.send_text(frame)
         except Exception as exc:  # socket died between the check and the send
@@ -206,6 +227,19 @@ class CommandBroker:
             if abs(goal.x) > limit or abs(goal.y) > limit:
                 return "That destination is too far away to be valid."
         return None
+
+    def _validate_robot_state(self, session: "RobotSession", command: str) -> str | None:
+        """Refusal reason for a charging/motor/dock command, from live state."""
+        if command not in gates.GATES:
+            return None
+        state = session.state
+        navigating = any(entry.command == "navigate_to_pose"
+                         and entry.robot_id == session.robot_id
+                         for entry in self.active.values())
+        facts = gates.facts_from_state(state.connection, state.base_state.data,
+                                       state.pose.data, state.capabilities,
+                                       navigating=navigating)
+        return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:
         self._seen[command_id] = None

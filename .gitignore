@@ -26,3 +26,4 @@ ros2_ws/log/
 .DS_Store
 infrastructure/nginx/certs/
 infrastructure/.env
+docs/

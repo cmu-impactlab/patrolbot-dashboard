@@ -4,6 +4,8 @@ import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { RestorePosePrompt } from "./components/RestorePosePrompt";
 import { TopBar } from "./components/TopBar";
+import { replayIdFromUrl } from "./lib/replayTab";
+import { ReplayPage } from "./pages/ReplayPage";
 import { useLayoutStore, type SavedLayout } from "./stores/layoutStore";
 import { useTelemetrySocket } from "./websocket/useTelemetrySocket";
 
@@ -31,9 +33,12 @@ function Dashboard() {
 }
 
 export default function App() {
+  // ?replay=<id> is the standalone replay view; the dashboard never navigates,
+  // so reading the URL once at mount is enough.
+  const replayId = replayIdFromUrl();
   return (
     <AuthGate>
-      <Dashboard />
+      {replayId === null ? <Dashboard /> : <ReplayPage recordingId={replayId} />}
     </AuthGate>
   );
 }

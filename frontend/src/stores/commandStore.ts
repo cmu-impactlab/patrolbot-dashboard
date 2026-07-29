@@ -21,11 +21,19 @@ export interface ActiveCommand {
 }
 
 export interface CommandResultInfo {
+  /** The request UUID this outcome belongs to — shown verbatim next to the
+   *  charging/dock controls so a result can be matched to the audit log. */
+  commandId: string | null;
   command: CommandType;
   outcome: CommandOutcome;
   detail: string | null;
   at: number;
 }
+
+/** Commands that hand the robot the ability to move, or take it away. A
+ *  pending destination must not survive one — requiring a new, explicit
+ *  operator action afterwards is the whole point. */
+const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock", "dock"];
 
 interface CommandState {
   active: ActiveCommand | null;
@@ -99,6 +107,12 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     if (command === "navigate_to_pose" && get().stoppedGoal && goal !== undefined) {
       set({ stoppedGoal: null });
     }
+    // So does anything that changes whether the robot can move at all: after
+    // a charge release, motor enable, dock or undock the operator starts from
+    // a clean slate rather than being offered a stale destination to resume.
+    if (CLEARS_PENDING_GOAL.includes(command)) {
+      set({ stoppedGoal: null });
+    }
     // Remember the intent so a lease rejection can be retried as a takeover.
     set({ lastAttempt: { command, goal } });
     const commandId = crypto.randomUUID();
@@ -114,7 +128,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({
         pickMode: "none",
         lastResult: {
-          command, outcome: "failed", at: Date.now(),
+          commandId, command, outcome: "failed", at: Date.now(),
           detail: "Not connected to the dashboard server.",
         },
       });
@@ -139,6 +153,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     set({
       active: active?.commandId === data.command_id ? null : active,
       lastResult: {
+        commandId: data.command_id,
         command: active?.command ?? "navigate_to_pose",
         outcome: "rejected",
         detail: data.reason ?? "The command was not accepted.",
@@ -169,6 +184,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     set({
       active: null,
       lastResult: {
+        commandId: data.command_id,
         command: active.command,
         outcome: data.outcome,
         detail: data.detail ?? null,

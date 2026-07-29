@@ -1,29 +1,48 @@
 import { useTelemetryStore } from "../stores/telemetryStore";
+import {
+  ROBOT_FOOTPRINT_M, ROBOT_LENGTH_M, WHEEL_HALF_LENGTH_M, WHEEL_Y_M,
+} from "../lib/robotGeometry";
 
 /**
- * Top-down view of the PatrolBot matching the manual's dimension drawing
- * (User's Guide Fig. 8-1): an octagonal footprint 589 mm wide x 483 mm
- * deep whose perimeter facets are the segmented bumper panels — three
- * across the front (left diagonal, front face, right diagonal), three
- * across the rear, with the drive wheels on the flat side faces. The
- * hardware reports each group as a whole, so all three panels of a hit
- * group light together.
+ * Top-down view of the PatrolBot at its true proportions: the octagonal
+ * 510 x 426 mm footprint from lib/robotGeometry (the polygon Nav2 plans
+ * with, out of the robot's own ARIA params), whose perimeter facets are the
+ * segmented bumper panels — three across the front (left diagonal, front
+ * face, right diagonal), three across the rear, with the drive wheels on the
+ * flat side faces. The hardware reports each group as a whole, so all three
+ * panels of a hit group light together.
+ *
+ * The robot is longer than it is wide; an earlier version of this drawing had
+ * those axes the other way round.
  */
 
-// Octagon centered at (100, 120); half-width 82, half-height 66 keeps the
-// manual's 589:483 aspect ratio. FRONT is up.
 const CX = 100;
 const CY = 120;
-const P = {
-  frontL: [-38, -66], frontR: [38, -66],   // front face
-  sideRT: [82, -22], sideRB: [82, 22],     // right face (wheel)
-  rearR: [38, 66], rearL: [-38, 66],       // rear face
-  sideLB: [-82, 22], sideLT: [-82, -22],   // left face (wheel)
-} as const;
+// FRONT is up, so the robot's +x (forward) maps to -y on screen and its +y
+// (left) maps to -x. Scale set so the 510 mm length fills 150 px.
+const PX_PER_M = 150 / ROBOT_LENGTH_M;
+
+function project([x, y]: readonly [number, number]): readonly [number, number] {
+  return [-y * PX_PER_M, -x * PX_PER_M];
+}
+
+const [frontR, frontL, sideLT, sideLB, rearL, rearR, sideRB, sideRT] =
+  ROBOT_FOOTPRINT_M.map(project);
+
+const P = { frontL, frontR, sideRT, sideRB, rearR, rearL, sideLB, sideLT } as const;
 
 function pt([x, y]: readonly [number, number], scale = 1): string {
   return `${CX + x * scale} ${CY + y * scale}`;
 }
+
+// Drive wheels straddle the two flat side faces, centred front-to-back.
+const WHEEL_X = WHEEL_Y_M * PX_PER_M;
+const WHEEL_HALF_LEN = WHEEL_HALF_LENGTH_M * PX_PER_M;
+const WHEEL_THICKNESS = 9;
+// Laser window sits just inside the front face.
+const FRONT_Y = P.frontL[1];
+const LASER_Y = FRONT_Y + 7;
+const LASER_HALF = Math.abs(P.frontL[0]) * 0.85;
 
 const BODY = `M ${pt(P.frontL)} L ${pt(P.frontR)} L ${pt(P.sideRT)} L ${pt(P.sideRB)} ` +
   `L ${pt(P.rearR)} L ${pt(P.rearL)} L ${pt(P.sideLB)} L ${pt(P.sideLT)} Z`;
@@ -76,17 +95,19 @@ export function BumpersWidget() {
         <PanelGroup panels={FRONT_PANELS} pressed={front} />
         <PanelGroup panels={REAR_PANELS} pressed={rear} />
 
-        {/* Octagonal chassis (589 x 483 mm footprint, FRONT up) */}
+        {/* Octagonal chassis (510 mm front-to-back x 426 mm across, FRONT up) */}
         <path d={BODY} fill="var(--surface-2)" stroke="var(--border)" strokeWidth="2" />
 
-        {/* Drive wheels on the flat side faces */}
-        <rect x="12" y="98" width="9" height="44" rx="4" fill="var(--muted)" />
-        <rect x="179" y="98" width="9" height="44" rx="4" fill="var(--muted)" />
+        {/* Drive wheels straddling the flat side faces */}
+        <rect x={CX - WHEEL_X - WHEEL_THICKNESS / 2} y={CY - WHEEL_HALF_LEN}
+              width={WHEEL_THICKNESS} height={WHEEL_HALF_LEN * 2} rx="4" fill="var(--muted)" />
+        <rect x={CX + WHEEL_X - WHEEL_THICKNESS / 2} y={CY - WHEEL_HALF_LEN}
+              width={WHEEL_THICKNESS} height={WHEEL_HALF_LEN * 2} rx="4" fill="var(--muted)" />
 
         {/* Laser window across the front and heading wedge */}
-        <path d={`M ${pt([-30, -58])} L ${pt([30, -58])}`} stroke="var(--info)"
-              strokeWidth="4" strokeLinecap="round" opacity="0.6" />
-        <path d={`M ${pt([0, -34])} L ${pt([13, -8])} L ${pt([-13, -8])} Z`}
+        <path d={`M ${pt([-LASER_HALF, LASER_Y])} L ${pt([LASER_HALF, LASER_Y])}`}
+              stroke="var(--info)" strokeWidth="4" strokeLinecap="round" opacity="0.6" />
+        <path d={`M ${pt([0, FRONT_Y * 0.45])} L ${pt([13, -8])} L ${pt([-13, -8])} Z`}
               fill="var(--cmu-red)" />
 
         <text x="100" y="230" textAnchor="middle" className="bumper-label">REAR</text>

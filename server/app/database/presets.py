@@ -12,7 +12,7 @@ PRESET_LAYOUTS = {
         "layouts": {
             "lg": [
                 {"i": "robotStatus", "x": 0, "y": 0, "w": 3, "h": 9},
-                {"i": "navControls", "x": 0, "y": 9, "w": 3, "h": 9},
+                {"i": "navControls", "x": 0, "y": 9, "w": 3, "h": 10},
                 {"i": "liveMap", "x": 3, "y": 0, "w": 6, "h": 22},
                 {"i": "battery", "x": 9, "y": 0, "w": 3, "h": 12},
                 {"i": "alerts", "x": 9, "y": 12, "w": 3, "h": 10},

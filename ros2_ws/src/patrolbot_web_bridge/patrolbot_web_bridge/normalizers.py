@@ -123,12 +123,25 @@ def normalize_path(path: Any, max_points: int = 200) -> dict:
     return {"frame_id": "map", "points": points, "goal": goal}
 
 
-def normalize_battery(battery: Any) -> dict:
+def normalize_battery(battery: Any, charge_voltage_min: float | None = None) -> dict:
     """sensor_msgs/BatteryState → payload.
 
     The PatrolBot firmware's state-of-charge is documented as not applicable
     for this model, so percentage is passed through only when finite — the
     server's voltage-trend estimator is the real source of remaining time.
+
+    power_supply_status carries no validity flag (unlike BaseState, which has
+    charge_state_valid) and this driver reports current as a constant 0.0, so
+    the status bit is the only charge signal there is — and it lies. On
+    2026-07-28, 38% of the samples it flagged as charging were below the
+    charge voltage, including 81 consecutive samples pinned at exactly 25.9 V
+    taken right after the robot had backed 0.60 m clear of the dock.
+
+    So the claim is cross-checked against the one measurement that cannot be
+    faked: a pack under charge sits at the charger's output voltage, well
+    above its resting voltage. Below charge_voltage_min, "charging" is not
+    believed. This only ever clears the flag — it never invents charging that
+    the driver did not report.
     """
     percentage = battery.percentage
     if percentage is not None and math.isfinite(percentage):
@@ -139,6 +152,9 @@ def normalize_battery(battery: Any) -> dict:
     current = _finite(battery.current, 2)
     # POWER_SUPPLY_STATUS_CHARGING == 1
     charging = getattr(battery, "power_supply_status", 0) == 1
+    if (charging and charge_voltage_min is not None
+            and math.isfinite(battery.voltage) and battery.voltage < charge_voltage_min):
+        charging = False
     return {
         "voltage": round(battery.voltage, 2),
         "current": current,
@@ -152,6 +168,14 @@ def normalize_base_state(state: Any) -> dict:
     if not getattr(state, "charge_state_valid", True):
         charge = "unknown"
     bumpers_valid = getattr(state, "bumpers_valid", True)
+    # The SBC-owned dock observer is authoritative for physical dock contact.
+    # charge_state is only one noisy input to it and can re-latch after the
+    # robot has proved that it is clear. Keep both signals in the dashboard
+    # payload so the UI never turns a stale charger level back into "docked".
+    dock_state_valid = bool(getattr(state, "dock_state_valid", False))
+    dock_state = str(getattr(state, "dock_state", "UNKNOWN")).strip().upper()
+    if not dock_state_valid:
+        dock_state = "UNKNOWN"
     return {
         "session_generation": int(state.session_generation),
         "link_connected": bool(state.link_connected),
@@ -164,6 +188,20 @@ def normalize_base_state(state: Any) -> dict:
         "stall_value": int(state.stall_value),
         "bumpers_front": bool(state.front_bumper_pressed) if bumpers_valid else False,
         "bumpers_rear": bool(state.rear_bumper_pressed) if bumpers_valid else False,
+        "dock_state": dock_state,
+        "dock_state_valid": dock_state_valid,
+        "dock_phase": int(getattr(state, "dock_phase", 0)),
+        "dock_phase_name": str(getattr(state, "dock_phase_name", "IDLE")),
+        "undock_active": bool(getattr(state, "undock_active", False)),
+        "undock_release_attempts": int(getattr(state, "undock_release_attempts", 0)),
+        "minimum_rear_range": _finite(
+            getattr(state, "minimum_rear_range", None), 3),
+        "rear_sonar_usable": bool(getattr(state, "rear_sonar_usable", False)),
+        "redock_inhibited": bool(getattr(state, "redock_inhibited", False)),
+        "redock_inhibit_remaining": round(
+            float(getattr(state, "redock_inhibit_remaining", 0.0)), 1),
+        "undock_profile_commissioned": bool(
+            getattr(state, "undock_profile_commissioned", False)),
     }
 
 

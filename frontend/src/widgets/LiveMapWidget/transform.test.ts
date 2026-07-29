@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MapData } from "../../types/protocol";
-import { fitView, followView, screenToWorld, worldToScreen, zoomAt } from "./transform";
+import { fitPoints, fitView, followView, screenToWorld, worldToScreen, zoomAt } from "./transform";
 
 const MAP: MapData = {
   map_version: 1,
@@ -49,6 +49,41 @@ describe("map transform", () => {
     expect(wxAfter).toBeCloseTo(wxBefore);
     expect(wyAfter).toBeCloseTo(wyBefore);
     expect(zoomed.zoom).toBeCloseTo(30);
+  });
+
+  it("fitPoints frames a recorded route rather than the whole map", () => {
+    const route: [number, number][] = [[10, 10], [20, 10], [20, 18]];
+    const view = fitPoints(route, 800, 600);
+    const [cx, cy] = worldToScreen(view, 15, 14); // the route's centre
+    expect(cx).toBeCloseTo(400);
+    expect(cy).toBeCloseTo(300);
+    // Every waypoint lands inside the canvas...
+    for (const [x, y] of route) {
+      const [sx, sy] = worldToScreen(view, x, y);
+      expect(sx).toBeGreaterThanOrEqual(0);
+      expect(sx).toBeLessThanOrEqual(800);
+      expect(sy).toBeGreaterThanOrEqual(0);
+      expect(sy).toBeLessThanOrEqual(600);
+    }
+    // ...and much closer in than fitting a real building would have been: a
+    // patrol covers a corner of the floor, not the whole of it.
+    const building: MapData = { ...MAP, width: 3192, height: 2205, resolution: 0.05 };
+    expect(view.zoom).toBeGreaterThan(fitView(building, 800, 600).zoom * 5);
+  });
+
+  it("fitPoints caps the zoom for a robot that barely moved", () => {
+    const view = fitPoints([[3, 3], [3.02, 3.01]], 800, 600);
+    expect(view.zoom).toBeLessThanOrEqual(120);
+    const [cx] = worldToScreen(view, 3.01, 3.005);
+    expect(cx).toBeCloseTo(400, 0);
+  });
+
+  it("fitPoints survives an empty or non-finite route", () => {
+    expect(fitPoints([], 800, 600).zoom).toBeGreaterThan(0);
+    const view = fitPoints([[NaN, 1], [4, 6]], 800, 600);
+    const [cx, cy] = worldToScreen(view, 4, 6);
+    expect(cx).toBeCloseTo(400);
+    expect(cy).toBeCloseTo(300);
   });
 
   it("followView centers the robot", () => {

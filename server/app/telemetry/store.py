@@ -63,6 +63,9 @@ class RobotState:
     last_heartbeat_mono: float | None = None
     last_seen: str | None = None
     connection: str = "offline"
+    # What the robot declared in robot.hello. Drives which optional controls
+    # (dock/undock) the UI offers; the command gates read it too.
+    capabilities: list[str] = field(default_factory=list)
     battery_estimate: BatteryEstimate | None = None
     recording: bool = False  # a telemetry recording is in progress
 
@@ -105,6 +108,11 @@ class RobotState:
         if self.last_heartbeat_mono is None:
             return None
         return max(0.0, time.monotonic() - self.last_heartbeat_mono)
+
+    def set_capabilities(self, capabilities: list[str]) -> None:
+        """Replace the capability list on every hello. A reconnecting robot may
+        be a different build (or the mock), so this never merges."""
+        self.capabilities = list(capabilities)
 
     def record_pose(self, data: PoseData) -> list[EventData]:
         self.pose.set(data)
@@ -290,5 +298,6 @@ class RobotState:
             diagnostics=self.diagnostics.data,
             resources=self.resources.data,
             path=self.path.data,
+            capabilities=list(self.capabilities),
             events=list(self.events)[:100],
         )
