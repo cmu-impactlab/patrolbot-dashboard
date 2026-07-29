@@ -201,8 +201,8 @@ All five build phases are implemented:
   Map pose picks use RViz-style orientation drag (press to place, drag to aim).
 - **Phase 4 — Recording & playback.** Server-side recorder with per-channel
   selection (pose/LiDAR/path/battery/base state/diagnostics/events; camera
-  video reserved), start/stop, CSV export, and ghost-robot replay on the map
-  with a time slider.
+  video reserved), start/stop, export as a zip of per-channel CSVs, and
+  replay in its own tab with a time slider.
 - **Phase 5 — Production hardening.** nginx TLS compose, PostgreSQL support
   (connection-string swap), and OIDC (code + PKCE) auth with a login-first
   gate. Access is restricted to an Andrew ID allowlist.
