@@ -165,14 +165,19 @@ send navigation, pose, or stop commands.
 ### Scenario E — Production (nginx + TLS)
 
 ```bash
-cd infrastructure
-./nginx/generate-certs.sh                                  # self-signed (certbot-ready)
-docker compose -f docker-compose.production.yml up -d --build
+cp infrastructure/.env.production.example infrastructure/.env
+# Fill the required secrets and Google OIDC credentials, then:
+docker compose \
+  --env-file infrastructure/.env \
+  -f infrastructure/docker-compose.production.yml \
+  up -d --build
 ```
 
-nginx terminates TLS and proxies HTTP + WSS to the server. Set a real
-`PATROLBOT_SESSION_SECRET`, a PostgreSQL `PATROLBOT_DATABASE_URL` if desired,
-and the real OIDC client in `.env` before exposing it.
+nginx is the only service exposed on the host; the dashboard server is private
+to the Compose network. The production configuration requires a real
+Let's Encrypt certificate before nginx starts. Follow the complete
+[production server runbook](infrastructure/nginx/README.md) for DNS, secrets,
+Google OAuth, certificate bootstrap and renewal, validation, and updates.
 
 ## Tests
 
