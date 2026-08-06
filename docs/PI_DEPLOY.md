@@ -104,3 +104,64 @@ enables the goal-based command path only — Nav2 `NavigateToPose`,
 e-stop pressed, motors off, or missing/invalid base_state. There is no
 `/cmd_vel` path. Enable the flag only with someone physically present at
 the robot; the physical E-stop remains the only emergency stop.
+
+### Undock
+
+With the flag on, the bridge also connects to `patrolbot_dock_manager`'s
+`/patrolbot/undock` action and the `/patrolbot/charge_release` and
+`/patrolbot/motor_enable` services. It asks for the action and reports what
+comes back — it never drives the robot itself, and `reverse_distance` /
+`reverse_speed` come from `web_bridge.yaml`, never from the browser.
+
+Two switches gate this, both of which start closed:
+
+- **Capability advertisement.** The bridge advertises `undock` only while the
+  dock manager's action server is actually reachable, re-announcing as it
+  comes and goes. The dashboard greys the control out for anything the robot
+  has not claimed, so stopping the dock manager removes the button from every
+  open dashboard within ~2 s. This is the kill switch — no redeploy needed.
+- **`undock_validation_mode`, now `false`** (commissioned 2026-07-26 on the
+  real robot, with an operator at the dock). This is **not** a dry run: the
+  dock manager runs the real sequence and the robot moves either way. All it
+  does is tighten the caps to 0.10 m / 0.05 m/s and **reject** — not clamp —
+  anything above them. Note the deployed container passes inline `-p`
+  overrides and no `--params-file`, so `web_bridge.yaml` is not read on the
+  robot; `bridge_node.py`'s parameter defaults are what run.
+
+`operator_authorized` on the undock goal is stamped by the *dashboard server*
+from the verified session role, never by the browser. The bridge refuses an
+undock request that arrives without it.
+
+The dock manager **rejects rather than clamps** an out-of-range goal, and a
+rejected ROS action goal carries no message — the reason lands only in the
+manager's log (`docker logs patrolbot-navigation | grep "goal rejected"`).
+Its limits, from `patrolbot_dock_manager/contracts.py`:
+
+| | distance | speed |
+|---|---|---|
+| `validation_mode: true` | ≤ 0.10 m | ≤ 0.05 m/s |
+| hard cap | ≤ 0.70 m | ≤ 0.10 m/s |
+
+`undock_dock_id` must equal the manager's own `dock_id` parameter exactly
+(currently `main_charger`) or the goal is rejected as an unknown dock.
+
+> **The deployed container does not pass `--params-file`.** Its command only
+> supplies a few inline `-p` overrides, so `config/web_bridge.yaml` is *not
+> read at all* and every other parameter takes its `declare_parameters`
+> default in `bridge_node.py`. Change a default there, or add
+> `--params-file /opt/web_bridge/config/web_bridge.yaml` to the compose
+> command (before the `-p` flags, so those still win). Editing the YAML alone
+> currently has no effect.
+
+### Localization at the dock
+
+The dock is a fixed place, so a robot reporting charging is by definition at
+the dock pose. With `auto_dock_pose_on_charge` (default on), the bridge asks
+`/patrolbot/initialize_dock_pose` to seed localization whenever it sees
+charging without a tight AMCL fix, retrying every `auto_dock_pose_retry_s`
+until the covariance drops below `covariance_warn_threshold`.
+
+It routes through that guarded service rather than publishing `/initialpose`
+itself: the manager re-checks that the robot is genuinely docked and
+stationary before publishing, so a stale or wrong charge reading cannot
+teleport the robot's estimate.

@@ -35,7 +35,7 @@ and vitest; edit fixtures together with both definitions.
 | `telemetry.lidar` | 5 Hz | `angle_min`, `angle_increment`, `ranges[]` (≤360, metres, `null` = no return) |
 | `telemetry.path` | on change / 2 Hz | `frame_id`, `points[[x,y],…]`, `goal?{x,y,yaw}` |
 | `telemetry.battery` | 1 Hz | `voltage`, `current?`, `percentage?`, `charging` |
-| `telemetry.base_state` | 1 Hz | mapped `patrolbot_interfaces/BaseState` fields (see messages.py) |
+| `telemetry.base_state` | 1 Hz | drive-base state plus the SBC dock observer (`dock_state`, validity, active phase, rear-clearance and commissioning fields); valid `CLEAR_CONFIRMED` is authoritative over a stale raw charge level |
 | `telemetry.diagnostics` | 1 Hz | `items[{name, level, message, values?}]`, level ∈ OK/WARN/ERROR/STALE |
 | `telemetry.resources` | 1 Hz | `cpu_percent`, `memory_percent`, `cpu_temp_c?`, `disk_percent`, `wifi_signal_dbm?` |
 | `telemetry.map` | on server request + on change | `map_version`, `name`, `resolution`, `width`, `height`, `origin{x,y,yaw}`, `rle[[value,count],…]` |
@@ -53,6 +53,7 @@ All robot telemetry types are re-broadcast unchanged, plus:
 | `state.connection` | on change | `state` ∈ `online` / `stale` / `offline`, `last_seen` |
 | `state.robot_status` | on change | `status` ∈ ready/navigating/recording/docked/charging/paused/needs_attention/offline, `detail` |
 | `state.system_health` | on change | `overall`, `subsystems[{id, label, level, message, action?, updated_at}]` |
+| `state.capabilities` | on robot connect | `capabilities[]` copied from `robot.hello` — the dashboard offers dock/undock only to a robot that claims them |
 | `event.append` | as they occur | `id`, `ts`, `severity` ∈ info/warning/critical, `title`, `message` |
 
 Connection staleness (server-side, from heartbeat age): `<3 s` online,
@@ -65,7 +66,7 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/dock/undock, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
@@ -83,7 +84,24 @@ Server-side broker rules:
 - A new `navigate_to_pose` while one is active implicitly replaces it
   (Nav2 preemption semantics); `stop` cancels any active navigation.
 - There is **no velocity teleop command** — goal-based navigation only, by
-  design. The physical e-stop is the only emergency stop.
+  design. The physical e-stop is the only emergency stop. `undock` included:
+  it is an action the robot executes, never browser-published velocity.
+- `charge_release`, `motor_enable`, `dock` and `undock` are additionally gated
+  on live hardware telemetry (`server/app/commands/gates.py`) before they are
+  forwarded: readings must be fresh and valid, faults and E-stop clear, the
+  robot stationary, and dock/undock require the robot to claim the capability
+  in `robot.hello`. `dock`/`undock` are **single operator actions**. The
+  commissioned undock action atomically releases charging, powers the motors,
+  backs clear, restores localization, turns away from the dock, and stops; the
+  dashboard only sends `undock` and renders its progress/result. Undock also
+  needs a valid commissioned dock observer and a clear rear bumper; dock needs
+  valid localization to navigate.
+  `charge_release` and `motor_enable` remain separate commands for the
+  robot-side and diagnostic paths (charge release stays zero-motion and
+  motor-disabled; motor enable refuses while charging), and the dashboard UI
+  does not send them. The UI mirrors these rules in
+  `frontend/src/lib/dockGates.ts` to grey out the control and explain why;
+  the server decision is the authoritative one.
 - The bridge executes commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1`;
   otherwise it acks `accepted=false` with an explanatory reason.
 

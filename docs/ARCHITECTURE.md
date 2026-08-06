@@ -55,8 +55,25 @@ whole Phase 1 development story.
   acks (5 s) and results (120 s) with synthesized timeouts. There is no
   velocity teleop path anywhere in the stack, and the bridge executes
   commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1` — otherwise it declines
-  each request with a plain-language reason. "Return to Dock" stays disabled
-  because the robot has no autonomous dock-in (only a guarded `Undock`).
+  each request with a plain-language reason.
+- **One dock control, two commands**: Navigation shows a single button —
+  `Undock` (red) while the robot is on its charger, `Dock & Charge` when it is
+  not. Both are single operator actions; the robot releases its own charger
+  and powers its own motors as part of executing them. Preconditions live in
+  `server/app/commands/gates.py` (mirrored for the UI in
+  `frontend/src/lib/dockGates.ts`), and the button only lights up for a robot
+  that advertises `dock`/`undock` in `robot.hello`.
+- **The robot is drawn at its true size**: `frontend/src/lib/robotGeometry.ts`
+  holds the octagonal footprint — 510 mm front-to-back x 426 mm across, every
+  corner on the 0.29 m swing circle — copied from the `footprint` Nav2 plans
+  with in `patrolbot-repo/.../nav2_params.yaml`, which comes from the robot's
+  own ARIA parameters (`RobotLength 510`, `RobotWidth 425`). The Live Map
+  draws it to scale in world metres rather than as a fixed-size icon, so what
+  an operator sees is the floor area the robot actually occupies and the
+  clearance they are judging is real. Below ~16 px on screen a fixed-size
+  locator arrow is drawn on top; the footprint itself is never inflated.
+  Note the robot is **longer than it is wide** — earlier drawings used the
+  User's Guide envelope figure "589 x 483 mm" with the axes swapped.
 
 ## Protocol contract
 
@@ -71,9 +88,26 @@ Entirely server-side (`server/app/recordings/recorder.py`): while a
 recording is active the hub feeds selected channels (pose, laser scan,
 path, battery, drive-base state, system reports, alerts) through per-channel
 decimation into SQLite/PostgreSQL. REST under `/api/recordings` covers
-start (with a channel list), stop, list, detail, CSV export, and delete;
-an interrupted recording is closed out at startup. The Recordings widget
-replays a session on the Live Map as a ghost robot with a time slider.
+start (with a channel list), stop, list, detail, export, and delete;
+an interrupted recording is closed out at startup.
+
+`GET /api/recordings/{id}/export.zip` is the export operators use
+(`server/app/recordings/export.py`): a zip holding **one CSV per channel**
+plus a README and a `recording.json` manifest, with an optional `?channels=`
+filter. Every table leads with the same `recording_id, ts, elapsed_s`
+columns so they join on time, and variable-length payloads (laser scans,
+planned paths) become a summary row plus a long-format companion table
+rather than an unparseable cell. The older single-table `export.csv`
+remains for compatibility.
+
+Replay opens in its **own browser tab** at `?replay=<id>`
+(`frontend/src/pages/ReplayPage.tsx`, drawn by
+`widgets/LiveMapWidget/ReplayMap.tsx`), never on the Live Map: a recorded
+route shown next to the live robot invites reading history as the present.
+That canvas never touches the telemetry store, and the replay tab opens no
+telemetry socket. A query parameter rather than a path because the server
+serves the frontend through `StaticFiles`, which has no SPA fallback.
+
 Camera video is a reserved channel — advertised in the UI, not implemented.
 The robot is asked for nothing extra (no rosbag).
 
