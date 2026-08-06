@@ -1,172 +1,145 @@
 # PatrolBot Dashboard
 
-Custom web dashboard for the PatrolBot: a widget-based UI that hides ROS
-terminology from normal users while giving researchers and administrators the
-diagnostics they need.
+PatrolBot Dashboard is a web interface for monitoring and operating PatrolBot.
+It provides live telemetry, mapping, diagnostics, goal-based navigation,
+recording, playback, and role-based access without exposing ROS 2 concepts to
+normal users.
 
+```text
+Browser <-- HTTP/WebSocket --> Dashboard server <-- WebSocket -- Robot bridge <-- ROS 2 --> PatrolBot
+                                              ^
+                                              +-- Mock robot for local development
 ```
-Browser ──HTTP/WS──▶ Dashboard server (FastAPI) ◀──outbound WS── RPi5 web bridge ──ROS 2──▶ robot
-                                 ▲
-                                 └──outbound WS── mock robot (ROS-free, for development)
-```
 
-The browser only ever talks to the dashboard server. Robots (real bridge or
-mock) dial **out** to the server at `/ws/robot`; browsers connect to `/ws/ui`.
+The browser and robot connect to the dashboard server. The robot always opens
+an outbound connection to `/ws/robot`, which makes the same architecture work
+on a laptop or behind a production reverse proxy.
 
-## Layout
+## Repository structure
 
 | Path | Purpose |
-|------|---------|
-| `frontend/` | React 19 + TypeScript + Vite dashboard UI |
-| `server/` | FastAPI server: telemetry hub, command broker, recorder, REST API, SQLite/PostgreSQL persistence, OIDC auth |
-| `mock-robot/` | ROS-free simulated robot speaking the same WebSocket protocol |
-| `ros2_ws/src/patrolbot_web_bridge/` | ROS 2 node that runs on the RPi5 |
-| `shared/schemas/` | Protocol contract: `protocol.md` + golden JSON fixtures |
-| `infrastructure/` | Docker Compose (local + production/nginx TLS) |
-| `docs/` | Architecture and Pi deployment notes |
-| `scripts/` | Dev helpers (stand-in OIDC IdP for local auth testing) |
+| --- | --- |
+| `frontend/` | React and TypeScript dashboard |
+| `server/` | FastAPI API, authentication, telemetry, commands, and persistence |
+| `mock-robot/` | ROS-free robot simulator |
+| `ros2_ws/src/patrolbot_web_bridge/` | ROS 2 bridge deployed on the robot Pi |
+| `infrastructure/` | Local and production Docker Compose configuration |
+| `shared/schemas/` | Shared WebSocket protocol and fixtures |
 
-## Running the dashboard
+## Environment 1: local development
 
-The system has three moving parts: the **server** (browsers connect to it), a
-**robot** (either the mock or the real Pi bridge dials *out* to the server),
-and — in development — the **Vite dev server** for hot-reloading the frontend.
-Pick the scenario that matches what you're doing.
+### Requirements
 
-First-time setup (once):
+- Python 3.11 or newer
+- Node.js 22 and npm
+- GNU Make
+
+Install the Python and frontend dependencies:
 
 ```bash
-make setup          # creates server/.venv, installs server + mock, npm install
+git clone https://github.com/cmu-impactlab/patrolbot-dashboard.git
+cd patrolbot-dashboard
+make setup
 ```
 
-### Scenario A — Local dev with the mock robot (fastest inner loop)
-
-No hardware, no auth. Three terminals:
+Start the development stack in three terminals:
 
 ```bash
-make server         # dashboard server on :8000 (auth defaults to "local" — no login)
-make mock           # ROS-free mock robot, dials ws://localhost:8000/ws/robot
-make frontend       # Vite dev server on :5173, proxies API/WS to :8000
+make server
 ```
 
-Open **http://localhost:5173**. You get a live simulated patrol, battery
-cycle, diagnostics, and a periodic disconnect drill. Use `--scenario` to shape
-the mock (`calm`, `full`, `chaos`):
-
 ```bash
-server/.venv/bin/python -m mock_robot --server ws://localhost:8000/ws/robot \
-  --token dev-token --scenario chaos
+make mock
 ```
 
-### Scenario B — Local dev with the **real Pi**
-
-Same as A, but instead of `make mock` you run the ROS 2 bridge **on the Pi**,
-pointed at this laptop. **Never run the mock and the real bridge at the same
-time** — both claim `robot_id: patrolbot-01` and the newer connection evicts
-the older one.
-
-1. Start the server and (optionally) the Vite dev server on the laptop:
-
-   ```bash
-   make server         # :8000
-   make frontend       # :5173  (optional; the built UI is also served from :8000)
-   ```
-
-2. Find the laptop's address the Pi can reach (on CMU VPN this is the
-   `cscotun0` address and **it changes between sessions**):
-
-   ```bash
-   ip -4 addr show cscotun0 | grep -oP 'inet \K[\d.]+'
-   ```
-
-3. On the Pi, run the bridge as the 4th Docker service (see
-   [`docs/PI_DEPLOY.md`](docs/PI_DEPLOY.md)), overriding the server URL to
-   match step 2. The token must equal the server's `PATROLBOT_ROBOT_TOKEN`
-   (default `dev-token`):
-
-   ```bash
-   WEB_BRIDGE_SERVER_URL=ws://<laptop-ip>:8000/ws/robot \
-   WEB_BRIDGE_TOKEN=dev-token \
-   # ... launched inside the patrolbot-repo compose stack
-   ```
-
-   The dashboard now shows the **real** map, pose, path, LiDAR, battery, and
-   base state. The map is served locally by the server (`PATROLBOT_STATIC_MAP_YAML`)
-   — the robot never streams its ~7 MB `/map`, which would starve `/scan`. The
-   bridge's own `/map` subscription stays off unless `WEB_BRIDGE_SUBSCRIBE_MAP=1`.
-
-4. **Motion commands are OFF by default.** The bridge only executes goal-based
-   commands with `WEB_BRIDGE_ENABLE_COMMANDS=1`, and that should be set **only
-   with someone physically at the robot holding the e-stop** — never remotely.
-   Read-only telemetry needs no such flag.
-
-Key bridge environment variables (override the `config/web_bridge.yaml`
-defaults):
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `WEB_BRIDGE_SERVER_URL` | `ws://192.168.1.100:8000/ws/robot` | Where to dial the server |
-| `WEB_BRIDGE_TOKEN` | `dev-token` | Must match the server's `PATROLBOT_ROBOT_TOKEN` |
-| `WEB_BRIDGE_ENABLE_COMMANDS` | unset (OFF) | `1` enables motion execution (e-stop present only) |
-| `WEB_BRIDGE_SUBSCRIBE_MAP` | unset (OFF) | `1` re-enables the on-robot `/map` subscription |
-
-### Scenario C — Docker (containerized server)
-
-The server image bundles the built frontend and a local copy of the map, so
-there's no separate Vite server. Runtime config comes from
-`infrastructure/.env` (gitignored — copy `.env.example` and edit):
-
 ```bash
-cd infrastructure
-cp .env.example .env          # then edit: session secret, allowlist, auth mode, DB URL
-
-# Containerized server on :8000 (host network so the Pi/mock can reach it)
-docker compose -f docker-compose.local.yml up -d --build server
-
-# Optionally add the mock robot (dev only)
-docker compose -f docker-compose.local.yml --profile mock up -d
+make frontend
 ```
 
-Open **http://localhost:8000**. To use the real Pi instead of the mock, just
-don't start the mock profile and follow Scenario B step 3 (point the Pi bridge
-at this host on :8000). The shipped `.env.example` runs **OIDC** auth against
-the dev stand-in IdP (see below) — set `PATROLBOT_AUTH_MODE=local` to skip
-login while developing.
+Open <http://localhost:5173>. Local development uses the simulated robot and
+does not require login credentials.
 
-### Scenario D — Testing OIDC auth locally
-
-Real CMU OIDC credentials aren't issued yet, so a stand-in IdP is included for
-end-to-end auth testing. It grants sign-in as any Andrew ID you type, and the
-server's allowlist (`PATROLBOT_ALLOWED_USERNAMES=yousefh,efeoflus`) still
-decides who actually gets in.
+To test a different simulation profile, replace `make mock` with:
 
 ```bash
-server/.venv/bin/python scripts/dev_idp.py --port 9100   # stand-in IdP (dev only — never deploy)
+server/.venv/bin/python -m mock_robot \
+  --server ws://localhost:8000/ws/robot \
+  --token dev-token \
+  --scenario chaos
 ```
 
-With `infrastructure/.env` set to OIDC (as in `.env.example`), the login
-screen appears first; sign in, and allowed users reach the dashboard while
-everyone else gets a 403.
+### Use the real robot locally
 
-**Production auth is Google OAuth2 restricted to `@andrew.cmu.edu`.** Google is
-a standard OIDC provider, so the same code+PKCE flow is used — point
-`PATROLBOT_OIDC_ISSUER=https://accounts.google.com`, set the client ID/secret
-from the Google Cloud Console, register `https://<host>/auth/callback` as the
-authorized redirect URI, and keep `PATROLBOT_OIDC_EMAIL_DOMAIN=andrew.cmu.edu`.
-Sign-in requires a **verified** email ending in `@andrew.cmu.edu`; the
-leading-`@` anchor rejects look-alike domains. See
-`infrastructure/.env.example` for the full Cloud Console walkthrough.
+Do not run the mock robot and the real bridge at the same time. Both use the
+same robot ID.
 
-**Roles are read-only by default.** An authenticated user is an *observer*
-(telemetry only) unless listed in `PATROLBOT_OPERATOR_USERNAMES` (operator) or
-`PATROLBOT_ADMIN_USERNAMES` (administrator). Only operators/administrators may
-send navigation, pose, or stop commands.
+Start `make server` and `make frontend`, then configure the Pi bridge:
 
-### Scenario E — Production (nginx + TLS)
+```env
+WEB_BRIDGE_SERVER_URL=ws://<laptop-ip>:8000/ws/robot
+WEB_BRIDGE_TOKEN=dev-token
+WEB_BRIDGE_ENABLE_COMMANDS=0
+```
+
+The token must match the dashboard server's `PATROLBOT_ROBOT_TOKEN`. Leave
+commands disabled when only telemetry is needed.
+
+## Environment 2: production deployment
+
+### Requirements
+
+- A Linux server with Docker Engine and Docker Compose
+- A DNS name pointing to the server
+- A TLS certificate for that DNS name
+- An OIDC web application with an authorized callback URL
+
+Clone the repository on the server and create the production environment file:
 
 ```bash
+git clone https://github.com/cmu-impactlab/patrolbot-dashboard.git
+cd patrolbot-dashboard
 cp infrastructure/.env.production.example infrastructure/.env
-# Fill the required secrets and Google OIDC credentials, then:
+chmod 600 infrastructure/.env
+```
+
+Set these values in `infrastructure/.env`:
+
+```env
+PATROLBOT_ROBOT_TOKEN=<long-random-token>
+PATROLBOT_SESSION_SECRET=<long-random-secret>
+
+PATROLBOT_OIDC_ISSUER=https://accounts.google.com
+PATROLBOT_OIDC_CLIENT_ID=<oidc-client-id>
+PATROLBOT_OIDC_CLIENT_SECRET=<oidc-client-secret>
+PATROLBOT_OIDC_REDIRECT_URL=https://patrolbot-dashboard.qatar.cmu.edu/auth/callback
+PATROLBOT_OIDC_EMAIL_DOMAIN=andrew.cmu.edu
+
+PATROLBOT_ALLOWED_ORIGINS=https://patrolbot-dashboard.qatar.cmu.edu
+PATROLBOT_ALLOWED_USERNAMES=<comma-separated-usernames>
+PATROLBOT_OPERATOR_USERNAMES=<comma-separated-operators>
+PATROLBOT_ADMIN_USERNAMES=<comma-separated-administrators>
+```
+
+The OIDC provider's authorized redirect URI must exactly match
+`PATROLBOT_OIDC_REDIRECT_URL`. Users are read-only unless they are listed as an
+operator or administrator.
+
+Create the ACME webroot and obtain the TLS certificate before starting nginx:
+
+```bash
+sudo install -d -m 0755 /srv/patrolbot-dashboard/acme
+sudo certbot certonly --standalone \
+  -d patrolbot-dashboard.qatar.cmu.edu
+```
+
+Validate and start the production stack:
+
+```bash
+docker compose \
+  --env-file infrastructure/.env \
+  -f infrastructure/docker-compose.production.yml \
+  config --quiet
+
 docker compose \
   --env-file infrastructure/.env \
   -f infrastructure/docker-compose.production.yml \
@@ -174,52 +147,67 @@ docker compose \
 ```
 
 nginx is the only service exposed on the host; the dashboard server is private
-to the Compose network. The production configuration requires a real
-Let's Encrypt certificate before nginx starts. Follow the complete
-[production server runbook](infrastructure/nginx/README.md) for DNS, secrets,
-Google OAuth, certificate bootstrap and renewal, validation, and updates.
+to the Compose network. The named `patrolbot-dashboard-data` volume persists
+the SQLite database across container recreation.
+
+Configure the robot Pi to use the public WebSocket endpoint:
+
+```env
+WEB_BRIDGE_SERVER_URL=wss://patrolbot-dashboard.qatar.cmu.edu/ws/robot
+WEB_BRIDGE_TOKEN=<same value as PATROLBOT_ROBOT_TOKEN>
+WEB_BRIDGE_ENABLE_COMMANDS=0
+```
+
+The Pi's `web-bridge` Compose service must pass these variables into the
+container. Adding a value to `.env` alone does not inject it unless the service
+references it.
+
+Recreate the bridge after changing its environment:
+
+```bash
+cd /home/ubuntu/patrolbot-repo/docker
+docker compose --env-file .env -f docker-compose.yml \
+  --profile web-bridge up -d --no-deps --force-recreate web-bridge
+```
+
+Verify both sides:
+
+```bash
+curl --fail --show-error \
+  https://patrolbot-dashboard.qatar.cmu.edu/api/health
+
+docker compose \
+  --env-file infrastructure/.env \
+  -f infrastructure/docker-compose.production.yml \
+  ps
+```
+
+A connected deployment reports `"robot_connected": true` from the health
+endpoint. See the
+[production runbook](infrastructure/nginx/README.md) for certificate renewal,
+updates, and backups.
 
 ## Tests
 
 ```bash
-make test           # server pytest + mock pytest + frontend vitest
-make smoke          # end-to-end: server + mock + WS assertion + vite build
+make test
+make smoke
 ```
 
-## Features
-
-All five build phases are implemented:
-
-- **Phase 1 — Dashboard + mock.** Widget grid (react-grid-layout) with a live
-  canvas map, robot status, battery estimation, system health, alerts, Pi
-  stats, and diagnostics. Custom dashboards persist per user; alerts move to a
-  *Seen* section when read; widgets resize from both bottom corners.
-- **Phase 2 — Live telemetry.** The `patrolbot_web_bridge` ROS 2 node streams
-  pose, path, LiDAR, battery, base state, diagnostics, and resources from the
-  real RPi5. The map is served locally (never streamed off the robot — that
-  starves `/scan`).
-- **Phase 3 — Motion commands.** Goal-based only (navigate-to, set location,
-  stop/resume) over a versioned `command.*` protocol with an audit log,
-  duplicate protection, and ack/result timeouts. **No `/cmd_vel` anywhere.**
-  The bridge executes commands only with `WEB_BRIDGE_ENABLE_COMMANDS=1`, which
-  should be set only with someone physically present holding the e-stop.
-  Map pose picks use RViz-style orientation drag (press to place, drag to aim).
-- **Phase 4 — Recording & playback.** Server-side recorder with per-channel
-  selection (pose/LiDAR/path/battery/base state/diagnostics/events; camera
-  video reserved), start/stop, export as a zip of per-channel CSVs, and
-  replay in its own tab with a time slider.
-- **Phase 5 — Production hardening.** nginx TLS compose, PostgreSQL support
-  (connection-string swap), and OIDC (code + PKCE) auth with a login-first
-  gate. Access is restricted to an Andrew ID allowlist.
-
-See `shared/schemas/protocol.md` for the WebSocket contract and `docs/` for
-architecture and Pi deployment notes.
+`make test` runs the server, mock robot, bridge, and frontend test suites.
+`make smoke` exercises the local server/mock WebSocket path and builds the
+frontend.
 
 ## Safety
 
-- Motion is **goal-based only**; there is no direct velocity control path.
-- The bridge is fail-closed: it refuses commands unless explicitly enabled at
-  the robot, and never enables command execution by default.
-- The robot never streams its ~7 MB map; the server serves a local copy.
-- Never run the mock and the real bridge at once — both claim the same
-  `robot_id`.
+- Robot commands are disabled unless `WEB_BRIDGE_ENABLE_COMMANDS=1` reaches
+  the bridge container.
+- Enable commands only with an operator physically present and holding the
+  e-stop.
+- Motion is goal-based; the dashboard does not provide a direct velocity path.
+- Do not run the mock robot and real bridge with the same robot ID.
+- `WEB_BRIDGE_TOKEN` and `PATROLBOT_ROBOT_TOKEN` must match and must be kept
+  secret.
+
+The WebSocket protocol is documented in
+[`shared/schemas/protocol.md`](shared/schemas/protocol.md).

@@ -28,3 +28,4 @@ infrastructure/nginx/certs/
 infrastructure/.env
 docs/
 /dashboard-audit.txt
+audit/
