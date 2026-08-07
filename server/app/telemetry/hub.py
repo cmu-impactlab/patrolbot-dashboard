@@ -21,7 +21,7 @@ from fastapi import WebSocket
 from ..protocol.envelope import Envelope, encode
 from ..protocol.messages import BatteryData, CapabilitiesData, EventData
 from ..settings import Settings
-from .store import RobotState
+from .store import EventIdAllocator, RobotState
 
 if TYPE_CHECKING:
     from ..database.repo import Database
@@ -137,13 +137,14 @@ class TelemetryHub:
         self.battery_writer = BackgroundWriter("battery")
         self._sequence = 0
         self._monitor_task: asyncio.Task | None = None
-        self._event_id_seed = 1
+        # One allocator for the whole server, handed to every session. Per-state
+        # counters all seeded from the same value collided across robots — see
+        # EventIdAllocator.
+        self.event_ids = EventIdAllocator()
 
     def set_event_seed(self, next_id: int) -> None:
         """Continue event ids from the persisted event log."""
-        self._event_id_seed = next_id
-        for session in self.robots.values():
-            session.state.seed_event_id(next_id)
+        self.event_ids.seed(next_id)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -188,7 +189,7 @@ class TelemetryHub:
         session = self.robots.get(robot_id)
         if session is None:
             session = RobotSession(robot_id=robot_id, state=RobotState(self.settings, robot_id))
-            session.state.seed_event_id(self._event_id_seed)
+            session.state.event_ids = self.event_ids
             self.robots[robot_id] = session
         return session
 

@@ -47,6 +47,31 @@ class Slice:
 
 
 @dataclass
+class EventIdAllocator:
+    """One counter shared by every robot session on this server.
+
+    Each RobotState used to own its own counter, all seeded from the same
+    starting point, so a second robot re-issued ids the first had already used.
+    Those ids are the primary key of the events table and the identity the
+    browser tracks "seen" against, so the collisions overwrote persisted rows
+    and marked one robot's alerts as read because another robot's alert with
+    the same number had been acknowledged.
+    """
+
+    next_id: int = 1
+
+    def allocate(self) -> int:
+        value = self.next_id
+        self.next_id += 1
+        return value
+
+    def seed(self, next_id: int) -> None:
+        # Never move backwards: a later seed (or a second session seeded from
+        # the same persisted value) must not re-issue ids already handed out.
+        self.next_id = max(self.next_id, next_id)
+
+
+@dataclass
 class RobotState:
     settings: Settings
     robot_id: str
@@ -70,7 +95,10 @@ class RobotState:
     recording: bool = False  # a telemetry recording is in progress
 
     events: deque[EventData] = field(default_factory=lambda: deque(maxlen=500))
-    _next_event_id: int = 1
+    # Replaced by the hub's shared allocator for every real session; the
+    # default keeps a standalone RobotState (tests, the empty snapshot served
+    # before any robot connects) self-contained.
+    event_ids: EventIdAllocator = field(default_factory=EventIdAllocator)
     _diag_levels: dict[str, str] = field(default_factory=dict)
     _prev_estop: bool = False
     _prev_bumper: bool = False
@@ -90,11 +118,11 @@ class RobotState:
     # -- event helpers -------------------------------------------------------
 
     def seed_event_id(self, next_id: int) -> None:
-        self._next_event_id = next_id
+        self.event_ids.seed(next_id)
 
     def add_event(self, severity: str, title: str, message: str) -> EventData:
-        event = EventData(id=self._next_event_id, ts=utc_now(), severity=severity, title=title, message=message)
-        self._next_event_id += 1
+        event = EventData(id=self.event_ids.allocate(), ts=utc_now(),
+                          severity=severity, title=title, message=message)
         self.events.appendleft(event)
         return event
 

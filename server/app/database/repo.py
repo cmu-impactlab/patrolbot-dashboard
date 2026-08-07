@@ -6,7 +6,9 @@ dev machine runs Python 3.14 where greenlet wheels are a moving target.)
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 from typing import Any
 
@@ -14,6 +16,8 @@ import aiosqlite
 
 from ..protocol.messages import EventData
 from .presets import PRESET_LAYOUTS
+
+log = logging.getLogger("database")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -32,12 +36,17 @@ CREATE TABLE IF NOT EXISTS layouts (
     UNIQUE(user_id, name)
 );
 CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY,
+    id INTEGER NOT NULL,
     robot_id TEXT NOT NULL,
     ts TEXT NOT NULL,
     severity TEXT NOT NULL,
     title TEXT NOT NULL,
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    -- Keyed by robot as well as id. Ids are allocated globally by the hub
+    -- now, but the key must not depend on that: a restart re-seeds from
+    -- MAX(id), and two robots whose sessions were seeded independently used
+    -- to overwrite each other's rows here.
+    PRIMARY KEY (robot_id, id)
 );
 CREATE TABLE IF NOT EXISTS battery_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +119,7 @@ class Database:
             await self._db.execute(
                 "ALTER TABLE recordings ADD COLUMN channels TEXT NOT NULL "
                 "DEFAULT '[\"pose\",\"battery\",\"event\"]'")
+        await self._migrate_events_primary_key()
         # Migration for command_audit identity columns (added during hardening).
         async with self._db.execute("PRAGMA table_info(command_audit)") as cur:
             audit_columns = {row[1] for row in await cur.fetchall()}
@@ -132,6 +142,71 @@ class Database:
                 (name, json.dumps(layout)),
             )
         await self._db.commit()
+
+    async def _migrate_events_primary_key(self) -> None:
+        """Rebuild events with PRIMARY KEY (robot_id, id) if it predates it.
+
+        SQLite cannot ALTER a primary key, so the table is recreated and
+        copied. Existing rows cannot conflict: the old key was id alone, so
+        (robot_id, id) is at least as unique.
+
+        This runs against a live deployment's database, so it is all-or-
+        nothing: one explicit transaction, a row count checked against what was
+        there before the swap, and a rollback that leaves the original table
+        untouched if anything at all disagrees. `executescript` is deliberately
+        not used — it COMMITs before running, which would have made a failure
+        halfway through unrecoverable.
+
+        The collision this defends against is already prevented upstream by the
+        hub's shared EventIdAllocator, so nothing depends on this migration
+        succeeding; a database that fails it keeps working with the old key.
+        """
+        async with self._db.execute("PRAGMA table_info(events)") as cur:
+            columns = list(await cur.fetchall())
+        if not columns:
+            return
+        key_columns = {row[1] for row in columns if row[5]}  # row[5] = pk position
+        if key_columns == {"robot_id", "id"}:
+            return
+
+        async with self._db.execute("SELECT COUNT(*) FROM events") as cur:
+            before = int((await cur.fetchone())[0])
+        log.info("migrating %d event row(s) to a (robot_id, id) primary key", before)
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            await self._db.execute("""
+                CREATE TABLE events_migrated (
+                    id INTEGER NOT NULL,
+                    robot_id TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    PRIMARY KEY (robot_id, id)
+                )""")
+            await self._db.execute(
+                "INSERT INTO events_migrated (id, robot_id, ts, severity, title, message) "
+                "SELECT id, robot_id, ts, severity, title, message FROM events")
+            async with self._db.execute("SELECT COUNT(*) FROM events_migrated") as cur:
+                copied = int((await cur.fetchone())[0])
+            if copied != before:
+                raise RuntimeError(
+                    f"events migration copied {copied} of {before} rows; rolling back")
+            # Only now is the original expendable. Dropping it also drops
+            # idx_events_ts, which is recreated below.
+            await self._db.execute("DROP TABLE events")
+            await self._db.execute("ALTER TABLE events_migrated RENAME TO events")
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts)")
+            await self._db.commit()
+            log.info("events migration complete (%d rows)", copied)
+        except Exception:
+            await self._db.rollback()
+            with contextlib.suppress(Exception):
+                await self._db.execute("DROP TABLE IF EXISTS events_migrated")
+                await self._db.commit()
+            log.exception("events primary-key migration failed; the existing table "
+                          "is unchanged and the server will continue with it")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -167,8 +242,12 @@ class Database:
             "INSERT OR REPLACE INTO events (id, robot_id, ts, severity, title, message) VALUES (?,?,?,?,?,?)",
             (event.id, robot_id, event.ts, event.severity, event.title, event.message),
         )
+        # Retention by rowid, not by id: with more than one robot, "id not in
+        # the newest 5000 ids" would delete a second robot's rows whenever
+        # their ids happened to fall outside the window.
         await self.db.execute(
-            "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 5000)"
+            "DELETE FROM events WHERE rowid NOT IN "
+            "(SELECT rowid FROM events ORDER BY id DESC LIMIT 5000)"
         )
         await self.db.commit()
 

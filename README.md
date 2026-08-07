@@ -150,6 +150,14 @@ nginx is the only service exposed on the host; the dashboard server is private
 to the Compose network. The named `patrolbot-dashboard-data` volume persists
 the SQLite database across container recreation.
 
+SQLite is the supported database in every environment. This is a single-host,
+single-robot deployment and the live database is around 30 MB, almost all of it
+battery samples — there is nothing here that needs a database server. An
+unsupported PostgreSQL backend remains in the tree at
+`server/app/database/pg.py` for anyone who later needs one; it is not deployed,
+not covered by CI, and selected only by setting `PATROLBOT_DATABASE_URL`
+explicitly.
+
 Configure the robot Pi to use the public WebSocket endpoint:
 
 ```env

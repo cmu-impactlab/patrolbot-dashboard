@@ -8,8 +8,13 @@ class Settings(BaseSettings):
 
     robot_token: str = "dev-token"
     database_path: str = "data/patrolbot.db"
-    # Set to postgresql://user:pass@host/db to use PostgreSQL instead of
-    # SQLite (Phase 5 multi-user deployments). Requires the asyncpg extra.
+    # SQLite is the supported database, in development and in production.
+    #
+    # An unsupported PostgreSQL backend is still in the tree (database/pg.py):
+    # setting this to postgresql://user:pass@host/db selects it, and it needs
+    # the `postgres` extra installed. It is not deployed, not covered by the
+    # default test run, and not exercised in CI, so treat it as experimental.
+    # Nothing in the deployment advertises or requires it.
     database_url: str = ""
     default_robot_id: str = "patrolbot-01"
 
