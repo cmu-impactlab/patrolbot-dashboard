@@ -71,6 +71,13 @@ class BatteryEstimate(BaseModel):
 
 
 class BatteryData(BaseModel):
+    # Same reasoning as PoseData, plus one the browser forces: Python happily
+    # encodes NaN/Infinity into JSON, but they are not JSON and JSON.parse
+    # throws on them — a single NaN voltage would take down the whole
+    # dashboard socket, not just the battery widget. Non-finite voltage is
+    # rejected here (the gateway drops the frame); the bridge already maps
+    # non-finite current/percentage to null before they get this far.
+    model_config = ConfigDict(allow_inf_nan=False)
     voltage: float
     current: float | None = None
     percentage: float | None = None

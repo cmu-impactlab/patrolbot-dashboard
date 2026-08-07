@@ -26,6 +26,10 @@ ros2_ws/log/
 .DS_Store
 infrastructure/nginx/certs/
 infrastructure/.env
-docs/
+
+# Generated documentation output only. Prose under docs/ and audit/ is
+# tracked: a blanket ignore hid every new architecture note and audit report
+# from git status, which is how the audit files went missing once already.
+docs/_build/
+docs/site/
 /dashboard-audit.txt
-audit/

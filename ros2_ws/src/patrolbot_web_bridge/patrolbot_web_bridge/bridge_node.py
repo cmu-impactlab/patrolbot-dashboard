@@ -257,6 +257,11 @@ class WebBridgeNode(Node):
     def _on_battery(self, msg: BatteryState) -> None:
         payload = normalizers.normalize_battery(
             msg, charge_voltage_min=float(self.cfg["charge_voltage_min"]))
+        if payload is None:
+            # Unmeasurable voltage — see normalize_battery. Don't feed the
+            # charging debounce either: a NaN sample is absence of a reading,
+            # not evidence that the robot stopped charging.
+            return
         payload["charging"] = self._charging_debounce.update(payload["charging"])
         self.ws.send("telemetry.battery", payload)
 

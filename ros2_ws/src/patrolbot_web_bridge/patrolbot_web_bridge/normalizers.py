@@ -123,8 +123,16 @@ def normalize_path(path: Any, max_points: int = 200) -> dict:
     return {"frame_id": "map", "points": points, "goal": goal}
 
 
-def normalize_battery(battery: Any, charge_voltage_min: float | None = None) -> dict:
-    """sensor_msgs/BatteryState → payload.
+def normalize_battery(battery: Any, charge_voltage_min: float | None = None) -> dict | None:
+    """sensor_msgs/BatteryState → payload, or None when there is nothing to say.
+
+    Returns None for a non-finite voltage. BatteryState publishers use NaN for
+    "not measured", and voltage is the one field this payload cannot express as
+    null — it is also the field the server's runtime estimator and the charge
+    cross-check below both key off. Publishing NaN would put it in the JSON
+    frame, where the browser's JSON.parse rejects the whole message. Dropping
+    the sample is the honest option: the last good reading stays on screen and
+    ages out through the normal freshness path.
 
     The PatrolBot firmware's state-of-charge is documented as not applicable
     for this model, so percentage is passed through only when finite — the
@@ -143,6 +151,10 @@ def normalize_battery(battery: Any, charge_voltage_min: float | None = None) -> 
     believed. This only ever clears the flag — it never invents charging that
     the driver did not report.
     """
+    voltage = getattr(battery, "voltage", None)
+    if voltage is None or not math.isfinite(voltage):
+        return None
+
     percentage = battery.percentage
     if percentage is not None and math.isfinite(percentage):
         # BatteryState convention is 0..1; tolerate 0..100 publishers.
@@ -152,11 +164,10 @@ def normalize_battery(battery: Any, charge_voltage_min: float | None = None) -> 
     current = _finite(battery.current, 2)
     # POWER_SUPPLY_STATUS_CHARGING == 1
     charging = getattr(battery, "power_supply_status", 0) == 1
-    if (charging and charge_voltage_min is not None
-            and math.isfinite(battery.voltage) and battery.voltage < charge_voltage_min):
+    if charging and charge_voltage_min is not None and voltage < charge_voltage_min:
         charging = False
     return {
-        "voltage": round(battery.voltage, 2),
+        "voltage": round(voltage, 2),
         "current": current,
         "percentage": percentage,
         "charging": charging,

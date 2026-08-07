@@ -6,6 +6,14 @@
  * same rules on every request and is the actual authorization. A control is
  * greyed out with its reason rather than hidden, so an operator can tell the
  * difference between "this robot can't do that" and "not yet".
+ *
+ * One rule is deliberately NOT mirrored: the server also refuses when it has
+ * not *received* a base_state or pose recently (gates.MAX_RECEIPT_AGE_S), which
+ * catches a robot whose telemetry froze while its heartbeat kept beating. That
+ * needs per-slice receipt times and a ticker to re-evaluate as time passes with
+ * no new frames, neither of which this store has. The consequence is bounded
+ * and in the safe direction: the button stays live for a few seconds longer
+ * than it should, and pressing it returns the server's refusal sentence.
  */
 import type { BaseStateData, CommandType, PoseData } from "../types/protocol";
 

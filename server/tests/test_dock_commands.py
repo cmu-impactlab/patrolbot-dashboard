@@ -21,6 +21,7 @@ ALL_CAPS = ("dock", "undock", "charge_release", "motor_enable")
 def facts(**overrides) -> gates.StateFacts:
     """A robot sitting on its dock, charging, everything healthy."""
     base = dict(online=True, link_connected=True, telemetry_age=0.1,
+                base_state_age=0.1, pose_age=0.1,
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
                 bumpers_front=False, bumpers_rear=False, localized=True,

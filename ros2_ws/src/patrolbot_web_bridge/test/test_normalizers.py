@@ -146,6 +146,42 @@ def test_battery_voltage_never_invents_charging():
     assert normalizers.normalize_battery(battery, charge_voltage_min=27.5)["charging"] is False
 
 
+@pytest.mark.parametrize("voltage", [float("nan"), float("inf"), float("-inf")])
+def test_battery_non_finite_voltage_drops_the_sample(voltage):
+    """Voltage is the one battery field the payload cannot express as null, and
+    NaN/Infinity are not JSON — the browser's JSON.parse rejects the entire
+    frame. The sample is dropped instead of published."""
+    battery = NS(voltage=voltage, current=-1.53, percentage=0.9, power_supply_status=1)
+    assert normalizers.normalize_battery(battery) is None
+    assert normalizers.normalize_battery(battery, charge_voltage_min=27.5) is None
+
+
+@pytest.mark.parametrize("current", [float("nan"), float("inf"), float("-inf")])
+def test_battery_non_finite_current_becomes_none(current):
+    """current is nullable, so a non-finite reading costs only that field."""
+    battery = NS(voltage=24.61, current=current, percentage=0.9, power_supply_status=2)
+    result = normalizers.normalize_battery(battery)
+    assert result is not None
+    assert result["current"] is None
+    assert result["voltage"] == 24.61
+
+
+@pytest.mark.parametrize("percentage", [float("nan"), float("inf"), float("-inf")])
+def test_battery_non_finite_percentage_becomes_none(percentage):
+    battery = NS(voltage=24.61, current=0.0, percentage=percentage, power_supply_status=2)
+    result = normalizers.normalize_battery(battery)
+    assert result is not None
+    assert result["percentage"] is None
+
+
+def test_battery_payload_is_strict_json():
+    """Every published battery payload survives a strict JSON round trip —
+    json.dumps will happily emit NaN, so allow_nan=False is the real check."""
+    battery = NS(voltage=24.61, current=-1.53, percentage=0.9, power_supply_status=1)
+    payload = normalizers.normalize_battery(battery)
+    assert json.loads(json.dumps(payload, allow_nan=False)) == payload
+
+
 def test_base_state_charge_names_and_invalid_bumpers():
     state = NS(session_generation=4, link_connected=True, telemetry_age=0.12,
                hardware_state_valid=True, charge_state=3, charge_state_valid=True,

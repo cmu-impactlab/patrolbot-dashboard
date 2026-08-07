@@ -3,13 +3,22 @@ from __future__ import annotations
 import io
 import json
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from ..authentication import User, require_administrator, require_operator
 from ..recordings.export import CHANNEL_FILES, build_zip
 
 router = APIRouter()
+
+# Reading a recording is telemetry, so observers keep it. Starting and stopping
+# one is not: recordings are global, so an observer stopping one ends it for
+# every operator watching. Deleting destroys shared data outright.
+Operator = Annotated[User, Depends(require_operator)]
+Administrator = Annotated[User, Depends(require_administrator)]
 
 
 class StartBody(BaseModel):
@@ -25,7 +34,7 @@ async def list_recordings(request: Request) -> list[dict]:
 
 
 @router.post("/api/recordings/start")
-async def start_recording(request: Request, body: StartBody) -> dict:
+async def start_recording(request: Request, body: StartBody, user: Operator) -> dict:
     hub = request.app.state.hub
     session = hub.primary()
     if session is None or session.state.connection == "offline":
@@ -41,7 +50,7 @@ async def start_recording(request: Request, body: StartBody) -> dict:
 
 
 @router.post("/api/recordings/stop")
-async def stop_recording(request: Request) -> dict:
+async def stop_recording(request: Request, user: Operator) -> dict:
     hub = request.app.state.hub
     row = await hub.recorder.stop()
     if row is None:
@@ -130,7 +139,7 @@ async def export_recording_zip(
 
 
 @router.delete("/api/recordings/{recording_id}")
-async def delete_recording(request: Request, recording_id: int) -> dict:
+async def delete_recording(request: Request, recording_id: int, user: Administrator) -> dict:
     hub = request.app.state.hub
     if hub.recorder.active is not None and hub.recorder.active["id"] == recording_id:
         raise HTTPException(status_code=409, detail="Stop the recording before deleting it.")

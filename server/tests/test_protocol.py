@@ -37,6 +37,27 @@ def test_pose_rejects_non_finite(bad):
         decode(frame)
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["voltage", "current", "percentage"])
+def test_battery_rejects_non_finite(field, bad):
+    """Python's json module emits bare NaN/Infinity tokens, which the browser's
+    JSON.parse refuses — one such frame would break the socket for every
+    widget, not just the battery one. Reject at decode instead."""
+    data = {"voltage": 24.6, "current": -1.5, "percentage": 88.0, "charging": False}
+    data[field] = bad
+    with pytest.raises(ProtocolError):
+        decode(encode("telemetry.battery", "patrolbot-01", 1, data))
+
+
+def test_battery_accepts_null_optionals():
+    """The nullable fields must still be nullable — the bridge maps a
+    non-finite current/percentage to null rather than dropping the sample."""
+    _, payload = decode(encode("telemetry.battery", "patrolbot-01", 1, {
+        "voltage": 24.6, "current": None, "percentage": None, "charging": False,
+    }))
+    assert payload.current is None and payload.percentage is None
+
+
 def test_wrong_version_rejected():
     frame = json.dumps({"version": 2, "type": "telemetry.heartbeat", "robot_id": "r", "sequence": 1,
                         "timestamp": "2026-07-17T00:00:00Z", "data": {"uptime_s": 1.0}})

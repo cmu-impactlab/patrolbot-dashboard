@@ -7,8 +7,9 @@ issued by the /auth/callback flow (see oidc.py).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import HTTPException, Request, WebSocket
+from fastapi import Depends, HTTPException, Request, WebSocket
 
 from .sessions import COOKIE_NAME, verify
 
@@ -25,6 +26,10 @@ class User:
         """Command authorization is read-only by default; only operators and
         administrators may send navigation/pose/stop commands."""
         return self.role in ("operator", "administrator")
+
+    @property
+    def is_administrator(self) -> bool:
+        return self.role == "administrator"
 
 
 LOCAL_USER = User(id=1, username="local", display_name="Local Operator", role="administrator")
@@ -43,6 +48,38 @@ async def get_current_user(request: Request) -> User:
     if session is None:
         raise HTTPException(status_code=401, detail="Not signed in.")
     return _user_from_session(session)
+
+
+CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+async def require_operator(user: CurrentUser) -> User:
+    """Actions that change what the robot or the dashboard is doing.
+
+    The WebSocket command path has enforced this since the hardening work
+    (CommandBroker checks `can_command`), but the HTTP surface did not: a
+    signed-in observer could start and stop recordings, which are global —
+    one observer stopping a recording ends it for everyone.
+    """
+    if not user.can_command:
+        raise HTTPException(
+            status_code=403,
+            detail="Your account has read-only access — you cannot change recordings.")
+    return user
+
+
+async def require_administrator(user: CurrentUser) -> User:
+    """Destructive actions and the command audit.
+
+    The audit is not telemetry: it names who sent every command, from which IP
+    address, which is exactly the data an observer account should not be able
+    to enumerate. Deletion destroys a recording for every user at once.
+    """
+    if not user.is_administrator:
+        raise HTTPException(
+            status_code=403,
+            detail="This action needs an administrator account.")
+    return user
 
 
 def resolve_ws_user(settings, websocket: WebSocket) -> User | None:

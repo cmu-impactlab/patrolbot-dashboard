@@ -198,6 +198,29 @@ make smoke
 `make smoke` exercises the local server/mock WebSocket path and builds the
 frontend.
 
+Every Python test carries a 60-second timeout (`pytest-timeout`), so a suite
+that blocks fails with a traceback instead of stalling. Supported interpreters
+are Python 3.11 through 3.14, all four exercised in CI.
+
+## Reserved for later phases
+
+Two features are present in the contract and the UI but are **not implemented
+end to end**. Both are deliberate placeholders, not oversights:
+
+- **Camera and gimbal.** No camera stream, no gimbal control, and no video
+  recording. `"video"` is reserved as a recording channel name so the
+  Recordings widget can advertise it as coming later
+  (`server/app/recordings/recorder.py`), and the checkbox stays disabled. A
+  server-side gimbal control-authority prototype was removed in the meantime;
+  it will be reintroduced with the camera work rather than kept unwired.
+- **Automatic docking (`dock`).** The command exists in the protocol, the
+  server gates, the UI control, and the mock robot, but the real robot bridge
+  has no dock executor and does not advertise the `dock` capability — so
+  against the real robot the control stays greyed out with "Automatic docking
+  is not commissioned on this robot yet". Commissioning it needs the drive
+  base controller (SBC), which is currently unreachable. `undock` **is**
+  implemented on the real bridge and is unaffected.
+
 ## Safety
 
 - Robot commands are disabled unless `WEB_BRIDGE_ENABLE_COMMANDS=1` reaches

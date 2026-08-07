@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter()
+
+# See api/history.py: zero and negative limits are rejected at the boundary
+# rather than clamped, because a negative LIMIT is "unlimited" in SQLite.
+MAX_EVENTS = 500
 
 
 @router.get("/api/snapshot")
@@ -31,6 +35,9 @@ async def get_map(request: Request) -> dict:
 
 
 @router.get("/api/events")
-async def events(request: Request, limit: int = 100) -> list[dict]:
+async def events(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=MAX_EVENTS),
+) -> list[dict]:
     db = request.app.state.db
-    return await db.get_events(limit=min(limit, 500))
+    return await db.get_events(limit=limit)

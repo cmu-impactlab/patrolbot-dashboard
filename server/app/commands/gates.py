@@ -23,8 +23,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# Base-state telemetry older than this is not a basis for allowing motion.
+# The robot's *own* report of how stale its drive-base link is. Anything older
+# than this is not a basis for allowing motion.
 MAX_TELEMETRY_AGE_S = 2.0
+
+# How old the server's *receipt* of a telemetry slice may be. This is a
+# different question from MAX_TELEMETRY_AGE_S and neither one implies the
+# other: telemetry_age is a number inside the last base_state payload, so if
+# base_state stops arriving altogether, the last one keeps reporting whatever
+# age it had when it was sent — 0.05 s, forever. The heartbeat is no help
+# either; it comes from the bridge's socket thread, which happily keeps
+# beating after the ROS subscription behind base_state has died. So a robot
+# whose drive-base driver crashed still looked online, still reported fresh
+# telemetry, and would still have authorized charge release, motor enable,
+# dock and undock off a frozen snapshot.
+#
+# base_state arrives at 1 Hz (slow_interval in web_bridge.yaml) and pose at
+# 10 Hz, so 3 s tolerates two missed base-state samples while staying well
+# inside the 10 s offline threshold — the gate has to notice before the
+# connection state does, or it adds nothing.
+MAX_RECEIPT_AGE_S = 3.0
 # Speeds at or below these count as stationary (encoder noise on a parked
 # robot is non-zero).
 STATIONARY_LINEAR_MS = 0.02
@@ -44,6 +62,10 @@ class StateFacts:
     online: bool = False
     link_connected: bool = False
     telemetry_age: float = 999.0
+    # Seconds since the server received each slice. None means "never
+    # received", which fails closed exactly like a stale one.
+    base_state_age: float | None = None
+    pose_age: float | None = None
     hardware_state_valid: bool = False
     charge_state: str = "unknown"
     motors_enabled: bool = False
@@ -83,15 +105,34 @@ class StateFacts:
     def telemetry_fresh(self) -> bool:
         return self.link_connected and self.telemetry_age <= MAX_TELEMETRY_AGE_S
 
+    @property
+    def base_state_fresh(self) -> bool:
+        """Did the server actually hear from the drive base recently?"""
+        return (self.base_state_age is not None
+                and self.base_state_age <= MAX_RECEIPT_AGE_S)
+
+    @property
+    def pose_fresh(self) -> bool:
+        return self.pose_age is not None and self.pose_age <= MAX_RECEIPT_AGE_S
+
 
 def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                      capabilities: list[str] | None = None,
-                     navigating: bool = False) -> StateFacts:
+                     navigating: bool = False,
+                     base_state_age: float | None = None,
+                     pose_age: float | None = None) -> StateFacts:
     """Flatten live robot state into gate facts. Missing telemetry stays at the
-    fail-closed defaults, so an absent base_state refuses everything."""
+    fail-closed defaults, so an absent base_state refuses everything.
+
+    base_state_age/pose_age are the server's own receipt ages (RobotState
+    tracks them per slice); omitting them means "not received", which refuses
+    just as a stale slice does.
+    """
     facts = StateFacts(online=connection == "online",
                        capabilities=tuple(capabilities or ()),
-                       navigating=navigating)
+                       navigating=navigating,
+                       base_state_age=base_state_age,
+                       pose_age=pose_age)
     if base_state is not None:
         facts.link_connected = bool(base_state.link_connected)
         facts.telemetry_age = float(base_state.telemetry_age)
@@ -121,7 +162,12 @@ def _hardware_reason(facts: StateFacts) -> str | None:
     itself recent, valid and fault-free?"""
     if not facts.online:
         return "The robot is not connected right now."
-    if not facts.telemetry_fresh:
+    # Two independent staleness questions, one answer: did the drive base tell
+    # us recently (base_state_fresh), and was what it told us current when it
+    # said it (telemetry_fresh). To the operator these are the same problem —
+    # "what I can see is not current" — and the distinction between the
+    # robot's internal link and ours is not theirs to act on.
+    if not facts.base_state_fresh or not facts.telemetry_fresh:
         return ("The robot's hardware readings are stale — wait for fresh "
                 "data before changing charging or motor power.")
     if not facts.hardware_state_valid:
@@ -133,6 +179,16 @@ def _hardware_reason(facts: StateFacts) -> str | None:
 
 
 def _stationary_reason(facts: StateFacts) -> str | None:
+    """"Is the robot stopped?" is only answerable from a pose we actually have.
+
+    Without the freshness check this read "the robot is still moving" for a
+    missing pose and, worse, "the robot is stopped" for a stale one — a robot
+    that was parked when its last pose arrived and has been driving ever since
+    passed the check.
+    """
+    if not facts.pose_fresh:
+        return ("The dashboard has not had a recent position update from the "
+                "robot — wait for fresh data before moving it.")
     if not facts.stationary:
         return "The robot is still moving — wait until it has stopped."
     return None
@@ -217,6 +273,11 @@ def dock_reason(facts: StateFacts) -> str | None:
         return "The robot is already charging."
     if facts.estop_pressed:
         return "The emergency stop is pressed. Release it on the robot first."
+    # `localized` comes out of the pose slice, so a stale pose makes it a claim
+    # about where the robot used to think it was.
+    if not facts.pose_fresh:
+        return ("The dashboard has not had a recent position update from the "
+                "robot — wait for fresh data before sending it to the dock.")
     if not facts.localized:
         return "The robot does not know where it is. Set its location first."
     return None

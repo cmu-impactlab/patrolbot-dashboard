@@ -238,7 +238,13 @@ class CommandBroker:
                          for entry in self.active.values())
         facts = gates.facts_from_state(state.connection, state.base_state.data,
                                        state.pose.data, state.capabilities,
-                                       navigating=navigating)
+                                       navigating=navigating,
+                                       # Server receipt ages, not the robot's
+                                       # self-report: a slice that stopped
+                                       # arriving keeps its last self-reported
+                                       # age forever. See gates.MAX_RECEIPT_AGE_S.
+                                       base_state_age=state.base_state.age(),
+                                       pose_age=state.pose.age())
         return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:
