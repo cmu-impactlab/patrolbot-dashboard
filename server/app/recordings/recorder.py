@@ -10,11 +10,12 @@ channel name "video" is reserved so the UI can advertise it as coming later.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
+
+from ..database.writer import BackgroundWriter
 
 if TYPE_CHECKING:
     from ..database.repo import Database
@@ -45,6 +46,7 @@ class Recorder:
         self._channels: set[str] = set()
         self._last_mono: dict[str, float] = {}
         self._samples = 0
+        self.writer = BackgroundWriter("recording")
 
     @property
     def recording(self) -> bool:
@@ -71,11 +73,23 @@ class Recorder:
         if self.db is None or self.active is None:
             return None
         recording_id = self.active["id"]
+        # Clear `active` first so offer() stops queueing, then wait for the
+        # samples already queued. Without the flush, stop() reported (and the
+        # UI displayed) a sample_count taken while writes were still landing —
+        # and any that had not started yet raced the next start().
         self.active = None
+        await self.writer.flush()
         await self.db.stop_recording(recording_id)
         row = await self.db.get_recording(recording_id)
-        log.info("recording %s stopped (%s samples)", recording_id, row and row["sample_count"])
+        log.info("recording %s stopped (%s samples%s)", recording_id,
+                 row and row["sample_count"],
+                 f", {self.writer.dropped} dropped" if self.writer.dropped else "")
         return row
+
+    async def shutdown(self) -> None:
+        """Application shutdown: finish what is queued before the database
+        closes, rather than leaving writes running against a closed handle."""
+        await self.writer.stop()
 
     async def recover(self) -> None:
         """Close out a recording left open by a crash/restart."""
@@ -97,8 +111,7 @@ class Recorder:
         self._last_mono[kind] = now
         if self._samples >= MAX_SAMPLES:
             return
-        self._samples += 1
         recording_id = self.active["id"]
-        asyncio.get_running_loop().create_task(
-            self.db.add_recording_sample(recording_id, ts, kind,
-                                         json.dumps(data, separators=(",", ":"))))
+        if self.writer.submit(self.db.add_recording_sample, recording_id, ts, kind,
+                              json.dumps(data, separators=(",", ":"))):
+            self._samples += 1

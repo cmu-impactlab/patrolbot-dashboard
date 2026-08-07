@@ -9,11 +9,18 @@ router = APIRouter()
 async def health(request: Request) -> dict:
     hub = request.app.state.hub
     session = hub.primary()
+    # Telemetry writes are deliberately lossy under pressure (they must never
+    # back-pressure the robot socket), so anything they dropped or failed has
+    # to show up here — otherwise a disk that stopped keeping up looks exactly
+    # like a robot that stopped sending.
+    writes = hub.write_failures
+    degraded = any(writes.values())
     return {
-        "status": "healthy",
+        "status": "degraded" if degraded else "healthy",
         "robot_connected": session is not None and session.state.connection != "offline",
         "connection": session.state.connection if session else "offline",
         "browsers": len(hub.browsers),
+        "writes": writes,
     }
 
 

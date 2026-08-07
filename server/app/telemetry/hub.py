@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -42,34 +43,86 @@ class RobotSession:
     websocket: WebSocket | None = None
 
 
+QUEUE_LIMIT = 64
+# WebSocket close code 1013 "Try Again Later" — the browser's own reconnect
+# logic treats this like any other drop and comes back for a fresh snapshot.
+OVERLOADED_CLOSE_CODE = 1013
+
+
 class BrowserClient:
+    """One browser's outbound queue.
+
+    Frames carry whether they are protected, because *which* frame gets dropped
+    under backpressure is a safety question. The queue used to drop its oldest
+    entry regardless: a browser that fell behind during a lidar burst could
+    lose the command.result closing out a command (leaving the operator staring
+    at a spinner for a command that finished), the state.connection saying the
+    robot went offline, or an event.append reporting an e-stop — while the
+    lidar frames that caused the backlog sailed through.
+
+    So eviction only ever takes an unprotected frame. If there is no such frame
+    the queue is 64 deep in safety-relevant messages, which means this browser
+    is too far behind to be shown a coherent picture at all; it is disconnected
+    and resyncs from a fresh snapshot rather than being fed a version of events
+    with a hole in it.
+    """
+
     def __init__(self, websocket: WebSocket, user: Any = None,
                  source_ip: str | None = None) -> None:
         self.websocket = websocket
         self.user = user  # authentication.local.User (identity + role)
         self.source_ip = source_ip
-        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=64)
+        self._queue: deque[tuple[str, bool]] = deque()
+        self._wakeup = asyncio.Event()
+        # Set when a protected frame had to be dropped: this client's view is
+        # now missing something it must not miss, and only a resync fixes it.
+        self.overloaded = False
+        self.dropped = 0
+
+    @property
+    def depth(self) -> int:
+        return len(self._queue)
 
     def offer(self, frame: str, protected: bool) -> None:
-        try:
-            self.queue.put_nowait(frame)
-        except asyncio.QueueFull:
-            # Drop the oldest frame to make room; protected frames therefore
-            # always land (high-rate telemetry ahead of them is expendable).
-            with contextlib.suppress(asyncio.QueueEmpty):
-                self.queue.get_nowait()
-            with contextlib.suppress(asyncio.QueueFull):
-                self.queue.put_nowait(frame)
+        if self.overloaded:
+            return  # already condemned; the sender is closing the socket
+        if len(self._queue) >= QUEUE_LIMIT and not self._evict_unprotected():
+            self.overloaded = True
+            self._wakeup.set()
+            log.warning("browser queue saturated with protected frames; "
+                        "disconnecting to force a resync")
+            return
+        self._queue.append((frame, protected))
+        self._wakeup.set()
+
+    def _evict_unprotected(self) -> bool:
+        """Drop the oldest expendable frame. False when there isn't one."""
+        for index, (_frame, protected) in enumerate(self._queue):
+            if not protected:
+                del self._queue[index]
+                self.dropped += 1
+                return True
+        return False
 
     async def sender(self) -> None:
         while True:
-            frame = await self.queue.get()
+            while not self._queue and not self.overloaded:
+                self._wakeup.clear()
+                await self._wakeup.wait()
+            if self.overloaded:
+                with contextlib.suppress(Exception):
+                    await self.websocket.close(
+                        code=OVERLOADED_CLOSE_CODE,
+                        reason="too far behind; reconnect for a fresh snapshot")
+                return
+            frame, _protected = self._queue.popleft()
             await self.websocket.send_text(frame)
 
 
 class TelemetryHub:
     def __init__(self, settings: Settings, db: "Database | None" = None) -> None:
         from ..commands.broker import CommandBroker
+        from ..database.writer import BackgroundWriter
         from ..recordings.recorder import Recorder
 
         self.settings = settings
@@ -78,6 +131,10 @@ class TelemetryHub:
         self.browsers: set[BrowserClient] = set()
         self.commands = CommandBroker(self)
         self.recorder = Recorder(db)
+        # Battery history is the other telemetry-path write. Separate from the
+        # recorder's queue so a recording that saturates the disk cannot also
+        # cost the long-term battery log, and vice versa.
+        self.battery_writer = BackgroundWriter("battery")
         self._sequence = 0
         self._monitor_task: asyncio.Task | None = None
         self._event_id_seed = 1
@@ -92,16 +149,36 @@ class TelemetryHub:
 
     async def start(self) -> None:
         await self.recorder.recover()
+        self.battery_writer.start()
+        self.recorder.writer.start()
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:
-        for session in self.robots.values():
-            await self._persist_last_pose(session)
-        await self.commands.shutdown()
+        # Stop the monitor first: it can emit connection events, which write.
         if self._monitor_task is not None:
             self._monitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
+            self._monitor_task = None
+        for session in self.robots.values():
+            await self._persist_last_pose(session)
+        await self.commands.shutdown()
+        # Drain last, so everything above has been queued, and before
+        # create_app's lifespan closes the database underneath them.
+        await self.recorder.shutdown()
+        await self.battery_writer.stop()
+
+    @property
+    def write_failures(self) -> dict[str, int]:
+        """Dropped/failed counts for /api/health. Non-zero means telemetry
+        history is incomplete — the writes are deliberately lossy under
+        pressure, so the loss has to be visible somewhere."""
+        return {
+            "recording_dropped": self.recorder.writer.dropped,
+            "recording_failed": self.recorder.writer.failed,
+            "battery_dropped": self.battery_writer.dropped,
+            "battery_failed": self.battery_writer.failed,
+        }
 
     def _next_seq(self) -> int:
         self._sequence += 1
@@ -174,10 +251,11 @@ class TelemetryHub:
             if state.battery_estimate is not None:
                 data_out = {**envelope.data, "estimate": state.battery_estimate.as_dict()}
             if self.db is not None:
-                asyncio.get_running_loop().create_task(self.db.add_battery_sample(
+                self.battery_writer.submit(
+                    self.db.add_battery_sample,
                     session.robot_id, envelope.timestamp, enriched.voltage,
                     enriched.percentage, enriched.current, enriched.charging,
-                ))
+                )
         elif t == "telemetry.base_state":
             events = state.record_base_state(payload)
             self.recorder.offer("base_state", envelope.timestamp, envelope.data)
