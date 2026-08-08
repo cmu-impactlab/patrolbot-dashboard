@@ -1,18 +1,41 @@
 from __future__ import annotations
 
-import io
+import asyncio
 import json
-
+import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..authentication import User, require_administrator, require_operator
-from ..recordings.export import CHANNEL_FILES, build_zip
+from ..recordings.export import (
+    CHANNEL_FILES,
+    MAX_EXPORT_BYTES,
+    ExportTooLarge,
+    ZipExportBuilder,
+    parse_timestamp,
+    select_channels,
+)
 
 router = APIRouter()
+
+# What the replay page actually draws (see frontend/src/stores/replayStore.ts).
+# Reading the rest — above all the lidar scans, which dominate a recording —
+# only to have the browser discard them is the expensive half of replaying.
+REPLAY_CHANNELS = ("pose", "event", "battery")
+
+# Ceiling on the JSON replay response. A recording longer than this replays
+# from its start with `truncated: true` rather than failing.
+MAX_REPLAY_SAMPLES = 20_000
+
+
+def _parse_channels(channels: str | None) -> list[str]:
+    if channels is None:
+        return []
+    return [c.strip() for c in channels.split(",") if c.strip()]
+
 
 # Reading a recording is telemetry, so observers keep it. Starting and stopping
 # one is not: recordings are global, so an observer stopping one ends it for
@@ -65,43 +88,95 @@ async def stop_recording(request: Request, user: Operator) -> dict:
 
 
 @router.get("/api/recordings/{recording_id}")
-async def get_recording(request: Request, recording_id: int) -> dict:
+async def get_recording(
+    request: Request,
+    recording_id: int,
+    channels: str | None = Query(
+        default=None,
+        description="Comma-separated channels; omit for the replay set "
+                    f"({', '.join(REPLAY_CHANNELS)})."),
+) -> dict:
+    """A recording as JSON, for the replay page.
+
+    Only the channels replay actually draws are read. This endpoint used to
+    fetch and JSON-decode *every* sample: a lidar recording's scans dominate
+    the row count and the byte count, were decoded on the event loop, and then
+    thrown away by the browser, which only consumes pose, event and battery.
+    """
     db = request.app.state.db
     row = await db.get_recording(recording_id)
     if row is None:
         raise HTTPException(status_code=404, detail="recording not found")
-    samples = await db.get_recording_samples(recording_id)
-    row["samples"] = [{"ts": s["ts"], "kind": s["kind"], "data": json.loads(s["data"])} for s in samples]
+
+    wanted = _parse_channels(channels) or list(REPLAY_CHANNELS)
+    total = await db.count_recording_samples(recording_id, wanted)
+    samples: list[dict] = []
+    async for sample in db.iter_recording_samples(recording_id, wanted):
+        if len(samples) >= MAX_REPLAY_SAMPLES:
+            break
+        try:
+            data = json.loads(sample["data"])
+        except (TypeError, ValueError):
+            continue
+        samples.append({"ts": sample["ts"], "kind": sample["kind"], "data": data})
+
+    row["samples"] = samples
+    row["channels_returned"] = wanted
+    # A recording longer than the cap replays from its beginning rather than
+    # failing outright; the flag lets the UI say so instead of quietly
+    # showing a run that stops early for no visible reason.
+    row["truncated"] = total > len(samples)
+    row["available_sample_count"] = total
     return row
 
 
 @router.get("/api/recordings/{recording_id}/export.csv")
 async def export_recording(request: Request, recording_id: int) -> StreamingResponse:
+    """The flat single-table CSV. Genuinely streamed, a page at a time.
+
+    It was previously assembled in a StringIO and then handed to
+    StreamingResponse, which streams the sending but not the building — the
+    whole recording was in memory before the first byte went out.
+    """
     db = request.app.state.db
     row = await db.get_recording(recording_id)
     if row is None:
         raise HTTPException(status_code=404, detail="recording not found")
-    samples = await db.get_recording_samples(recording_id)
 
-    buffer = io.StringIO()
-    buffer.write("ts,kind,x,y,yaw,linear_velocity,voltage,percentage,severity,title,message\n")
-    for sample in samples:
-        data = json.loads(sample["data"])
-        def cell(key: str) -> str:
-            value = data.get(key)
-            return "" if value is None else str(value)
-        def text(key: str) -> str:
-            value = data.get(key)
-            return "" if value is None else '"' + str(value).replace('"', '""') + '"'
-        buffer.write(",".join([
-            sample["ts"], sample["kind"],
-            cell("x"), cell("y"), cell("yaw"), cell("linear_velocity"),
-            cell("voltage"), cell("percentage"),
-            cell("severity"), text("title"), text("message"),
-        ]) + "\n")
-    buffer.seek(0)
+    async def rows():
+        yield "ts,kind,x,y,yaw,linear_velocity,voltage,percentage,severity,title,message\n"
+        written = 0
+        async for sample in db.iter_recording_samples(recording_id):
+            try:
+                data = json.loads(sample["data"])
+            except (TypeError, ValueError):
+                continue
+
+            def cell(key: str) -> str:
+                value = data.get(key)
+                return "" if value is None else str(value)
+
+            def text(key: str) -> str:
+                value = data.get(key)
+                return "" if value is None else '"' + str(value).replace('"', '""') + '"'
+
+            line = ",".join([
+                sample["ts"], sample["kind"],
+                cell("x"), cell("y"), cell("yaw"), cell("linear_velocity"),
+                cell("voltage"), cell("percentage"),
+                cell("severity"), text("title"), text("message"),
+            ]) + "\n"
+            written += len(line)
+            if written > MAX_EXPORT_BYTES:
+                # Can't change the status code once the body has started, so
+                # say so in the data itself rather than truncating silently.
+                yield ("# export truncated: exceeded the "
+                       f"{MAX_EXPORT_BYTES} byte limit\n")
+                return
+            yield line
+
     filename = f"recording-{recording_id}.csv"
-    return StreamingResponse(buffer, media_type="text/csv",
+    return StreamingResponse(rows(), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
@@ -112,8 +187,15 @@ async def export_recording_zip(
     channels: str | None = Query(
         default=None,
         description="Comma-separated channels to include; omit for everything recorded."),
-) -> Response:
-    """A zip of one CSV per channel — see the bundled README for the layout."""
+) -> StreamingResponse:
+    """A zip of one CSV per channel — see the bundled README for the layout.
+
+    Built in two phases so neither one blocks the server: samples are paged out
+    of the database and written to scratch CSVs on the event loop (cheap per
+    row, and it yields between pages), then the DEFLATE pass — the expensive
+    part — runs in a worker thread. Nothing holds the whole recording, or the
+    whole archive, in memory.
+    """
     db = request.app.state.db
     row = await db.get_recording(recording_id)
     if row is None:
@@ -121,7 +203,7 @@ async def export_recording_zip(
 
     wanted: list[str] | None = None
     if channels is not None:
-        wanted = [c.strip() for c in channels.split(",") if c.strip()]
+        wanted = _parse_channels(channels)
         unknown = [c for c in wanted if c not in CHANNEL_FILES]
         if unknown:
             raise HTTPException(status_code=400,
@@ -129,12 +211,43 @@ async def export_recording_zip(
         if not wanted:
             raise HTTPException(status_code=400, detail="no channels selected")
 
-    samples = await db.get_recording_samples(recording_id)
-    payload, filename = build_zip(row, samples, wanted)
-    return Response(
-        content=payload,
+    present = await db.recording_sample_kinds(recording_id)
+    selected = select_channels(row, present, wanted)
+    t0 = (parse_timestamp(await db.first_sample_ts(recording_id))
+          or parse_timestamp(row.get("started_at")))
+
+    builder = ZipExportBuilder(row, selected, t0)
+    try:
+        async for sample in db.iter_recording_samples(recording_id, selected or None):
+            builder.add(sample)
+        archive_path = await asyncio.to_thread(builder.finalize)
+    except ExportTooLarge as exc:
+        builder.close()
+        raise HTTPException(
+            status_code=413,
+            detail=(f"This recording exports to more than "
+                    f"{exc.limit // (1024 * 1024)} MB. Select fewer channels "
+                    f"(leaving out the laser scan usually does it)."),
+        ) from exc
+    except Exception:
+        builder.close()
+        raise
+
+    def stream():
+        try:
+            with open(archive_path, "rb") as handle:
+                while chunk := handle.read(64 * 1024):
+                    yield chunk
+        finally:
+            builder.close()  # the scratch directory goes with it
+
+    return StreamingResponse(
+        stream(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{builder.filename}"',
+            "Content-Length": str(os.path.getsize(archive_path)),
+        },
     )
 
 

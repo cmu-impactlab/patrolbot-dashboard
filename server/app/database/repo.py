@@ -10,7 +10,7 @@ import contextlib
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 import aiosqlite
 
@@ -18,6 +18,11 @@ from ..protocol.messages import EventData
 from .presets import PRESET_LAYOUTS
 
 log = logging.getLogger("database")
+
+# Rows fetched per round trip when walking a recording. Big enough that paging
+# overhead is negligible, small enough that one page is never a memory problem
+# even when every row is a lidar scan (~3 KB).
+SAMPLE_PAGE = 2000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -330,12 +335,71 @@ class Database:
         out["channels"] = json.loads(out["channels"])
         return out
 
-    async def get_recording_samples(self, recording_id: int) -> list[dict[str, Any]]:
+    async def get_recording_samples(self, recording_id: int,
+                                    kinds: list[str] | None = None,
+                                    after_id: int = 0,
+                                    limit: int = SAMPLE_PAGE) -> list[dict[str, Any]]:
+        """One page of samples, oldest first.
+
+        Keyset pagination on the sample id rather than OFFSET: offsets re-scan
+        everything before them, which turns a walk over a large recording into
+        quadratic work. `kinds` pushes the channel filter into SQL, so a replay
+        that only draws pose and path never materializes the lidar scans that
+        dominate a recording's size.
+        """
+        sql = ("SELECT id, ts, kind, data FROM recording_samples "
+               "WHERE recording_id = ? AND id > ?")
+        params: list[Any] = [recording_id, after_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        sql += " ORDER BY id LIMIT ?"
+        params.append(limit)
+        async with self.db.execute(sql, tuple(params)) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def iter_recording_samples(self, recording_id: int,
+                                     kinds: list[str] | None = None,
+                                     page: int = SAMPLE_PAGE) -> AsyncIterator[dict[str, Any]]:
+        """Every sample, one page at a time. Yields to the event loop between
+        pages, so exporting a large recording does not block telemetry."""
+        after_id = 0
+        while True:
+            rows = await self.get_recording_samples(recording_id, kinds, after_id, page)
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            after_id = rows[-1]["id"]
+            if len(rows) < page:
+                return
+
+    async def count_recording_samples(self, recording_id: int,
+                                      kinds: list[str] | None = None) -> int:
+        sql = "SELECT COUNT(*) FROM recording_samples WHERE recording_id = ?"
+        params: list[Any] = [recording_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        async with self.db.execute(sql, tuple(params)) as cur:
+            return int((await cur.fetchone())[0])
+
+    async def recording_sample_kinds(self, recording_id: int) -> list[str]:
+        """Which channels this recording actually holds samples for."""
         async with self.db.execute(
-            "SELECT ts, kind, data FROM recording_samples WHERE recording_id = ? ORDER BY id",
+            "SELECT DISTINCT kind FROM recording_samples WHERE recording_id = ?",
             (recording_id,)
         ) as cur:
-            return [dict(row) for row in await cur.fetchall()]
+            return sorted(row[0] for row in await cur.fetchall())
+
+    async def first_sample_ts(self, recording_id: int) -> str | None:
+        """The recording's own time origin, without reading every sample."""
+        async with self.db.execute(
+            "SELECT MIN(ts) FROM recording_samples WHERE recording_id = ?",
+            (recording_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
     async def delete_recording(self, recording_id: int) -> bool:
         await self.db.execute("DELETE FROM recording_samples WHERE recording_id = ?", (recording_id,))

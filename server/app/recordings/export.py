@@ -24,11 +24,14 @@ tools actually want.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
-import io
 import json
 import math
+import os
 import re
+import shutil
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
@@ -104,6 +107,11 @@ def _parse_ts(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+# Public alias: the API needs it to establish a recording's time origin
+# without reading every sample.
+parse_timestamp = _parse_ts
+
+
 def _num(value: Any) -> str:
     """Numbers pass through; anything non-numeric becomes an empty cell."""
     if value is None or isinstance(value, bool):
@@ -130,19 +138,37 @@ def slugify(name: str) -> str:
 
 
 class _Table:
-    """A CSV being accumulated in memory, written to the zip when complete."""
+    """A CSV being written straight to disk in the export's scratch directory.
 
-    def __init__(self, filename: str) -> None:
+    It used to accumulate in a StringIO and the finished archive was returned
+    as one bytes object, so a large recording was held in memory three times
+    over — the decoded samples, every CSV, and the zip. lidar_ranges.csv alone
+    is one row per beam per scan: a ten-minute scan recording at 1 Hz and 360
+    beams is 216 000 rows.
+    """
+
+    def __init__(self, directory: str, filename: str) -> None:
         self.filename = filename
-        self.buffer = io.StringIO()
-        # QUOTE_MINIMAL with \r\n is RFC 4180, which every reader agrees on.
-        self.writer = csv.writer(self.buffer, lineterminator="\r\n")
+        self.path = os.path.join(directory, filename)
+        # newline="" per the csv module; \r\n + QUOTE_MINIMAL is RFC 4180,
+        # which every reader agrees on.
+        self._handle = open(self.path, "w", newline="", encoding="utf-8")
+        self.writer = csv.writer(self._handle, lineterminator="\r\n")
         self.writer.writerow(COLUMNS[filename])
         self.rows = 0
 
     def write(self, lead: list[str], rest: Iterable[str]) -> None:
         self.writer.writerow(lead + list(rest))
         self.rows += 1
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.close()
+
+    @property
+    def bytes_written(self) -> int:
+        self._handle.flush()
+        return os.path.getsize(self.path)
 
 
 def _path_length(points: list[Any]) -> float:
@@ -153,64 +179,153 @@ def _path_length(points: list[Any]) -> float:
     return total
 
 
+class ExportTooLarge(Exception):
+    """Raised when an export exceeds the configured uncompressed byte budget."""
+
+    def __init__(self, written: int, limit: int) -> None:
+        super().__init__(f"export exceeded {limit} bytes (reached {written})")
+        self.written = written
+        self.limit = limit
+
+
+# An export is one HTTP response held open while it is produced, so it needs a
+# ceiling that does not depend on how long someone left a recording running.
+# 512 MB uncompressed is far above any real recording here (the entire live
+# database is ~30 MB) and far below anything that would trouble the host.
+MAX_EXPORT_BYTES = 512 * 1024 * 1024
+# How often to re-measure. Checking every row would stat() per row.
+SIZE_CHECK_EVERY = 5000
+
+
+class ZipExportBuilder:
+    """Builds a recording export incrementally on disk.
+
+    Split in two on purpose. `add()` is called from the event loop as samples
+    are paged out of the database — it is cheap per row and touches no
+    compression. `finalize()` does the DEFLATE work and is meant to be handed
+    to a worker thread, because compressing hundreds of megabytes is the part
+    that would otherwise stall every telemetry socket on the server.
+
+    Use as a context manager, or call close(); the scratch directory has to go
+    away even when the download fails halfway through.
+    """
+
+    def __init__(self, recording: dict[str, Any], selected: list[str],
+                 t0: datetime | None, max_bytes: int | None = None) -> None:
+        self.recording = recording
+        self.recording_id = recording["id"]
+        self.selected = selected
+        self.t0 = t0
+        # Read at construction, not as a default argument: a default is bound
+        # at import and would ignore any later change to the module setting.
+        self.max_bytes = MAX_EXPORT_BYTES if max_bytes is None else max_bytes
+        self.folder = f"recording-{self.recording_id}-{slugify(recording.get('name', ''))}"
+        self._directory = tempfile.mkdtemp(prefix="patrolbot-export-")
+        self._closed = False
+        self._rows_since_check = 0
+        self.tables: dict[str, _Table] = {}
+        for channel in selected:
+            for filename in CHANNEL_FILES[channel]:
+                self.tables[filename] = _Table(self._directory, filename)
+        # Per-channel sample counters, so the long-format tables can be joined
+        # back to their summary row without relying on timestamp equality.
+        self._indices: dict[str, int] = {channel: -1 for channel in selected}
+
+    def __enter__(self) -> "ZipExportBuilder":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def add(self, sample: dict[str, Any]) -> None:
+        kind = sample["kind"]
+        if kind not in self._indices:
+            return
+        self._indices[kind] += 1
+        index = self._indices[kind]
+        stamp = _parse_ts(sample["ts"])
+        elapsed = ("" if stamp is None or self.t0 is None
+                   else f"{(stamp - self.t0).total_seconds():.3f}")
+        iso = stamp.isoformat().replace("+00:00", "Z") if stamp else _text(sample["ts"])
+        lead = [str(self.recording_id), iso, elapsed]
+        try:
+            data = (json.loads(sample["data"]) if isinstance(sample["data"], str)
+                    else sample["data"])
+        except (TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        _WRITERS[kind](self.tables, lead, index, data)
+
+        self._rows_since_check += 1
+        if self._rows_since_check >= SIZE_CHECK_EVERY:
+            self._rows_since_check = 0
+            written = sum(table.bytes_written for table in self.tables.values())
+            if written > self.max_bytes:
+                raise ExportTooLarge(written, self.max_bytes)
+
+    def finalize(self) -> str:
+        """Compress everything written so far. Blocking — run in a thread."""
+        for table in self.tables.values():
+            table.close()
+        archive_path = os.path.join(self._directory, "export.zip")
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{self.folder}/README.txt",
+                        _readme(self.recording, self.selected, self.tables, self.t0))
+            zf.writestr(f"{self.folder}/recording.json",
+                        json.dumps(_manifest(self.recording, self.selected,
+                                             self.tables, self.t0), indent=2) + "\n")
+            for channel in self.selected:
+                for filename in CHANNEL_FILES[channel]:
+                    zf.write(self.tables[filename].path, f"{self.folder}/{filename}")
+        return archive_path
+
+    @property
+    def filename(self) -> str:
+        return f"{self.folder}.zip"
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for table in self.tables.values():
+            with contextlib.suppress(Exception):
+                table.close()
+        shutil.rmtree(self._directory, ignore_errors=True)
+
+
+def select_channels(recording: dict[str, Any], present: Iterable[str],
+                    channels: list[str] | None = None) -> list[str]:
+    """Which channels this export will contain.
+
+    A channel can appear in the samples without being in the recording's
+    declared list (older rows, or the "Recording started" event), so the data
+    is trusted alongside the declaration rather than silently dropped.
+    """
+    recorded = [c for c in recording.get("channels") or [] if c in CHANNEL_FILES]
+    for kind in present:
+        if kind in CHANNEL_FILES and kind not in recorded:
+            recorded.append(kind)
+    return [c for c in recorded if channels is None or c in channels]
+
+
 def build_zip(recording: dict[str, Any], samples: list[dict[str, Any]],
               channels: list[str] | None = None) -> tuple[bytes, str]:
-    """Render a recording as a zip of per-channel CSVs.
+    """Render a recording as a zip of per-channel CSVs, in one go.
 
-    ``channels`` selects which channels to include; None means every channel
-    the recording actually captured. Returns the archive bytes and the
-    suggested download filename.
+    Kept for callers holding an in-memory sample list (tests, small exports).
+    The HTTP export path uses ZipExportBuilder directly so it never has the
+    whole recording in memory at once.
     """
-    recording_id = recording["id"]
-    recorded = [c for c in recording.get("channels") or [] if c in CHANNEL_FILES]
-    # A channel can appear in the samples without being in the recording's
-    # declared list (older rows, or the "Recording started" event), so trust
-    # the data too rather than silently dropping it.
-    for sample in samples:
-        if sample["kind"] in CHANNEL_FILES and sample["kind"] not in recorded:
-            recorded.append(sample["kind"])
-    selected = [c for c in recorded if channels is None or c in channels]
-
-    # One clock for the whole bundle: the earliest sample we can parse.
+    selected = select_channels(recording, (s["kind"] for s in samples), channels)
     stamps = [t for t in (_parse_ts(s["ts"]) for s in samples) if t is not None]
     t0 = min(stamps) if stamps else _parse_ts(recording.get("started_at"))
-
-    tables: dict[str, _Table] = {}
-    for channel in selected:
-        for filename in CHANNEL_FILES[channel]:
-            tables[filename] = _Table(filename)
-
-    # Per-channel sample counters, so the long-format tables can be joined back
-    # to their summary row without relying on timestamp equality.
-    indices: dict[str, int] = {channel: -1 for channel in selected}
-
-    for sample in samples:
-        kind = sample["kind"]
-        if kind not in indices:
-            continue
-        indices[kind] += 1
-        index = indices[kind]
-        stamp = _parse_ts(sample["ts"])
-        elapsed = "" if stamp is None or t0 is None else f"{(stamp - t0).total_seconds():.3f}"
-        iso = stamp.isoformat().replace("+00:00", "Z") if stamp else _text(sample["ts"])
-        lead = [str(recording_id), iso, elapsed]
-        try:
-            data = json.loads(sample["data"]) if isinstance(sample["data"], str) else sample["data"]
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        _WRITERS[kind](tables, lead, index, data)
-
-    archive = io.BytesIO()
-    folder = f"recording-{recording_id}-{slugify(recording.get('name', ''))}"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{folder}/README.txt", _readme(recording, selected, tables, t0))
-        zf.writestr(f"{folder}/recording.json",
-                    json.dumps(_manifest(recording, selected, tables, t0), indent=2) + "\n")
-        for filename in [f for c in selected for f in CHANNEL_FILES[c]]:
-            zf.writestr(f"{folder}/{filename}", tables[filename].buffer.getvalue())
-    return archive.getvalue(), f"{folder}.zip"
+    with ZipExportBuilder(recording, selected, t0) as builder:
+        for sample in samples:
+            builder.add(sample)
+        path = builder.finalize()
+        with open(path, "rb") as handle:
+            return handle.read(), builder.filename
 
 
 # -- per-channel row writers -------------------------------------------------
