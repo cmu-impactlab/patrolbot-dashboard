@@ -35,6 +35,25 @@ def hello_frame() -> str:
     })
 
 
+def make_drivable(robot) -> None:
+    """Send the telemetry navigate_to_pose is gated on (seq 1 and 2).
+
+    A robot that has only said hello is not a robot known to be safe to drive.
+    The server refuses navigation until a fresh, healthy base_state and a fresh
+    localized pose have actually arrived — see app/commands/gates.py.
+    """
+    robot.send_text(encode("telemetry.base_state", "patrolbot-01", 1, {
+        "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+        "hardware_state_valid": True, "charge_state": "idle",
+        "motors_enabled": True, "estop_pressed": False, "fault_flags": 0,
+        "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
+    }))
+    robot.send_text(encode("telemetry.pose", "patrolbot-01", 2, {
+        "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
+        "angular_velocity": 0.0, "localized": True,
+    }))
+
+
 def request_frame(command: str = "navigate_to_pose", command_id: str | None = None,
                   goal: dict | None = {"x": 1.0, "y": 2.0, "yaw": None}) -> tuple[str, str]:
     command_id = command_id or str(uuid.uuid4())
@@ -56,6 +75,7 @@ def test_command_full_lifecycle(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()  # hello_ack
+        make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()  # snapshot
             command_id, frame = request_frame()
@@ -66,18 +86,18 @@ def test_command_full_lifecycle(client):
             assert forwarded["data"]["command_id"] == command_id
             assert forwarded["data"]["goal"]["x"] == 1.0
 
-            robot.send_text(encode("command.ack", "patrolbot-01", 2,
+            robot.send_text(encode("command.ack", "patrolbot-01", 3,
                                    {"command_id": command_id, "accepted": True}))
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is True
 
-            robot.send_text(encode("command.progress", "patrolbot-01", 3,
+            robot.send_text(encode("command.progress", "patrolbot-01", 4,
                                    {"command_id": command_id, "stage": "navigating",
                                     "distance_remaining": 2.5}))
             progress = recv_until(ui, "command.progress")
             assert progress["data"]["distance_remaining"] == 2.5
 
-            robot.send_text(encode("command.result", "patrolbot-01", 4,
+            robot.send_text(encode("command.result", "patrolbot-01", 5,
                                    {"command_id": command_id, "outcome": "succeeded",
                                     "detail": "Arrived"}))
             result = recv_until(ui, "command.result")
@@ -102,6 +122,7 @@ def test_duplicate_command_id_rejected(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
+        make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             command_id, frame = request_frame()
@@ -141,6 +162,7 @@ def test_ack_timeout_synthesizes_result(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
+        make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             client.app.state.hub.commands.ack_timeout_s = 0.2
@@ -158,6 +180,7 @@ def test_late_reply_after_close_is_dropped(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
+        make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             client.app.state.hub.commands.ack_timeout_s = 0.2
@@ -206,6 +229,7 @@ def _connect_robot(client):
     ws = robot.__enter__()
     ws.send_text(hello_frame())
     ws.receive_text()  # hello_ack
+    make_drivable(ws)
     return robot, ws
 
 
@@ -371,6 +395,7 @@ def test_command_rate_limited(tmp_path):
         with client.websocket_connect("/ws/robot?token=test-token") as robot:
             robot.send_text(hello_frame())
             robot.receive_text()
+            make_drivable(robot)
             with client.websocket_connect("/ws/ui") as ui:
                 ui.receive_text()
                 # Two commands fit the budget and are forwarded.
@@ -452,6 +477,7 @@ def test_out_of_bounds_goal_rejected(client):
 def _pose_frame(robot_id: str, seq: int, x: float) -> str:
     return encode("telemetry.pose", robot_id, seq, {
         "x": x, "y": 0.0, "yaw": 0.0, "linear_velocity": 0.0, "angular_velocity": 0.0,
+        "localized": True,
     })
 
 
@@ -473,18 +499,20 @@ def test_robot_reconnect_does_not_replay_command(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
+        make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             old_id, frame = request_frame(goal={"x": 5.0, "y": 6.0, "yaw": None})
             ui.send_text(frame)
             assert json.loads(robot.receive_text())["data"]["command_id"] == old_id
-            robot.send_text(encode("command.ack", "patrolbot-01", 2,
+            robot.send_text(encode("command.ack", "patrolbot-01", 3,
                                    {"command_id": old_id, "accepted": True}))
             recv_until(ui, "command.ack")
     # Robot socket dropped. Reconnect: the server must NOT resend the old goal.
     with client.websocket_connect("/ws/robot?token=test-token") as robot2:
         robot2.send_text(hello_frame())
         robot2.receive_text()  # hello_ack only
+        make_drivable(robot2)
         with client.websocket_connect("/ws/ui") as ui2:
             ui2.receive_text()
             new_id, frame2 = request_frame(goal={"x": 1.0, "y": 1.0, "yaw": None})
@@ -509,14 +537,15 @@ def test_audit_records_identity(client):
         robot.send_text(hello_frame())
         robot.receive_text()
         robot.send_text(_base_state_frame(1, 7))  # establishes session_generation
+        robot.send_text(_pose_frame("patrolbot-01", 2, 1.0))  # navigate needs a pose
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             command_id, frame = request_frame()
             ui.send_text(frame)
             robot.receive_text()  # forwarded
-            robot.send_text(encode("command.ack", "patrolbot-01", 2,
+            robot.send_text(encode("command.ack", "patrolbot-01", 3,
                                    {"command_id": command_id, "accepted": True}))
-            robot.send_text(encode("command.result", "patrolbot-01", 3,
+            robot.send_text(encode("command.result", "patrolbot-01", 4,
                                    {"command_id": command_id, "outcome": "succeeded"}))
             recv_until(ui, "command.result")
 
@@ -534,6 +563,7 @@ def test_rejection_is_audited(client_factory):
         with client.websocket_connect("/ws/robot?token=test-token") as robot:
             robot.send_text(hello_frame())
             robot.receive_text()
+            make_drivable(robot)
             with client.websocket_connect("/ws/ui") as ui:
                 ui.receive_text()
                 _, f1 = request_frame()
@@ -557,13 +587,14 @@ def test_duplicate_after_restart_rejected(tmp_path):
         with client.websocket_connect("/ws/robot?token=test-token") as robot:
             robot.send_text(hello_frame())
             robot.receive_text()
+            make_drivable(robot)
             with client.websocket_connect("/ws/ui") as ui:
                 ui.receive_text()
                 ui.send_text(frame)
                 robot.receive_text()
-                robot.send_text(encode("command.ack", "patrolbot-01", 2,
+                robot.send_text(encode("command.ack", "patrolbot-01", 3,
                                        {"command_id": command_id, "accepted": True}))
-                robot.send_text(encode("command.result", "patrolbot-01", 3,
+                robot.send_text(encode("command.result", "patrolbot-01", 4,
                                        {"command_id": command_id, "outcome": "succeeded"}))
                 recv_until(ui, "command.result")
 

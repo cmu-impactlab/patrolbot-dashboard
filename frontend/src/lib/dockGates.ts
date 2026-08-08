@@ -88,11 +88,12 @@ export function isCharging(facts: StateFacts): boolean {
 }
 
 export function isOnDock(facts: StateFacts): boolean {
-  // Once present, the SBC observer supersedes raw charge_state. That raw
-  // signal can re-latch after the robot has proved it is physically clear.
-  if (facts.dockStateValid !== null) {
-    return facts.dockStateValid
-      && DOCK_OBSERVER_DOCKED.has((facts.dockState ?? "").trim().toUpperCase());
+  // A usable SBC observer supersedes raw charge_state: that raw signal can
+  // re-latch after the robot has proved it is physically clear. An observer
+  // reporting itself invalid answers nothing, so it falls back to charge_state
+  // rather than to "not docked".
+  if (facts.dockStateValid) {
+    return DOCK_OBSERVER_DOCKED.has((facts.dockState ?? "").trim().toUpperCase());
   }
   return ON_DOCK_STATES.has(facts.chargeState.trim().toLowerCase());
 }
@@ -104,7 +105,7 @@ export function telemetryFresh(facts: StateFacts): boolean {
 function hardwareReason(facts: StateFacts): string | null {
   if (!facts.online) return "The robot is not connected right now.";
   if (!telemetryFresh(facts)) {
-    return "The robot's hardware readings are stale — wait for fresh data before changing charging or motor power.";
+    return "The robot's hardware readings are stale — wait for fresh data before commanding the robot.";
   }
   if (!facts.hardwareStateValid) return "The robot's drive base is not reporting valid data.";
   if (facts.faultFlags) {

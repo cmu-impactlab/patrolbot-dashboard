@@ -5,8 +5,8 @@ Safety posture:
   discrete charging/motor/dock steps (charge_release, motor_enable, dock,
   undock); there is deliberately no velocity teleop path — undock included,
   which is an action on the robot, never browser-published velocity.
-- The charging/motor/dock steps are additionally gated on live hardware
-  telemetry by commands.gates before they are forwarded.
+- navigate_to_pose and the charging/motor/dock steps are additionally gated on
+  live hardware telemetry by commands.gates before they are forwarded.
 - Fail-closed: anything not explicitly valid is rejected with a synthesized
   command.ack, and the browser is never left waiting — missing acks and
   results are closed out by server-side timeouts.
@@ -144,9 +144,9 @@ class CommandBroker:
                                        "try again once it is online.")
             return
 
-        # 5. Hardware-state gate for the charging/motor/dock commands. The UI
-        #    greys these out for the same reasons, but a hidden button is not
-        #    authorization — the decision is made here, from telemetry.
+        # 5. Hardware-state gate for the motion, charging and dock commands.
+        #    The UI greys these out for the same reasons, but a hidden button
+        #    is not authorization — the decision is made here, from telemetry.
         reason = self._validate_robot_state(session, command)
         if reason is not None:
             await self._reject_audited(client, robot_id, command_id, command, reason)
@@ -229,7 +229,7 @@ class CommandBroker:
         return None
 
     def _validate_robot_state(self, session: "RobotSession", command: str) -> str | None:
-        """Refusal reason for a charging/motor/dock command, from live state."""
+        """Refusal reason for a gated command, from live state."""
         if command not in gates.GATES:
             return None
         state = session.state

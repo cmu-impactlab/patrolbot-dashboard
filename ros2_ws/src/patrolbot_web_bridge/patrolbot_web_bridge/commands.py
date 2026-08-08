@@ -26,6 +26,13 @@ DISABLED_REASON = (
     "WEB_BRIDGE_ENABLE_COMMANDS=1 on the robot to allow them."
 )
 
+# How stale the drive base's own reading may be before it stops being a basis
+# for driving, and how long ago this node may have received it. Two separate
+# questions; both match the dashboard server's thresholds in
+# server/app/commands/gates.py.
+MAX_TELEMETRY_AGE_S = 2.0
+MAX_RECEIPT_AGE_S = 3.0
+
 # action_msgs/GoalStatus terminal codes.
 _STATUS_SUCCEEDED = 4
 _STATUS_CANCELED = 5
@@ -83,6 +90,8 @@ SERVICE_CODE_TEXT = {
 # This is a legacy fallback only: a valid dock_state is authoritative because
 # raw charge can re-latch after CLEAR_CONFIRMED.
 CHARGING_STATES = frozenset({"charging", "charge", "bulk", "float", "overcharge"})
+# ...and those that mean physically on the dock, charging or not.
+ON_DOCK_STATES = CHARGING_STATES | frozenset({"docked", "dock", "on_dock"})
 
 # Undock feedback `state` -> what to show while it runs.
 UNDOCK_STAGE_TEXT = {
@@ -148,40 +157,76 @@ def undock_stage(state: str, hardware_phase: str = "") -> str:
     return UNDOCK_STAGE_TEXT.get((state or "").upper(), state or "Undocking")
 
 
-def precheck(command: str, goal: dict | None, base_state: Any | None) -> str | None:
+def _on_dock(base_state: dict) -> bool:
+    """Is the robot on its charger? Mirrors StateFacts.on_dock on the server.
+
+    A *usable* dock observer is authoritative in both directions: raw
+    charge_state can re-latch after a proven departure, so CLEAR_CONFIRMED
+    stays clear. An observer reporting itself invalid answers nothing and falls
+    back to charge_state — reading it as "not docked" would clear the dock for
+    a robot sitting on its charger with a broken observer.
+    """
+    if base_state.get("dock_state_valid"):
+        return base_state.get("dock_state", "").strip().upper() == "DOCKED_CONFIRMED"
+    return base_state.get("charge_state", "").strip().lower() in ON_DOCK_STATES
+
+
+def precheck(command: str, goal: dict | None, base_state: Any | None,
+             localized: bool = False, base_state_age: float | None = None) -> str | None:
     """Plain-language rejection reason, or None when the command may proceed.
 
     base_state is the latest normalized base_state payload (a dict) or None
     when the hardware bridge hasn't reported yet — fail closed for motion.
+    `localized` is the node's own answer to "is the map-frame fix recent and
+    confident" (BridgeNode._localization_is_usable); it defaults to False so a
+    caller that cannot answer refuses rather than assumes. `base_state_age` is
+    how long ago this node received that payload, which is a different question
+    from the telemetry_age inside it: if the drive-base subscription dies, the
+    last payload keeps reporting whatever age it had when it was sent, forever.
+
+    These repeat the dashboard server's gates (server/app/commands/gates.py)
+    deliberately, in the same words. The server refusing first is the normal
+    case; this is what holds if a frame reaches the robot without having passed
+    it — a replayed command.request, or a server that trusted stale telemetry.
     """
     if command in ("navigate_to_pose", "set_initial_pose") and goal is None:
         return "This command needs a destination."
     if command == "navigate_to_pose":
         if base_state is None:
             return "The robot's drive base has not reported in yet — cannot navigate."
-        if base_state.get("estop_pressed"):
-            return "The emergency stop is pressed. Release it on the robot first."
-        if not base_state.get("motors_enabled"):
-            # The base cuts motor power whenever the charger is engaged. On
-            # 2026-07-28 an operator hit "Enable motors", saw it succeed, and
-            # was told one second later to enable the motors — the charger had
-            # re-latched and tripped the interlock. Telling them to do again
-            # the thing they had just done sent them round that loop five
-            # times; name the actual cause instead.
-            dock_state_valid = base_state.get("dock_state_valid")
-            on_dock = (
-                base_state.get("dock_state", "").strip().upper()
-                == "DOCKED_CONFIRMED"
-                if dock_state_valid is not None
-                else base_state.get("charge_state", "").strip().lower()
-                in CHARGING_STATES
-            )
-            if on_dock:
-                return ("The charger is engaged, which switches the robot's motors "
-                        "off. Move the robot off its dock before driving it.")
-            return "The robot's motors are off. Enable them on the robot first."
+        if (not base_state.get("link_connected")
+                or not 0.0 <= float(base_state.get("telemetry_age", 999.0))
+                <= MAX_TELEMETRY_AGE_S
+                or base_state_age is None
+                or base_state_age > MAX_RECEIPT_AGE_S):
+            # The drive base link is down, its last reading is old, or it
+            # stopped reporting to us altogether. Either way what follows would
+            # be judged from numbers that no longer describe the robot.
+            return ("The robot's hardware readings are stale — wait for fresh "
+                    "data before commanding the robot.")
         if not base_state.get("hardware_state_valid"):
             return "The robot's drive base is not reporting valid data — cannot navigate."
+        if base_state.get("fault_flags"):
+            return (f"The drive base is reporting a fault "
+                    f"(code {int(base_state['fault_flags'])}). "
+                    "Clear it on the robot first.")
+        if base_state.get("estop_pressed"):
+            return "The emergency stop is pressed. Release it on the robot first."
+        # Coming off the dock is undock's job — it releases the charger and
+        # backs off under the dock manager's guarded profile. Checked before
+        # the motors because a hand-docked robot can charge with its motors
+        # still reported enabled, which would otherwise look ready to drive.
+        # It also names the real cause: on 2026-07-28 an operator hit "Enable
+        # motors", saw it succeed, and was told a second later to enable the
+        # motors — the charger had re-latched and tripped the interlock, and
+        # they went round that loop five times.
+        if _on_dock(base_state):
+            return ("The robot is on its charger. Move it off the dock before "
+                    "sending it anywhere.")
+        if not base_state.get("motors_enabled"):
+            return "The robot's motors are off. Enable them on the robot first."
+        if not localized:
+            return "The robot does not know where it is. Set its location first."
     return None
 
 
@@ -344,12 +389,13 @@ class CommandExecutor:
 
     # -- dispatch --------------------------------------------------------------
 
-    def handle(self, data: dict, base_state: dict | None, current_yaw: float | None) -> None:
+    def handle(self, data: dict, base_state: dict | None, current_yaw: float | None,
+               localized: bool = False, base_state_age: float | None = None) -> None:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
 
-        reason = precheck(command, goal, base_state)
+        reason = precheck(command, goal, base_state, localized, base_state_age)
         if reason is not None:
             self._ack(command_id, False, reason)
             return

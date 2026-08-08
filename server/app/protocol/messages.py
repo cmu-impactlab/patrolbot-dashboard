@@ -43,7 +43,9 @@ class PoseData(BaseModel):
     linear_velocity: float
     angular_velocity: float
     covariance_trace: float | None = None
-    localized: bool = True
+    # Absent means "the robot did not say", which the motion gates must read as
+    # "not localized" — every real producer sends it explicitly.
+    localized: bool = False
 
 
 class LidarData(BaseModel):
@@ -89,7 +91,8 @@ class BatteryData(BaseModel):
 class BaseStateData(BaseModel):
     session_generation: int
     link_connected: bool
-    telemetry_age: float
+    # Seconds; a negative age is not a fresher reading, it is a broken clock.
+    telemetry_age: float = Field(ge=0.0)
     hardware_state_valid: bool
     charge_state: str
     motors_enabled: bool

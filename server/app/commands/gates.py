@@ -1,4 +1,4 @@
-"""Preconditions for the charging, motor-power and dock commands.
+"""Preconditions for the navigation, charging, motor-power and dock commands.
 
 Pure functions over a snapshot of robot state, so the rules are unit-testable
 without a socket and produce the *same* plain-language sentence the operator
@@ -93,12 +93,13 @@ class StateFacts:
 
     @property
     def on_dock(self) -> bool:
-        # A present dock observer supersedes raw charge_state. The latter can
+        # A *usable* dock observer supersedes raw charge_state. The latter can
         # re-latch after a proven departure; CLEAR_CONFIRMED must remain clear.
-        if self.dock_state_valid is not None:
-            return (self.dock_state_valid
-                    and (self.dock_state or "").strip().upper()
-                    in DOCK_OBSERVER_DOCKED)
+        # An observer reporting itself invalid answers nothing, so it falls
+        # back to charge_state rather than to "not docked" — otherwise a broken
+        # observer would clear the dock for a robot sitting on its charger.
+        if self.dock_state_valid:
+            return (self.dock_state or "").strip().upper() in DOCK_OBSERVER_DOCKED
         return self.charge_state.strip().lower() in ON_DOCK_STATES
 
     @property
@@ -149,7 +150,7 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
         facts.undock_profile_commissioned = getattr(
             base_state, "undock_profile_commissioned", None)
     if pose is not None:
-        facts.localized = bool(getattr(pose, "localized", True))
+        facts.localized = bool(getattr(pose, "localized", False))
         facts.stationary = (abs(pose.linear_velocity) <= STATIONARY_LINEAR_MS
                             and abs(pose.angular_velocity) <= STATIONARY_ANGULAR_RPS)
     return facts
@@ -169,7 +170,7 @@ def _hardware_reason(facts: StateFacts) -> str | None:
     # robot's internal link and ours is not theirs to act on.
     if not facts.base_state_fresh or not facts.telemetry_fresh:
         return ("The robot's hardware readings are stale — wait for fresh "
-                "data before changing charging or motor power.")
+                "data before commanding the robot.")
     if not facts.hardware_state_valid:
         return "The robot's drive base is not reporting valid data."
     if facts.fault_flags:
@@ -195,6 +196,46 @@ def _stationary_reason(facts: StateFacts) -> str | None:
 
 
 # -- per-command gates ------------------------------------------------------
+
+def navigate_reason(facts: StateFacts) -> str | None:
+    """Send the robot to an operator-chosen destination.
+
+    The frontend only requires that the operator has set the robot's location
+    this session (NavControlsWidget), which is a claim about the browser, not
+    about the robot — a stale or crafted frame reaching the gateway carried no
+    such requirement at all. So the same questions are asked here from
+    telemetry: is the drive base healthy and fresh, are the motors actually
+    powered, and does the robot currently know where it is.
+
+    Deliberately not gated on being stationary: replacing a destination while
+    the robot drives is a supported operation, and Nav2 preempts the running
+    goal itself.
+    """
+    reason = _hardware_reason(facts)
+    if reason is not None:
+        return reason
+    if facts.estop_pressed:
+        return "The emergency stop is pressed. Release it on the robot first."
+    # Leaving the dock is undock's job, not navigation's — it is the operation
+    # that releases the charger and backs off under the robot's own guarded
+    # profile. Checked before the motors, because a hand-docked robot can sit
+    # on charge with its motors still reported enabled (see
+    # charge_release_reason), and that combination would otherwise read as
+    # "ready to drive" and pull the robot off its charger under Nav2.
+    if facts.on_dock:
+        return ("The robot is on its charger. Move it off the dock before "
+                "sending it anywhere.")
+    if not facts.motors_enabled:
+        return "The robot's motors are off. Enable them on the robot first."
+    # `localized` lives in the pose slice, so a stale pose only says where the
+    # robot used to believe it was — not a basis for sending it somewhere.
+    if not facts.pose_fresh:
+        return ("The dashboard has not had a recent position update from the "
+                "robot — wait for fresh data before sending it anywhere.")
+    if not facts.localized:
+        return "The robot does not know where it is. Set its location first."
+    return None
+
 
 def charge_release_reason(facts: StateFacts) -> str | None:
     """Zero-motion: disengage the charger. The motors are off afterwards.
@@ -284,6 +325,7 @@ def dock_reason(facts: StateFacts) -> str | None:
 
 
 GATES = {
+    "navigate_to_pose": navigate_reason,
     "charge_release": charge_release_reason,
     "motor_enable": motor_enable_reason,
     "undock": undock_reason,
@@ -293,6 +335,7 @@ GATES = {
 
 def rejection_reason(command: str, facts: StateFacts) -> str | None:
     """Plain-language refusal for `command`, or None when it may proceed.
-    Commands without a gate here (navigate/stop/pose) return None."""
+    Commands without a gate here (stop, set_initial_pose — neither of which
+    drives the robot) return None."""
     gate = GATES.get(command)
     return gate(facts) if gate is not None else None
