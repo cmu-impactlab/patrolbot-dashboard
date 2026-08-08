@@ -27,9 +27,12 @@ ros2_ws/log/
 infrastructure/nginx/certs/
 infrastructure/.env
 
-# Generated documentation output only. Prose under docs/ and audit/ is
-# tracked: a blanket ignore hid every new architecture note and audit report
-# from git status, which is how the audit files went missing once already.
+# Generated documentation output only. Prose under docs/ is tracked: a blanket
+# ignore hid every new architecture note from git status.
 docs/_build/
 docs/site/
+
+# Local working notes and audit reports. Never tracked — they go stale against
+# the code, and the issue tracker is where status lives.
+audit/
 /dashboard-audit.txt
