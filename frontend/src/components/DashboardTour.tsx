@@ -115,7 +115,7 @@ const WIDGET_TOURS: WidgetTour[] = [
       target: '[data-tour="widget-navControls"]', title: "Move the robot safely",
       description: role === "observer"
         ? "Your Observer account can inspect Navigation, but movement controls remain disabled. Ask an operator or administrator when the robot must move."
-        : `Your ${role === "administrator" ? "Administrator" : "Operator"} account can set location, send a destination, stop, dock, or undock when the displayed safety checks pass.`,
+        : `Your ${role === "administrator" ? "Administrator" : "Operator"} account can set location, send a destination, stop, or undock when the displayed safety checks pass.`,
       instruction: "Before any movement control is clicked, clear the path, keep a person at the robot, and use the physical emergency stop for emergencies.",
     }),
   },

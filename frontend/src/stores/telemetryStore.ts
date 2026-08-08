@@ -61,7 +61,7 @@ export interface TelemetryState {
   lastKnownPose: GoalData | null;
   /** Whether a 2D location has been set this session (gates navigation). */
   poseSetThisSession: boolean;
-  /** Capabilities the connected robot declared; gates the dock/undock controls. */
+  /** Capabilities the connected robot declared; gates the undock control. */
   capabilities: string[];
 
   setWsConnected: (connected: boolean) => void;

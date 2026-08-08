@@ -1,4 +1,4 @@
-"""Preconditions for the navigation, charging, motor-power and dock commands.
+"""Preconditions for the navigation, charging, motor-power and undock commands.
 
 Pure functions over a snapshot of robot state, so the rules are unit-testable
 without a socket and produce the *same* plain-language sentence the operator
@@ -7,12 +7,12 @@ frontend/src/lib/dockGates.ts to grey out controls and explain why; that copy
 is presentation only — this module is the authorization, and the broker
 consults it on every request regardless of what the browser believed.
 
-`dock` and `undock` are single operator actions: the robot releases its own
-charger and powers its own motors as part of executing them. The dashboard
-does not sequence that from the browser, so what is gated here is the state
-the robot cannot recover from on its own — stale or invalid telemetry, an
-active fault, a pressed e-stop, an obstructed rear bumper, a robot already
-moving, or a base that never claimed the capability at all.
+`undock` is a single operator action: the robot releases its own charger and
+powers its own motors as part of executing it. The dashboard does not sequence
+that from the browser, so what is gated here is the state the robot cannot
+recover from on its own — stale or invalid telemetry, an active fault, a
+pressed e-stop, an obstructed rear bumper, a robot already moving, or a base
+that never claimed the capability at all.
 
 `charge_release` and `motor_enable` remain available as separate, separately
 audited commands for the robot-side and diagnostic paths; the dashboard UI
@@ -35,8 +35,8 @@ MAX_TELEMETRY_AGE_S = 2.0
 # either; it comes from the bridge's socket thread, which happily keeps
 # beating after the ROS subscription behind base_state has died. So a robot
 # whose drive-base driver crashed still looked online, still reported fresh
-# telemetry, and would still have authorized charge release, motor enable,
-# dock and undock off a frozen snapshot.
+# telemetry, and would still have authorized charge release, motor enable
+# and undock off a frozen snapshot.
 #
 # base_state arrives at 1 Hz (slow_interval in web_bridge.yaml) and pose at
 # 10 Hz, so 3 s tolerates two missed base-state samples while staying well
@@ -301,35 +301,15 @@ def undock_reason(facts: StateFacts) -> str | None:
     return _stationary_reason(facts)
 
 
-def dock_reason(facts: StateFacts) -> str | None:
-    """Drive to the charging dock and charge. Needs to navigate there, so
-    unlike undocking it does require the robot to know where it is."""
-    reason = _hardware_reason(facts)
-    if reason is not None:
-        return reason
-    if "dock" not in facts.capabilities:
-        return ("Automatic docking is not commissioned on this robot yet — "
-                "drive it onto the dock by hand.")
-    if facts.on_dock and facts.charging:
-        return "The robot is already charging."
-    if facts.estop_pressed:
-        return "The emergency stop is pressed. Release it on the robot first."
-    # `localized` comes out of the pose slice, so a stale pose makes it a claim
-    # about where the robot used to think it was.
-    if not facts.pose_fresh:
-        return ("The dashboard has not had a recent position update from the "
-                "robot — wait for fresh data before sending it to the dock.")
-    if not facts.localized:
-        return "The robot does not know where it is. Set its location first."
-    return None
-
+# There is no dock gate because there is no dock command: the robot has no
+# automatic dock-in path (see protocol/messages.py). Driving onto the charger
+# is done by hand, and `navigate_to_pose` refuses to drive off it.
 
 GATES = {
     "navigate_to_pose": navigate_reason,
     "charge_release": charge_release_reason,
     "motor_enable": motor_enable_reason,
     "undock": undock_reason,
-    "dock": dock_reason,
 }
 
 

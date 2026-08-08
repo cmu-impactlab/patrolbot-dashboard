@@ -212,8 +212,8 @@ are Python 3.11 through 3.14, all four exercised in CI.
 
 ## Reserved for later phases
 
-Two features are present in the contract and the UI but are **not implemented
-end to end**. Both are deliberate placeholders, not oversights:
+Two features are named here because someone will look for them. Neither is a
+half-finished control you can press:
 
 - **Camera and gimbal.** No camera stream, no gimbal control, and no video
   recording. `"video"` is reserved as a recording channel name so the
@@ -221,12 +221,13 @@ end to end**. Both are deliberate placeholders, not oversights:
   (`server/app/recordings/recorder.py`), and the checkbox stays disabled. A
   server-side gimbal control-authority prototype was removed in the meantime;
   it will be reintroduced with the camera work rather than kept unwired.
-- **Automatic docking (`dock`).** The command exists in the protocol, the
-  server gates, the UI control, and the mock robot, but the real robot bridge
-  has no dock executor and does not advertise the `dock` capability — so
-  against the real robot the control stays greyed out with "Automatic docking
-  is not commissioned on this robot yet". Commissioning it needs the drive
-  base controller (SBC), which is currently unreachable. `undock` **is**
+- **Automatic docking.** There is no `dock` command. The robot has no dock-in
+  path — its ROS graph offers `/patrolbot/undock` and
+  `/patrolbot/hardware_undock` and nothing to drive back onto the charger
+  (verified 2026-08-08) — so the robot is driven onto its charger by hand.
+  The command, its gate, its UI control and the mock's implementation of it
+  were removed rather than left advertising something nothing implements;
+  reinstate them alongside a commissioned dock-in action. `undock` **is**
   implemented on the real bridge and is unaffected.
 
 ## Safety

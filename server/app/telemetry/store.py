@@ -89,7 +89,7 @@ class RobotState:
     last_seen: str | None = None
     connection: str = "offline"
     # What the robot declared in robot.hello. Drives which optional controls
-    # (dock/undock) the UI offers; the command gates read it too.
+    # (undock) the UI offers; the command gates read it too.
     capabilities: list[str] = field(default_factory=list)
     battery_estimate: BatteryEstimate | None = None
     recording: bool = False  # a telemetry recording is in progress

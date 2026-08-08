@@ -92,7 +92,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
   navControls: {
     id: "navControls",
     title: "Navigation",
-    description: "Send the robot to a destination, dock or undock it, fix its location, or stop it",
+    description: "Send the robot to a destination, undock it, fix its location, or stop it",
     component: NavControlsWidget,
     defaultSize: { w: 3, h: 9, minW: 2, minH: 5 },
     needsRobot: true,

@@ -2,14 +2,16 @@
 
 Safety posture:
 - Goal-based commands only (navigate_to_pose, set_initial_pose, stop) plus the
-  discrete charging/motor/dock steps (charge_release, motor_enable, dock,
-  undock); there is deliberately no velocity teleop path — undock included,
-  which is an action on the robot, never browser-published velocity.
-- navigate_to_pose and the charging/motor/dock steps are additionally gated on
-  live hardware telemetry by commands.gates before they are forwarded.
-- Fail-closed: anything not explicitly valid is rejected with a synthesized
-  command.ack, and the browser is never left waiting — missing acks and
-  results are closed out by server-side timeouts.
+  discrete charging/motor/undock steps (charge_release, motor_enable, undock);
+  there is deliberately no velocity teleop path — undock included, which is an
+  action on the robot, never browser-published velocity. There is no dock
+  command: the robot has no automatic dock-in path.
+- navigate_to_pose and the charging/motor/undock steps are additionally gated
+  on live hardware telemetry by commands.gates before they are forwarded.
+- Fail-closed: any request this broker refuses gets a synthesized command.ack,
+  and an accepted one is never left open — missing acks and results are closed
+  out by server-side timeouts. A frame malformed enough to fail payload
+  validation never reaches here and is dropped by the gateway without a reply.
 - Every request is written to the command_audit table before it reaches
   the robot.
 """
@@ -44,7 +46,6 @@ COMMAND_LABELS = {
     "stop": "Stop the robot",
     "charge_release": "Release charging",
     "motor_enable": "Enable motors",
-    "dock": "Send robot to its charging dock",
     "undock": "Move robot off its charging dock",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
@@ -144,9 +145,11 @@ class CommandBroker:
                                        "try again once it is online.")
             return
 
-        # 5. Hardware-state gate for the motion, charging and dock commands.
-        #    The UI greys these out for the same reasons, but a hidden button
-        #    is not authorization — the decision is made here, from telemetry.
+        # 5. Hardware-state gate for the motion, charging and undock commands.
+        #    The UI mirrors the charging/undock rules to grey those controls
+        #    out, and applies its own weaker check to navigation — but a hidden
+        #    or disabled button is not authorization. The decision is made
+        #    here, from telemetry, whatever the browser believed.
         reason = self._validate_robot_state(session, command)
         if reason is not None:
             await self._reject_audited(client, robot_id, command_id, command, reason)

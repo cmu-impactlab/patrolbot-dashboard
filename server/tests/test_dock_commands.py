@@ -1,4 +1,4 @@
-"""Charging, motor-power and dock command gates.
+"""Navigation, charging, motor-power and undock command gates.
 
 Two layers are covered: the pure precondition rules, and the broker actually
 enforcing them on a live socket — a UI that greys out the wrong button must
@@ -15,7 +15,7 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("dock", "undock", "charge_release", "motor_enable")
+ALL_CAPS = ("undock", "charge_release", "motor_enable")
 
 
 def facts(**overrides) -> gates.StateFacts:
@@ -118,7 +118,7 @@ def test_undock_refuses_duplicate_reported_by_robot_state():
 
 
 @pytest.mark.parametrize("overrides, fragment", [
-    ({"capabilities": ("dock",)}, "not commissioned"),
+    ({"capabilities": ("charge_release",)}, "not commissioned"),
     ({"charge_state": "not_charging"}, "not on its dock"),
     ({"bumpers_rear": True}, "rear bumper"),
     ({"estop_pressed": True}, "emergency stop"),
@@ -136,18 +136,16 @@ def test_undock_refusals(overrides, fragment):
     assert reason is not None and fragment in reason.lower()
 
 
-def test_dock_needs_localization_but_not_a_prior_motor_enable():
-    off_dock = {"charge_state": "not_charging"}
-    assert gates.dock_reason(facts(**off_dock, motors_enabled=False)) is None
-    reason = gates.dock_reason(facts(**off_dock, localized=False))
-    assert reason is not None and "where it is" in reason
+def test_there_is_no_dock_command():
+    """The robot has no automatic dock-in path, so the dashboard does not offer
+    one — not even a gated, greyed-out one that could never succeed."""
+    assert "dock" not in gates.GATES
+    assert gates.rejection_reason("dock", facts()) is None  # not a command
 
 
-def test_dock_and_undock_hidden_behind_capabilities():
+def test_undock_hidden_behind_capabilities():
     """The robot must claim the capability; an uncommissioned base is refused
     even when every other precondition is satisfied."""
-    ready = facts(charge_state="not_charging", motors_enabled=True, capabilities=())
-    assert "not commissioned" in (gates.dock_reason(ready) or "")
     on_dock = facts(charge_state="docked", motors_enabled=True, capabilities=())
     assert "not commissioned" in (gates.undock_reason(on_dock) or "")
 
@@ -518,4 +516,4 @@ def test_snapshot_carries_capabilities(client):
         with client.websocket_connect("/ws/ui") as ui:
             snapshot = json.loads(ui.receive_text())
             assert snapshot["type"] == "server.snapshot"
-            assert "dock" in snapshot["data"]["capabilities"]
+            assert "undock" in snapshot["data"]["capabilities"]

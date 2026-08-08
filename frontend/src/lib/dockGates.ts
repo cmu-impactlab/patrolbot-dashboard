@@ -171,24 +171,9 @@ export function undockReason(facts: StateFacts): string | null {
   return stationaryReason(facts);
 }
 
-/** Drive to the charging dock and charge. Needs to navigate there, so unlike
- *  undocking it does require the robot to know where it is. */
-export function dockReason(facts: StateFacts): string | null {
-  const reason = hardwareReason(facts);
-  if (reason !== null) return reason;
-  if (!facts.capabilities.includes("dock")) {
-    return "Automatic docking is not commissioned on this robot yet — drive it onto the dock by hand.";
-  }
-  if (isOnDock(facts) && isCharging(facts)) return "The robot is already charging.";
-  if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
-  if (!facts.localized) return "The robot does not know where it is. Set its location first.";
-  return null;
-}
-
 const GATES: Partial<Record<CommandType, (facts: StateFacts) => string | null>> = {
   charge_release: chargeReleaseReason,
   motor_enable: motorEnableReason,
-  dock: dockReason,
   undock: undockReason,
 };
 
@@ -197,18 +182,13 @@ export function rejectionReason(command: CommandType, facts: StateFacts): string
 }
 
 /**
- * The single dock control is a toggle: on the charger it offers Undock,
- * anywhere else it offers Dock. One button, and its meaning is always the
- * opposite of what the robot is currently doing.
+ * Is there anything to undock from? There is no matching Dock control: the
+ * robot has no automatic dock-in path, so it is driven onto its charger by
+ * hand. The button appears only when the robot is on the dock.
  */
-export function dockAction(facts: StateFacts): "dock" | "undock" {
-  if (facts.undockActive || isOnDock(facts)) return "undock";
-  // Invalid observer data is never enough to authorize motion, but the raw
-  // charge signal still picks the least-surprising label: show a disabled
-  // Undock control, with the observer error, to a robot visibly on charge.
-  if (facts.dockStateValid === false
-      && ON_DOCK_STATES.has(facts.chargeState.trim().toLowerCase())) {
-    return "undock";
-  }
-  return "dock";
+export function showsUndock(facts: StateFacts): boolean {
+  // isOnDock already falls back to the raw charge signal when the observer is
+  // unusable, so a robot visibly on charge behind a broken observer still gets
+  // the control — disabled, carrying the observer error.
+  return facts.undockActive || isOnDock(facts);
 }

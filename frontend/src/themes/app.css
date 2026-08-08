@@ -595,9 +595,9 @@ a { color: inherit; }
    instead of showing a cursor. */
 .map-canvas.picking { cursor: none; }
 
-/* The single dock/undock control lives in the Navigation widget; when it is
-   unavailable the reason is spelled out under the button grid rather than
-   only in a tooltip. */
+/* The undock control lives in the Navigation widget; when it is on screen but
+   unavailable the reason is spelled out under the button grid rather than only
+   in a tooltip. */
 .nav-dock-reason {
   margin: 8px 0 0;
   color: var(--warn);

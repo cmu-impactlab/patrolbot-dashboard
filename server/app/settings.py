@@ -84,7 +84,7 @@ class Settings(BaseSettings):
 
     # Optional local map (map_server YAML+PGM pair). Served by /api/map when
     # no robot has streamed one — the real robot deliberately never transmits
-    # its 7 MB map (it starves /scan; see docs/ARCHITECTURE.md).
+    # its 7 MB map (it starves /scan).
     static_map_yaml: str = ""
     static_map_name: str = "CMU-Q Floor 1"
 

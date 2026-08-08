@@ -33,7 +33,7 @@ export interface CommandResultInfo {
 /** Commands that hand the robot the ability to move, or take it away. A
  *  pending destination must not survive one — requiring a new, explicit
  *  operator action afterwards is the whole point. */
-const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock", "dock"];
+const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock"];
 
 interface CommandState {
   active: ActiveCommand | null;
@@ -108,8 +108,8 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({ stoppedGoal: null });
     }
     // So does anything that changes whether the robot can move at all: after
-    // a charge release, motor enable, dock or undock the operator starts from
-    // a clean slate rather than being offered a stale destination to resume.
+    // a charge release, motor enable or undock the operator starts from a
+    // clean slate rather than being offered a stale destination to resume.
     if (CLEARS_PENDING_GOAL.includes(command)) {
       set({ stoppedGoal: null });
     }

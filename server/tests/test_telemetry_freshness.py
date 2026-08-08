@@ -5,7 +5,7 @@ keeps publishing cheap slices like resources) after the ROS subscription behind
 base_state or pose has died. The connection stays "online", and the last
 base_state payload keeps reporting the `telemetry_age` it had when it was sent
 — 0.05 s, forever. Every motion gate then authorized charging, motor power,
-dock and undock off a frozen snapshot of a robot that had stopped talking.
+undock off a frozen snapshot of a robot that had stopped talking.
 
 Two layers, as in test_dock_commands.py: the pure rules, and the broker
 enforcing them over a live socket.
@@ -21,7 +21,7 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("dock", "undock", "charge_release", "motor_enable")
+ALL_CAPS = ("undock", "charge_release", "motor_enable")
 STALE = gates.MAX_RECEIPT_AGE_S + 1.0
 
 
@@ -45,7 +45,6 @@ ALLOWABLE = {
     "charge_release": {"charge_state": "charging"},
     "motor_enable": {"charge_state": "not_charging"},
     "undock": {"charge_state": "charging"},
-    "dock": {"charge_state": "not_charging"},
 }
 
 

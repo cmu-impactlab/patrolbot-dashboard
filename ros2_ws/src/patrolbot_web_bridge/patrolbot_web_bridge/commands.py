@@ -412,8 +412,8 @@ class CommandExecutor:
 
         The dashboard offers a control only for a capability the robot claims,
         so this is the commissioning switch: nothing is advertised until the
-        dock manager is up. `dock` is deliberately absent — the robot has no
-        dock-in path yet (see docs/COMMAND-PATH-PLAN.md).
+        dock manager is up. `dock` is deliberately absent, and is no longer a
+        command at all — the robot has no dock-in path to advertise.
         """
         capabilities: list[str] = []
         if self._undock_client is not None and self._undock_client.server_is_ready():

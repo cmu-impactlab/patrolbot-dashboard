@@ -7,7 +7,7 @@
   "data": {
     "capabilities": [
       "pose", "lidar", "path", "battery", "base_state", "diagnostics",
-      "resources", "map", "charge_release", "motor_enable", "dock", "undock"
+      "resources", "map", "charge_release", "motor_enable", "undock"
     ]
   }
 }

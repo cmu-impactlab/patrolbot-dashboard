@@ -53,7 +53,7 @@ All robot telemetry types are re-broadcast unchanged, plus:
 | `state.connection` | on change | `state` ∈ `online` / `stale` / `offline`, `last_seen` |
 | `state.robot_status` | on change | `status` ∈ ready/navigating/recording/docked/charging/paused/needs_attention/offline, `detail` |
 | `state.system_health` | on change | `overall`, `subsystems[{id, label, level, message, action?, updated_at}]` |
-| `state.capabilities` | on robot connect | `capabilities[]` copied from `robot.hello` — the dashboard offers dock/undock only to a robot that claims them |
+| `state.capabilities` | on robot connect | `capabilities[]` copied from `robot.hello` — the dashboard offers undock only to a robot that claims it |
 | `event.append` | as they occur | `id`, `ts`, `severity` ∈ info/warning/critical, `title`, `message` |
 
 Connection staleness (server-side, from heartbeat age): `<3 s` online,
@@ -66,7 +66,7 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/dock/undock, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/undock, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
@@ -86,16 +86,25 @@ Server-side broker rules:
 - There is **no velocity teleop command** — goal-based navigation only, by
   design. The physical e-stop is the only emergency stop. `undock` included:
   it is an action the robot executes, never browser-published velocity.
-- `charge_release`, `motor_enable`, `dock` and `undock` are additionally gated
-  on live hardware telemetry (`server/app/commands/gates.py`) before they are
-  forwarded: readings must be fresh and valid, faults and E-stop clear, the
-  robot stationary, and dock/undock require the robot to claim the capability
-  in `robot.hello`. `dock`/`undock` are **single operator actions**. The
-  commissioned undock action atomically releases charging, powers the motors,
-  backs clear, restores localization, turns away from the dock, and stops; the
-  dashboard only sends `undock` and renders its progress/result. Undock also
-  needs a valid commissioned dock observer and a clear rear bumper; dock needs
-  valid localization to navigate.
+- `navigate_to_pose`, `charge_release`, `motor_enable` and `undock` are
+  additionally gated on live hardware telemetry
+  (`server/app/commands/gates.py`) before they are forwarded: readings must be
+  fresh and valid, faults and E-stop clear, and `undock` requires the robot to
+  claim the capability in `robot.hello`. `undock` is a **single operator
+  action**: the commissioned action atomically releases charging, powers the
+  motors, backs clear, restores localization, turns away from the dock, and
+  stops; the dashboard only sends `undock` and renders its progress/result. It
+  also needs a valid commissioned dock observer and a clear rear bumper.
+  `navigate_to_pose` needs a fresh pose the robot reports as localized, live
+  motors, and a robot that is not on its charger — driving off the dock is
+  undock's job.
+
+  **There is no `dock` command.** The robot has no automatic dock-in path (its
+  ROS graph offers `/patrolbot/undock` and `/patrolbot/hardware_undock` and
+  nothing to drive back onto the charger, verified 2026-08-08), so it is
+  driven onto its charger by hand. The command, its gate, its UI control and
+  the mock's implementation of it were removed rather than left advertising a
+  capability nothing implements.
   `charge_release` and `motor_enable` remain separate commands for the
   robot-side and diagnostic paths (charge release stays zero-motion and
   motor-disabled; motor enable refuses while charging), and the dashboard UI
