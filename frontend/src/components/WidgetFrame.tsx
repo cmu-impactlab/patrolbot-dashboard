@@ -44,6 +44,7 @@ export function WidgetFrame({ id }: { id: string }) {
     <section
       className={`widget ${fullscreen ? "fullscreen" : ""} ${minimized ? "minimized" : ""}`}
       aria-label={definition.title}
+      data-tour={`widget-${id}`}
     >
       <header className="widget-header">
         <span className="drag-handle" title="Drag to move">

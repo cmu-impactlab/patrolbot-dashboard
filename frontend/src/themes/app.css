@@ -26,6 +26,13 @@ button {
   padding: 0;
 }
 
+a { color: inherit; }
+
+:where(a, button, input, select, summary):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--info) 72%, white);
+  outline-offset: 2px;
+}
+
 /* ---------- App shell ---------- */
 
 .app-shell {
@@ -142,6 +149,69 @@ button {
 
 .btn.icon {
   padding: 6px;
+  min-width: 32px;
+  min-height: 32px;
+  justify-content: center;
+}
+
+/* ---------- Interactive dashboard tour ---------- */
+
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: transparent;
+}
+
+.tour-spotlight {
+  position: fixed;
+  z-index: 101;
+  pointer-events: none;
+  border: 3px solid #fff;
+  border-radius: 11px;
+  box-shadow: 0 0 0 9999px rgb(10 12 16 / 0.66), 0 0 0 5px var(--cmu-red);
+  transition: left 0.2s ease, top 0.2s ease, width 0.2s ease, height 0.2s ease;
+}
+
+.tour-card {
+  position: fixed;
+  z-index: 102;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 50px rgb(0 0 0 / 0.38);
+}
+
+.tour-card h2 { margin: 7px 30px 8px 0; font-size: 18px; }
+.tour-card p { margin: 0; line-height: 1.5; color: var(--text-secondary); }
+.tour-card .tour-instruction { margin-top: 10px; color: var(--text); font-weight: 600; }
+.tour-count { display: block; margin-top: 9px; color: var(--text-faint); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+
+.tour-progress { display: flex; gap: 4px; }
+.tour-progress span { flex: 1; height: 3px; border-radius: 99px; background: var(--border); }
+.tour-progress span.complete { background: var(--cmu-red); }
+
+.tour-close {
+  position: absolute;
+  top: 38px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+}
+
+.tour-close:hover { background: var(--surface-2); }
+.tour-actions { display: flex; align-items: center; gap: 7px; margin-top: 18px; }
+.tour-actions .spacer { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight { transition: none; }
 }
 
 /* ---------- Grid & widgets ---------- */
@@ -874,6 +944,32 @@ button {
   margin: 0 0 12px;
   font-size: 16px;
 }
+
+.dialog-content [data-radix-dialog-description] { margin: 0; }
+
+.dialog-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+}
+
+.dialog-close:hover { background: var(--surface-2); }
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.help-prompt { padding: 22px; }
+.help-prompt h2 { padding-right: 30px; }
 
 .restore-pose-facts {
   display: flex;

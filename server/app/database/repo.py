@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     display_name TEXT NOT NULL,
+    help_guide_version_seen INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS layouts (
@@ -117,6 +118,15 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # Existing accounts must see each newly versioned guide offer once.
+        # Adding the column with a default preserves every row and marks the
+        # current guide as unseen; CREATE TABLE above covers fresh databases.
+        async with self._db.execute("PRAGMA table_info(users)") as cur:
+            user_columns = {row[1] for row in await cur.fetchall()}
+        if "help_guide_version_seen" not in user_columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN help_guide_version_seen "
+                "INTEGER NOT NULL DEFAULT 0")
         # Migration for databases created before channel selection existed.
         async with self._db.execute("PRAGMA table_info(recordings)") as cur:
             columns = [row[1] for row in await cur.fetchall()]
@@ -234,6 +244,22 @@ class Database:
         async with self.db.execute("SELECT id FROM users WHERE username = ?", (username,)) as cur:
             row = await cur.fetchone()
             return int(row["id"])
+
+    async def get_help_guide_version_seen(self, user_id: int) -> int:
+        async with self.db.execute(
+                "SELECT help_guide_version_seen FROM users WHERE id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
+        return int(row["help_guide_version_seen"]) if row is not None else 0
+
+    async def mark_help_guide_seen(self, user_id: int, version: int) -> int:
+        """Atomically advance a user's guide version, never move it backward."""
+        await self.db.execute(
+            "UPDATE users SET help_guide_version_seen = "
+            "MAX(help_guide_version_seen, ?) WHERE id = ?",
+            (version, user_id))
+        await self.db.commit()
+        return await self.get_help_guide_version_seen(user_id)
 
     # -- events ---------------------------------------------------------------
 
