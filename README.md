@@ -210,6 +210,39 @@ Every Python test carries a 60-second timeout (`pytest-timeout`), so a suite
 that blocks fails with a traceback instead of stalling. Supported interpreters
 are Python 3.11 through 3.14, all four exercised in CI.
 
+## Updating Python dependencies
+
+`server/pyproject.toml` and `mock-robot/pyproject.toml` declare what each needs,
+with open lower bounds. The `constraints.txt` beside each records what the image
+actually installs, so two builds a month apart are the same build.
+
+What this pins is package *versions*. It is not a bit-for-bit reproducible
+build: `python:3.12-slim` is a mutable tag, wheels are not hash-pinned, and the
+build backend (`setuptools`) resolves outside the constraints because pip build
+isolation does not read them. Pinning those too is a bigger commitment than this
+deployment needs; the version drift is what was actually biting.
+
+The two are deliberately used in different places. The production image installs
+against the constraints; the CI test matrix installs unconstrained across the
+whole supported Python range, because that is what tells us early that an
+upstream release has broken us. Pinning CI would silence exactly that signal.
+
+To change a dependency:
+
+1. Edit the relevant `pyproject.toml`.
+2. Regenerate that project's `constraints.txt` with the command in its header —
+   it runs in the same image the Dockerfile builds from, so the result is about
+   production rather than about your laptop.
+3. Read the diff. An unexplained version jump is the thing the file exists to
+   make visible.
+4. `./scripts/check-constraints.sh` to confirm. It checks both projects, that
+   both Dockerfiles still install against their constraints, and that the server
+   suite passes on the constrained set — installing a pinned version is not the
+   same as it working. CI runs the same script.
+
+Frontend dependencies are locked by `frontend/package-lock.json` and installed
+with `npm ci`.
+
 ## Reserved for later phases
 
 Two features are named here because someone will look for them. Neither is a

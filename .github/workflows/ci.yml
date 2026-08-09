@@ -80,3 +80,18 @@ jobs:
       # Lazily loaded chunks are reported but not counted.
       - run: npm run check-bundle
         working-directory: frontend
+
+  # The production image installs against server/constraints.txt. This fails
+  # when that file no longer describes what actually gets installed — a
+  # dependency added to pyproject.toml without regenerating it, or a pin left
+  # behind for a package nothing uses any more.
+  #
+  # Deliberately separate from the `server` matrix above, which installs
+  # unconstrained across the whole supported Python range: that job is the
+  # early warning that an upstream release breaks us, and pinning it would
+  # silence the signal it exists to give.
+  constraints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-constraints.sh

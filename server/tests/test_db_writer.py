@@ -9,6 +9,7 @@ database out from under tasks still using it.
 """
 import asyncio
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -222,8 +223,16 @@ def test_battery_history_is_written_through_the_owned_writer(client):
             robot.send_text(encode("telemetry.battery", "patrolbot-01", index + 1, {
                 "voltage": 24.0 + index, "percentage": 80.0, "charging": False}))
         with client.websocket_connect("/ws/ui") as ui:
-            ui.receive_text()  # sync point
+            ui.receive_text()
 
-    rows = client.get("/api/history/battery").json()
+    # Opening a browser socket synchronises the *socket*, not the write behind
+    # it — that is the whole point of the writer being asynchronous. Poll for
+    # the rows instead, bounded, so this fails loudly rather than intermittently
+    # on a slower machine. (It did: on python:3.12-slim it saw 2 of 3.)
+    for _ in range(100):
+        rows = client.get("/api/history/battery").json()
+        if len(rows) == 3:
+            break
+        time.sleep(0.02)
     assert len(rows) == 3
     assert client.app.state.hub.battery_writer.dropped == 0
