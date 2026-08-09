@@ -148,8 +148,9 @@ export interface RobotStatusData {
   detail: string;
 }
 
-/** What the connected robot declared in robot.hello. Optional controls
- *  (dock/undock) stay visibly disabled when the robot doesn't advertise them. */
+/** What the connected robot declared in robot.hello. An optional control the
+ *  robot does not advertise — Undock — is shown disabled with the reason,
+ *  rather than silently missing, whenever it is on screen at all. */
 export interface CapabilitiesData {
   capabilities: string[];
 }
@@ -197,7 +198,8 @@ export type CommandType =
   | "navigate_to_pose" | "set_initial_pose" | "stop"
   // The guarded UI sends `undock` as one action. The two service-level
   // commands remain in the protocol for robot-side diagnostics and recovery.
-  | "charge_release" | "motor_enable" | "dock" | "undock";
+  // There is no `dock`: the robot has no automatic dock-in path.
+  | "charge_release" | "motor_enable" | "undock";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {

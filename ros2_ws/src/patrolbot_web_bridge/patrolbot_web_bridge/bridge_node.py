@@ -148,6 +148,7 @@ class WebBridgeNode(Node):
         # beat these assignments and the thread died on AttributeError.
         self._command_queue: deque[dict] = deque(maxlen=16)
         self._latest_base_state: dict | None = None
+        self._latest_base_state_at = 0.0
         self._latest_odom: Odometry | None = None
         self._latest_amcl: PoseWithCovarianceStamped | None = None
         self._latest_amcl_at = 0.0
@@ -236,6 +237,12 @@ class WebBridgeNode(Node):
             covariance_warn=float(self.cfg["covariance_warn_threshold"]),
         )
         if payload:
+            # One definition of "localized", so the dashboard's navigation gate
+            # and this node's own precheck cannot disagree. normalize_pose
+            # judges the covariance alone; a confident fix that AMCL stopped
+            # publishing stays confident forever, and only the age check here
+            # notices.
+            payload["localized"] = self._localization_is_usable()
             self.ws.send("telemetry.pose", payload)
 
     def _on_scan(self, msg: LaserScan) -> None:
@@ -257,6 +264,11 @@ class WebBridgeNode(Node):
     def _on_battery(self, msg: BatteryState) -> None:
         payload = normalizers.normalize_battery(
             msg, charge_voltage_min=float(self.cfg["charge_voltage_min"]))
+        if payload is None:
+            # Unmeasurable voltage — see normalize_battery. Don't feed the
+            # charging debounce either: a NaN sample is absence of a reading,
+            # not evidence that the robot stopped charging.
+            return
         payload["charging"] = self._charging_debounce.update(payload["charging"])
         self.ws.send("telemetry.battery", payload)
 
@@ -270,6 +282,7 @@ class WebBridgeNode(Node):
         # and _maybe_seed_dock_pose re-seeds localization off it.
         payload["charge_state"] = self._charge_state_debounce.update(payload["charge_state"])
         self._latest_base_state = payload
+        self._latest_base_state_at = self.get_clock().now().nanoseconds / 1e9
         self.ws.send("telemetry.base_state", payload)
         self._maybe_seed_dock_pose(payload)
 
@@ -352,7 +365,12 @@ class WebBridgeNode(Node):
             if self._latest_amcl is not None:
                 q = self._latest_amcl.pose.pose.orientation
                 current_yaw = normalizers.quaternion_to_yaw(q.x, q.y, q.z, q.w)
-            self._commands.handle(data, self._latest_base_state, current_yaw)
+            base_state_age = None
+            if self._latest_base_state is not None:
+                base_state_age = (self.get_clock().now().nanoseconds / 1e9
+                                  - self._latest_base_state_at)
+            self._commands.handle(data, self._latest_base_state, current_yaw,
+                                  self._localization_is_usable(), base_state_age)
 
     def _refresh_capabilities(self) -> None:
         """Tell the dashboard which dock operations are actually available.

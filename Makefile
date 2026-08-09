@@ -6,7 +6,7 @@ PIP := server/.venv/bin/pip
 setup:
 	python3 -m venv server/.venv
 	$(PIP) install -e './server[dev]'
-	$(PIP) install -e ./mock-robot
+	$(PIP) install -e './mock-robot[dev]'
 	cd frontend && npm install
 
 server:

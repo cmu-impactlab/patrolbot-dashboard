@@ -26,9 +26,12 @@ log = logging.getLogger("mock_robot")
 
 PROTOCOL_VERSION = 1
 CAPABILITIES = ["pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map",
-                # The dashboard only offers dock/undock to a robot that claims
-                # them; the mock claims them so the flow is exercisable locally.
-                "charge_release", "motor_enable", "dock", "undock"]
+                # The dashboard only offers these to a robot that claims them;
+                # the mock claims what the real robot claims, so a flow that
+                # works here is a flow that exists there. `dock` is absent for
+                # that reason — the robot has no automatic dock-in path, and a
+                # mock that implemented one hid the gap.
+                "charge_release", "motor_enable", "undock"]
 
 # Undocking reverses straight back off the contacts — no turning on the dock.
 UNDOCK_DISTANCE_M = 1.2
@@ -120,13 +123,10 @@ class MockRobot:
         elif self.mode == "commanded" and arrived:
             self._command_arrived = True
         elif self.mode == "to_dock" and arrived:
-            # An operator-requested dock settles in _command_progress, which
-            # reports the result in the same tick it lands.
-            if self.command is not None:
-                self._command_arrived = True
-            else:
-                self._settle_on_dock()
-                log.info("docked, charging")
+            # Only ever reached on the robot's own initiative — a low battery
+            # sends it home. There is no operator dock command to serve.
+            self._settle_on_dock()
+            log.info("docked, charging")
         elif self.mode == "charging" and not self.battery.charging and self.command is None:
             # Charged up on its own: leave the dock and go back to work.
             self.mode = "patrol"
@@ -322,7 +322,7 @@ class MockRobot:
                 await ws.send(self.frame("command.result",
                                          {"command_id": command_id, "outcome": "succeeded",
                                           "detail": "Robot location updated."}))
-            elif command in ("charge_release", "motor_enable", "dock", "undock"):
+            elif command in ("charge_release", "motor_enable", "undock"):
                 await self._handle_dock_command(ws, command, command_id)
             else:
                 await ws.send(self.frame("command.ack",
@@ -386,18 +386,6 @@ class MockRobot:
             self._undock_remaining = UNDOCK_DISTANCE_M
             self.mode = "undocking"
             self.robot.set_goal(None)
-        elif command == "dock":
-            if self.battery.charging:
-                await refuse("The robot is already charging.")
-                return
-            await self._preempt(ws, "Docking replaced this destination.")
-            await accept()
-            self.motors_enabled = True
-            self.command = {"command_id": command_id, "kind": "dock"}
-            self._command_arrived = False
-            self.mode = "to_dock"
-            self.on_dock = False
-            self.robot.set_goal(DOCK)
 
     async def _preempt(self, ws, detail: str) -> None:
         if self.command is not None:
@@ -409,7 +397,6 @@ class MockRobot:
     # Per command kind: (arrival detail, in-flight stage detail).
     _COMMAND_COPY = {
         "navigate": ("Arrived at the destination.", "Heading to the destination"),
-        "dock": ("On the dock and charging.", "Driving to the charging dock"),
         "undock": ("Clear of the dock.", "Reversing off the dock"),
     }
 
@@ -420,12 +407,9 @@ class MockRobot:
         arrived_detail, stage_detail = self._COMMAND_COPY.get(
             kind, self._COMMAND_COPY["navigate"])
         if self._command_arrived:
-            if kind == "dock":
-                self._settle_on_dock()
-            else:
-                if kind == "undock":
-                    self.on_dock = False
-                self.mode = "idle"
+            if kind == "undock":
+                self.on_dock = False
+            self.mode = "idle"
             await ws.send(self.frame("command.result",
                                      {"command_id": self.command["command_id"],
                                       "outcome": "succeeded",

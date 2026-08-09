@@ -2,14 +2,16 @@
 
 Safety posture:
 - Goal-based commands only (navigate_to_pose, set_initial_pose, stop) plus the
-  discrete charging/motor/dock steps (charge_release, motor_enable, dock,
-  undock); there is deliberately no velocity teleop path — undock included,
-  which is an action on the robot, never browser-published velocity.
-- The charging/motor/dock steps are additionally gated on live hardware
-  telemetry by commands.gates before they are forwarded.
-- Fail-closed: anything not explicitly valid is rejected with a synthesized
-  command.ack, and the browser is never left waiting — missing acks and
-  results are closed out by server-side timeouts.
+  discrete charging/motor/undock steps (charge_release, motor_enable, undock);
+  there is deliberately no velocity teleop path — undock included, which is an
+  action on the robot, never browser-published velocity. There is no dock
+  command: the robot has no automatic dock-in path.
+- navigate_to_pose and the charging/motor/undock steps are additionally gated
+  on live hardware telemetry by commands.gates before they are forwarded.
+- Fail-closed: any request this broker refuses gets a synthesized command.ack,
+  and an accepted one is never left open — missing acks and results are closed
+  out by server-side timeouts. A frame malformed enough to fail payload
+  validation never reaches here and is dropped by the gateway without a reply.
 - Every request is written to the command_audit table before it reaches
   the robot.
 """
@@ -44,7 +46,6 @@ COMMAND_LABELS = {
     "stop": "Stop the robot",
     "charge_release": "Release charging",
     "motor_enable": "Enable motors",
-    "dock": "Send robot to its charging dock",
     "undock": "Move robot off its charging dock",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
@@ -144,9 +145,11 @@ class CommandBroker:
                                        "try again once it is online.")
             return
 
-        # 5. Hardware-state gate for the charging/motor/dock commands. The UI
-        #    greys these out for the same reasons, but a hidden button is not
-        #    authorization — the decision is made here, from telemetry.
+        # 5. Hardware-state gate for the motion, charging and undock commands.
+        #    The UI mirrors the charging/undock rules to grey those controls
+        #    out, and applies its own weaker check to navigation — but a hidden
+        #    or disabled button is not authorization. The decision is made
+        #    here, from telemetry, whatever the browser believed.
         reason = self._validate_robot_state(session, command)
         if reason is not None:
             await self._reject_audited(client, robot_id, command_id, command, reason)
@@ -229,7 +232,7 @@ class CommandBroker:
         return None
 
     def _validate_robot_state(self, session: "RobotSession", command: str) -> str | None:
-        """Refusal reason for a charging/motor/dock command, from live state."""
+        """Refusal reason for a gated command, from live state."""
         if command not in gates.GATES:
             return None
         state = session.state
@@ -238,7 +241,13 @@ class CommandBroker:
                          for entry in self.active.values())
         facts = gates.facts_from_state(state.connection, state.base_state.data,
                                        state.pose.data, state.capabilities,
-                                       navigating=navigating)
+                                       navigating=navigating,
+                                       # Server receipt ages, not the robot's
+                                       # self-report: a slice that stopped
+                                       # arriving keeps its last self-reported
+                                       # age forever. See gates.MAX_RECEIPT_AGE_S.
+                                       base_state_age=state.base_state.age(),
+                                       pose_age=state.pose.age())
         return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:

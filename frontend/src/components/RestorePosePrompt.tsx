@@ -10,7 +10,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
  * dialog itself is the confirmation — nothing is sent to the robot until the
  * operator explicitly clicks a button.
  */
-export function RestorePosePrompt() {
+export function RestorePosePrompt({ enabled = true }: { enabled?: boolean }) {
   const connection = useTelemetryStore((state) => state.connection);
   const lastKnownPose = useTelemetryStore((state) => state.lastKnownPose);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
@@ -26,7 +26,7 @@ export function RestorePosePrompt() {
     if (!online) setDismissed(false);
   }, [online]);
 
-  const open = online && !poseSetThisSession && lastKnownPose != null && !dismissed;
+  const open = enabled && online && !poseSetThisSession && lastKnownPose != null && !dismissed;
 
   const restore = () => {
     if (lastKnownPose) send("set_initial_pose", lastKnownPose);

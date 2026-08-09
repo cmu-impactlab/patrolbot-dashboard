@@ -68,6 +68,9 @@ describe("replay page", () => {
     expect(await screen.findByRole("heading", { name: "Corridor sweep" })).toBeTruthy();
     expect(screen.getByText(/patrolbot-01/)).toBeTruthy();
     expect(document.title).toBe("Replay — Corridor sweep");
+    const help = screen.getByRole("link", { name: "Open the guided dashboard tour in a new tab" });
+    expect(help.getAttribute("href")).toBe("/?tour=1");
+    expect(help.getAttribute("target")).toBe("_blank");
   });
 
   it("offers a transport for the recorded route", async () => {

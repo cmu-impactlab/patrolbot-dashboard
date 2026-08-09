@@ -8,6 +8,7 @@ import {
   useStopRecording,
 } from "../api/queries";
 import type { RecordingRow } from "../stores/replayStore";
+import { canCommand, isAdministrator, useAuthStore } from "../stores/authStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { formatTime } from "../lib/format";
 import { openReplayTab } from "../lib/replayTab";
@@ -113,6 +114,12 @@ export function RecordingsWidget() {
   const stopMutation = useStopRecording();
   const remove = useDeleteRecording();
   const online = useTelemetryStore((state) => state.connection.state === "online");
+  const authUser = useAuthStore((state) => state.user);
+  // Recordings are global: starting or stopping one affects every operator
+  // watching, and deleting destroys shared data. The server enforces both.
+  const mayRecord = canCommand(authUser);
+  const mayDelete = isAdministrator(authUser);
+  const readOnlyNote = "Your account has read-only access.";
   const [name, setName] = useState("");
   const [channels, setChannels] = useState<string[]>(
     CHANNELS.filter((channel) => channel.default).map((channel) => channel.id));
@@ -145,7 +152,8 @@ export function RecordingsWidget() {
           <span className="rec-dot" />
           Recording “{activeRow.name}” — {activeRow.sample_count} samples
           <div style={{ flex: 1 }} />
-          <button className="btn danger" onClick={finish}>
+          <button className="btn danger" onClick={finish} disabled={!mayRecord}
+                  title={mayRecord ? "Stop recording" : readOnlyNote}>
             <Square size={13} /> Stop
           </button>
         </div>
@@ -157,10 +165,12 @@ export function RecordingsWidget() {
             placeholder="Recording name"
             value={name}
             onChange={(event) => setName(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && online) begin(); }}
+            onKeyDown={(event) => { if (event.key === "Enter" && online && mayRecord) begin(); }}
           />
-          <button className="btn primary" disabled={!online || start.isPending} onClick={begin}
-                  title={online ? "Start recording" : "The robot is not connected"}>
+          <button className="btn primary" disabled={!online || !mayRecord || start.isPending}
+                  onClick={begin}
+                  title={!mayRecord ? readOnlyNote
+                         : online ? "Start recording" : "The robot is not connected"}>
             <Circle size={13} /> Record
           </button>
         </div>
@@ -198,7 +208,9 @@ export function RecordingsWidget() {
             <Play size={14} />
           </button>
           <DownloadMenu row={row} />
-          <button className="btn icon" title="Delete recording"
+          <button className="btn icon" disabled={!mayDelete}
+                  title={mayDelete ? "Delete recording"
+                                   : "Deleting a recording needs an administrator account."}
                   onClick={() => remove.mutate(row.id, { onSuccess: () => listQuery.refetch() })}>
             <Trash2 size={14} />
           </button>

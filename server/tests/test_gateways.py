@@ -72,6 +72,35 @@ def test_battery_rebroadcast_includes_estimate(client):
             )
 
 
+def test_nan_battery_frame_never_reaches_state_estimator_or_browser(client):
+    """End to end: a NaN voltage is dropped at the gateway, so the estimator,
+    the battery-history writer and the browser socket never see it. A good
+    frame right behind it still gets through — one bad sample must not wedge
+    the connection."""
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()  # snapshot
+            robot.send_text(encode("telemetry.battery", "patrolbot-01", 2, {
+                "voltage": float("nan"), "percentage": 80.0, "charging": False,
+            }))
+            robot.send_text(encode("telemetry.battery", "patrolbot-01", 3, {
+                "voltage": 24.5, "percentage": 80.0, "charging": False,
+            }))
+            battery = recv_until(ui, "telemetry.battery")
+            # The only battery frame that arrives is the finite one.
+            assert battery["data"]["voltage"] == 24.5
+
+    state = client.app.state.hub.primary().state
+    assert state.battery.data.voltage == 24.5
+    voltages = [value for _ts, value in state.estimator._volt._samples]
+    assert voltages == [24.5]  # the NaN sample never reached the estimator
+
+    rows = client.get("/api/history/battery").json()
+    assert [row["voltage"] for row in rows] == [24.5]
+
+
 def test_estop_produces_event_and_status(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())

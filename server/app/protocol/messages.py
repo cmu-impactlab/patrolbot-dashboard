@@ -43,7 +43,9 @@ class PoseData(BaseModel):
     linear_velocity: float
     angular_velocity: float
     covariance_trace: float | None = None
-    localized: bool = True
+    # Absent means "the robot did not say", which the motion gates must read as
+    # "not localized" — every real producer sends it explicitly.
+    localized: bool = False
 
 
 class LidarData(BaseModel):
@@ -71,6 +73,13 @@ class BatteryEstimate(BaseModel):
 
 
 class BatteryData(BaseModel):
+    # Same reasoning as PoseData, plus one the browser forces: Python happily
+    # encodes NaN/Infinity into JSON, but they are not JSON and JSON.parse
+    # throws on them — a single NaN voltage would take down the whole
+    # dashboard socket, not just the battery widget. Non-finite voltage is
+    # rejected here (the gateway drops the frame); the bridge already maps
+    # non-finite current/percentage to null before they get this far.
+    model_config = ConfigDict(allow_inf_nan=False)
     voltage: float
     current: float | None = None
     percentage: float | None = None
@@ -82,7 +91,8 @@ class BatteryData(BaseModel):
 class BaseStateData(BaseModel):
     session_generation: int
     link_connected: bool
-    telemetry_age: float
+    # Seconds; a negative age is not a fresher reading, it is a broken clock.
+    telemetry_age: float = Field(ge=0.0)
     hardware_state_valid: bool
     charge_state: str
     motors_enabled: bool
@@ -146,11 +156,18 @@ class MapData(BaseModel):
 
 CommandType = Literal[
     "navigate_to_pose", "set_initial_pose", "stop",
-    # Charging / motor power / dock. Deliberately four distinct commands, not
-    # one "unlock wheels": charge release is zero-motion and leaves the motors
-    # off, enabling the motors is a separate explicit request, and dock/undock
-    # are the guarded motion operations on top of both.
-    "charge_release", "motor_enable", "dock", "undock",
+    # Charging / motor power / undock. Deliberately distinct commands, not one
+    # "unlock wheels": charge release is zero-motion and leaves the motors off,
+    # enabling the motors is a separate explicit request, and undock is the
+    # guarded motion operation on top of both.
+    #
+    # There is no `dock`. Automatic dock-in has never existed on the robot —
+    # its ROS graph offers /patrolbot/undock and /patrolbot/hardware_undock and
+    # nothing to drive back onto the charger (verified 2026-08-08). Advertising
+    # the command anyway meant the dashboard offered a control the real
+    # executor would reject as unknown, and only the mock made it look
+    # implemented. Reinstate it when a real dock-in path is commissioned.
+    "charge_release", "motor_enable", "undock",
 ]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 
@@ -208,10 +225,10 @@ class RobotStatusData(BaseModel):
 class CapabilitiesData(BaseModel):
     """What the connected robot says it can do (from robot.hello).
 
-    Controls for an uncommissioned capability — dock/undock in particular —
-    stay visibly disabled rather than hidden, so an operator can see the
-    control exists and why it is unavailable. This is presentation only:
-    the server gates every command on its own.
+    A control whose capability the robot has not claimed is shown disabled
+    with the reason rather than silently dropped, so an operator can see it
+    exists and why it is unavailable — Undock, when the robot is on its dock.
+    This is presentation only: the server gates every command on its own.
     """
     capabilities: list[str] = Field(default_factory=list)
 

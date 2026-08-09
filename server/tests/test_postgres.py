@@ -47,6 +47,9 @@ async def test_repo_round_trips():
         layouts = await db.get_layouts(1)
         assert {"Operator", "Research", "Diagnostics"} <= {l["name"] for l in layouts}
 
+        assert await db.get_help_guide_version_seen(1) == 0
+        assert await db.mark_help_guide_seen(1, 1) == 1
+
         await db.save_layout(1, "current", {"widgets": ["liveMap"], "layouts": {}})
         fetched = await db.get_layout(1, "current")
         assert fetched["layout"]["widgets"] == ["liveMap"]

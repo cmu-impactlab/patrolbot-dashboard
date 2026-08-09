@@ -9,5 +9,13 @@ dependencies = ["websockets>=13", "psutil>=6"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout>=2.3"]
+
 [tool.setuptools.packages.find]
 include = ["mock_robot*"]
+
+[tool.pytest.ini_options]
+# See server/pyproject.toml: a hanging suite must fail, not stall `make test`.
+timeout = 60
+timeout_method = "thread"

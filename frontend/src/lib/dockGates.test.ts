@@ -5,13 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  chargeReleaseReason, dockAction, dockReason, factsFrom,
-  motorEnableReason, rejectionReason, undockReason,
+  chargeReleaseReason, factsFrom, motorEnableReason,
+  rejectionReason, showsUndock, undockReason,
   type StateFacts,
 } from "./dockGates";
 import type { BaseStateData, PoseData } from "../types/protocol";
 
-const ALL_CAPS = ["dock", "undock", "charge_release", "motor_enable"];
+const ALL_CAPS = ["undock", "charge_release", "motor_enable"];
 
 /** On the dock, charging, everything healthy. */
 function facts(overrides: Partial<StateFacts> = {}): StateFacts {
@@ -132,7 +132,7 @@ describe("undock", () => {
   });
 
   it.each([
-    [{ capabilities: ["dock"] }, "not commissioned"],
+    [{ capabilities: ["charge_release"] }, "not commissioned"],
     [{ chargeState: "not_charging" }, "not on its dock"],
     [{ bumpersRear: true }, "rear bumper"],
     [{ estopPressed: true }, "emergency stop"],
@@ -144,27 +144,27 @@ describe("undock", () => {
   });
 });
 
-describe("dock", () => {
-  const offDock = { chargeState: "not_charging" };
-
-  it("needs a known location but not a prior motor enable", () => {
-    expect(dockReason(facts({ ...offDock, motorsEnabled: false }))).toBeNull();
-    expect(dockReason(facts({ ...offDock, localized: false }))).toContain("where it is");
+describe("there is no dock command", () => {
+  it("offers Undock only on the charger, and never a Dock control", () => {
+    // The robot has no automatic dock-in path, so it is driven onto its
+    // charger by hand and the control simply is not there.
+    expect(showsUndock(facts())).toBe(true);                          // charging
+    expect(showsUndock(facts({ chargeState: "not_charging" }))).toBe(false);
   });
 
-  it("refuses when the robot never claimed the capability", () => {
-    expect(dockReason(facts({ ...offDock, capabilities: [] }))).toContain("not commissioned");
-  });
-
-  it("refuses when already charging", () => {
-    expect(dockReason(facts())).toContain("already charging");
+  it("still offers Undock for a robot visibly on charge behind a broken observer", () => {
+    expect(showsUndock(facts({
+      chargeState: "charging",
+      dockState: "UNKNOWN",
+      dockStateValid: false,
+    }))).toBe(true);
   });
 });
 
 describe("fail-closed defaults", () => {
   it("refuses everything with no telemetry at all", () => {
     const blank = factsFrom("online", null, null, ALL_CAPS);
-    for (const command of ["charge_release", "motor_enable", "dock", "undock"] as const) {
+    for (const command of ["charge_release", "motor_enable", "undock"] as const) {
       expect(rejectionReason(command, blank)).not.toBeNull();
     }
   });
@@ -204,26 +204,23 @@ describe("factsFrom", () => {
   });
 });
 
-describe("the single dock button", () => {
-  it("offers undock on the charger and dock everywhere else", () => {
-    expect(dockAction(facts())).toBe("undock");                        // charging
-    expect(dockAction(facts(RELEASED))).toBe("undock");                // on dock, released
-    expect(dockAction(facts({ chargeState: "not_charging" }))).toBe("dock");
-    expect(dockAction(facts({ chargeState: "unknown" }))).toBe("dock");
-    expect(dockAction(facts({
+describe("when the undock button appears", () => {
+  it("follows the robot's actual dock state", () => {
+    expect(showsUndock(facts())).toBe(true);                     // charging
+    expect(showsUndock(facts(RELEASED))).toBe(true);             // on dock, released
+    expect(showsUndock(facts({ chargeState: "not_charging" }))).toBe(false);
+    expect(showsUndock(facts({ chargeState: "unknown" }))).toBe(false);
+    // A usable observer proving departure hides it, whatever the raw charge
+    // level has re-latched to.
+    expect(showsUndock(facts({
       chargeState: "float",
       dockState: "CLEAR_CONFIRMED",
       dockStateValid: true,
-    }))).toBe("dock");
-    expect(dockAction(facts({
+    }))).toBe(false);
+    expect(showsUndock(facts({
       dockState: "DEPARTING",
       dockStateValid: true,
       undockActive: true,
-    }))).toBe("undock");
-    expect(dockAction(facts({
-      chargeState: "float",
-      dockState: "UNKNOWN",
-      dockStateValid: false,
-    }))).toBe("undock");
+    }))).toBe(true);
   });
 });

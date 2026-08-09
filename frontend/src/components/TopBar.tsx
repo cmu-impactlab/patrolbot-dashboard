@@ -10,6 +10,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
 import { useUiStore } from "../stores/uiStore";
 import { CONNECTION_COPY, STATUS_COPY } from "../lib/plainLanguage";
 import { WidgetLibrary } from "./WidgetLibrary";
+import { DashboardTourButton } from "./DashboardTourButton";
 
 export function TopBar() {
   const status = useTelemetryStore((state) => state.status);
@@ -65,16 +66,16 @@ export function TopBar() {
   const connCopy = CONNECTION_COPY[connState];
 
   return (
-    <header className="topbar">
-      <div className="brand">
+    <header className="topbar" data-tour="overview">
+      <div className="brand" data-tour="robot-id">
         <img className="brand-mark" src={cmuqLogo} alt="Carnegie Mellon University Qatar" />
         <span>{robotId}</span>
       </div>
-      <span className={`status-pill tone-${statusCopy.tone}`} title={status.detail}>
+      <span className={`status-pill tone-${statusCopy.tone}`} title={status.detail} data-tour="robot-condition">
         <span className="dot" />
         {statusCopy.label}
       </span>
-      <span className="conn-badge" title={connCopy.description}>
+      <span className="conn-badge" title={connCopy.description} data-tour="connection">
         <span className={`dot ${connState}`} />
         {wsConnected ? connCopy.label : "Dashboard reconnecting…"}
       </span>
@@ -82,7 +83,7 @@ export function TopBar() {
 
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
-          <button className="btn">
+          <button className="btn" data-tour="layouts">
             <LayoutDashboard size={15} />
             {activePreset ?? "Custom layout"}
             <ChevronDown size={14} />
@@ -173,12 +174,14 @@ export function TopBar() {
       )}
       <button
         className={`btn ${editMode ? "active" : ""}`}
+        data-tour="edit-dashboard"
         onClick={() => setEditMode(!editMode)}
         title="Toggle Edit Dashboard mode — widgets can only be moved while editing"
       >
         <Pencil size={14} />
         {editMode ? "Done editing" : "Edit dashboard"}
       </button>
+      <DashboardTourButton />
       <button
         className="btn icon"
         onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -187,7 +190,7 @@ export function TopBar() {
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </button>
       {authUser?.auth_mode === "oidc" && (
-        <span className="user-chip" title={`Signed in as ${authUser.display_name} (${authUser.role})`}>
+        <span className="user-chip" data-tour="account" title={`Signed in as ${authUser.display_name} (${authUser.role})`}>
           {authUser.username}
           <a className="btn icon" href="/auth/logout" title="Sign out">
             <LogOut size={14} />

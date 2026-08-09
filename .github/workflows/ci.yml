@@ -5,26 +5,40 @@ on:
     branches: [main]
   pull_request:
 
+# The Python range the project actually claims to support (see
+# `requires-python = ">=3.11"`). It is tested rather than assumed: the suite
+# was once verified only on the maintainer's local interpreter, and a report of
+# a hang on a newer version could not be told apart from an unsupported one.
+# 3.12 stays first because it is what the production image ships.
+
 jobs:
   server:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: pip install "./server[dev]"
       - run: python -m pytest -q
         working-directory: server
 
   mock-robot:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install ./mock-robot pytest
+          python-version: ${{ matrix.python-version }}
+      - run: pip install "./mock-robot[dev]"
       - run: python -m pytest -q
         working-directory: mock-robot
 
@@ -32,12 +46,16 @@ jobs:
     # Pure-Python tests only (normalizers, throttling, command pre-checks);
     # no ROS graph is needed.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install pytest
+          python-version: ${{ matrix.python-version }}
+      - run: pip install pytest pytest-timeout
       - run: python -m pytest test -q
         working-directory: ros2_ws/src/patrolbot_web_bridge
 
@@ -58,3 +76,22 @@ jobs:
         working-directory: frontend
       - run: npx vite build
         working-directory: frontend
+      # Guards what a browser must download before the dashboard is usable.
+      # Lazily loaded chunks are reported but not counted.
+      - run: npm run check-bundle
+        working-directory: frontend
+
+  # The production image installs against server/constraints.txt. This fails
+  # when that file no longer describes what actually gets installed — a
+  # dependency added to pyproject.toml without regenerating it, or a pin left
+  # behind for a package nothing uses any more.
+  #
+  # Deliberately separate from the `server` matrix above, which installs
+  # unconstrained across the whole supported Python range: that job is the
+  # early warning that an upstream release breaks us, and pinning it would
+  # silence the signal it exists to give.
+  constraints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-constraints.sh

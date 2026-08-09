@@ -1,4 +1,4 @@
-"""Charging, motor-power and dock command gates.
+"""Navigation, charging, motor-power and undock command gates.
 
 Two layers are covered: the pure precondition rules, and the broker actually
 enforcing them on a live socket — a UI that greys out the wrong button must
@@ -15,12 +15,13 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("dock", "undock", "charge_release", "motor_enable")
+ALL_CAPS = ("undock", "charge_release", "motor_enable")
 
 
 def facts(**overrides) -> gates.StateFacts:
     """A robot sitting on its dock, charging, everything healthy."""
     base = dict(online=True, link_connected=True, telemetry_age=0.1,
+                base_state_age=0.1, pose_age=0.1,
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
                 bumpers_front=False, bumpers_rear=False, localized=True,
@@ -117,7 +118,7 @@ def test_undock_refuses_duplicate_reported_by_robot_state():
 
 
 @pytest.mark.parametrize("overrides, fragment", [
-    ({"capabilities": ("dock",)}, "not commissioned"),
+    ({"capabilities": ("charge_release",)}, "not commissioned"),
     ({"charge_state": "not_charging"}, "not on its dock"),
     ({"bumpers_rear": True}, "rear bumper"),
     ({"estop_pressed": True}, "emergency stop"),
@@ -135,18 +136,16 @@ def test_undock_refusals(overrides, fragment):
     assert reason is not None and fragment in reason.lower()
 
 
-def test_dock_needs_localization_but_not_a_prior_motor_enable():
-    off_dock = {"charge_state": "not_charging"}
-    assert gates.dock_reason(facts(**off_dock, motors_enabled=False)) is None
-    reason = gates.dock_reason(facts(**off_dock, localized=False))
-    assert reason is not None and "where it is" in reason
+def test_there_is_no_dock_command():
+    """The robot has no automatic dock-in path, so the dashboard does not offer
+    one — not even a gated, greyed-out one that could never succeed."""
+    assert "dock" not in gates.GATES
+    assert gates.rejection_reason("dock", facts()) is None  # not a command
 
 
-def test_dock_and_undock_hidden_behind_capabilities():
+def test_undock_hidden_behind_capabilities():
     """The robot must claim the capability; an uncommissioned base is refused
     even when every other precondition is satisfied."""
-    ready = facts(charge_state="not_charging", motors_enabled=True, capabilities=())
-    assert "not commissioned" in (gates.dock_reason(ready) or "")
     on_dock = facts(charge_state="docked", motors_enabled=True, capabilities=())
     assert "not commissioned" in (gates.undock_reason(on_dock) or "")
 
@@ -159,8 +158,70 @@ def test_missing_telemetry_fails_closed():
 
 
 def test_ungated_commands_pass_through():
-    assert gates.rejection_reason("navigate_to_pose", facts()) is None
-    assert gates.rejection_reason("stop", facts()) is None
+    """stop and set_initial_pose do not drive the robot, so nothing gates them —
+    stop especially must stay available in exactly the states that refuse
+    everything else."""
+    assert gates.rejection_reason("stop", facts(online=False)) is None
+    assert gates.rejection_reason("set_initial_pose", facts(fault_flags=4)) is None
+
+
+# -- navigate ---------------------------------------------------------------
+
+def driving_facts(**overrides) -> gates.StateFacts:
+    """Off the dock, motors live, localized — ready to be sent somewhere."""
+    return facts(**{"charge_state": "not_charging", "motors_enabled": True,
+                    **overrides})
+
+
+def test_navigate_allowed_when_robot_is_ready_to_drive():
+    assert gates.navigate_reason(driving_facts()) is None
+
+
+@pytest.mark.parametrize("overrides, fragment", [
+    ({"online": False}, "not connected"),
+    # Two independent staleness questions: what the base said, and when we
+    # heard it. Either one alone is enough to refuse.
+    ({"telemetry_age": 9.0}, "stale"),
+    ({"base_state_age": 9.0}, "stale"),
+    ({"link_connected": False}, "stale"),
+    ({"hardware_state_valid": False}, "valid data"),
+    ({"fault_flags": 4}, "fault"),
+    ({"estop_pressed": True}, "emergency stop"),
+    ({"motors_enabled": False}, "motors are off"),
+    ({"pose_age": 9.0}, "recent position update"),
+    ({"pose_age": None}, "recent position update"),
+    ({"localized": False}, "does not know where it is"),
+])
+def test_navigate_refusals(overrides, fragment):
+    reason = gates.navigate_reason(driving_facts(**overrides))
+    assert reason is not None and fragment in reason.lower()
+
+
+@pytest.mark.parametrize("overrides", [
+    # Motors off because the charger cut them — the ordinary docked state.
+    {"charge_state": "charging", "motors_enabled": False},
+    # Hand-docked: charging with the motors still reported enabled. This one
+    # otherwise reads as "healthy and ready to drive" on every other fact.
+    {"charge_state": "charging", "motors_enabled": True},
+    # Dock observer present and confirming, whatever charge_state claims.
+    {"charge_state": "idle", "dock_state": "DOCKED_CONFIRMED",
+     "dock_state_valid": True},
+    # An unusable dock observer says nothing about the dock, so it must not
+    # overrule a charge_state reporting current flowing in.
+    {"charge_state": "charging", "dock_state": "UNKNOWN",
+     "dock_state_valid": False, "motors_enabled": True},
+])
+def test_navigate_refused_on_the_dock(overrides):
+    """Coming off the dock is undock's job. Navigation must not pull the robot
+    off its charger under Nav2, and the refusal has to name the dock rather
+    than send the operator after a motor-enable that cannot succeed there."""
+    reason = gates.navigate_reason(driving_facts(**overrides))
+    assert reason is not None and "on its charger" in reason.lower()
+
+
+def test_navigate_allowed_while_already_moving():
+    """Redirecting a driving robot is supported — Nav2 preempts its own goal."""
+    assert gates.navigate_reason(driving_facts(stationary=False)) is None
 
 
 def test_facts_treat_encoder_noise_as_stationary():
@@ -202,18 +263,20 @@ def base_state_frame(sequence: int, **overrides) -> str:
     return encode("telemetry.base_state", "patrolbot-01", sequence, data)
 
 
-def pose_frame(sequence: int, moving: bool = False) -> str:
+def pose_frame(sequence: int, moving: bool = False, localized: bool = True) -> str:
     return encode("telemetry.pose", "patrolbot-01", sequence, {
         "x": 1.0, "y": 1.0, "yaw": 0.0,
         "linear_velocity": 0.4 if moving else 0.0,
-        "angular_velocity": 0.0, "localized": True,
+        "angular_velocity": 0.0, "localized": localized,
     })
 
 
-def command_frame(command: str) -> tuple[str, str]:
+def command_frame(command: str, goal: dict | None = None) -> tuple[str, str]:
     command_id = str(uuid.uuid4())
-    return command_id, encode("command.request", "patrolbot-01", 1,
-                              {"command_id": command_id, "command": command})
+    data = {"command_id": command_id, "command": command}
+    if goal is not None:
+        data["goal"] = goal
+    return command_id, encode("command.request", "patrolbot-01", 1, data)
 
 
 def recv_until(ws, wanted_type: str, limit: int = 50) -> dict:
@@ -237,6 +300,24 @@ def test_charge_release_forwarded_when_state_allows(client):
             forwarded = json.loads(robot.receive_text())
             assert forwarded["data"]["command"] == "charge_release"
             assert forwarded["data"]["command_id"] == command_id
+
+
+def test_navigate_rejected_when_the_robot_is_not_localized(client):
+    """The browser's "location set this session" flag is a fact about a tab.
+    A frame that never passed through that UI still has to meet the same
+    requirement, judged from the robot's own pose."""
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        robot.send_text(base_state_frame(1, charge_state="idle", motors_enabled=True))
+        robot.send_text(pose_frame(2, localized=False))
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            _, frame = command_frame("navigate_to_pose", goal={"x": 1.0, "y": 2.0})
+            ui.send_text(frame)
+            ack = recv_until(ui, "command.ack")
+            assert ack["data"]["accepted"] is False
+            assert "does not know where it is" in ack["data"]["reason"]
 
 
 def test_undock_forwarded_straight_from_charging(client):
@@ -435,4 +516,4 @@ def test_snapshot_carries_capabilities(client):
         with client.websocket_connect("/ws/ui") as ui:
             snapshot = json.loads(ui.receive_text())
             assert snapshot["type"] == "server.snapshot"
-            assert "dock" in snapshot["data"]["capabilities"]
+            assert "undock" in snapshot["data"]["capabilities"]

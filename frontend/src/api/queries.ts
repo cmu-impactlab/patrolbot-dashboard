@@ -12,6 +12,31 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export interface TourStatus {
+  current_version: number;
+  seen_version: number;
+  should_prompt: boolean;
+}
+
+export function useTourStatus() {
+  return useQuery({
+    queryKey: ["dashboard-tour-status"],
+    queryFn: () => json<TourStatus>("/api/help-guide/status"),
+    staleTime: Infinity,
+  });
+}
+
+export function useAcknowledgeTour() {
+  return useMutation({
+    mutationFn: () => json<TourStatus>("/api/help-guide/status", { method: "PUT" }),
+    // The prompt is dismissed immediately. Brief server/network interruptions
+    // must not trap the user in onboarding, but should still converge on the
+    // account-wide acknowledgement without another click.
+    retry: 4,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 8_000),
+  });
+}
+
 export function useLayoutsQuery() {
   return useQuery({
     queryKey: ["layouts"],

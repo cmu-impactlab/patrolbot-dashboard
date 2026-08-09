@@ -1,6 +1,7 @@
 /**
- * The dock control is one button whose label follows the robot's state:
- * Undock while it is on the charger, Dock & Charge when it is not.
+ * Undock is the only dock-related control: the robot has no automatic dock-in
+ * path, so it is driven onto its charger by hand. The button is present only
+ * while the robot is on the dock.
  */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,7 +10,7 @@ import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { BaseStateData, PoseData } from "../types/protocol";
 
-const CAPS = ["dock", "undock"];
+const CAPS = ["undock"];
 
 const PARKED: PoseData = {
   x: 1, y: 1, yaw: 0, linear_velocity: 0, angular_velocity: 0, localized: true,
@@ -44,9 +45,11 @@ function setState(base: BaseStateData | null, pose: PoseData | null = PARKED,
 }
 
 function dockButton(): HTMLButtonElement {
-  return screen.getByRole("button", {
-    name: /Undock|Undocking|Dock & Charge/,
-  }) as HTMLButtonElement;
+  return screen.getByRole("button", { name: /Undock|Undocking/ }) as HTMLButtonElement;
+}
+
+function dockButtonOrNull(): HTMLButtonElement | null {
+  return screen.queryByRole("button", { name: /Undock|Undocking/ }) as HTMLButtonElement | null;
 }
 
 describe("NavControlsWidget dock control", () => {
@@ -72,17 +75,15 @@ describe("NavControlsWidget dock control", () => {
     expect(dockButton().textContent).toContain("Undock");
   });
 
-  it("reads Dock & Charge, not red, once off the dock", () => {
+  it("is absent once the robot is off the dock", () => {
     setState(baseState({ charge_state: "not_charging", motors_enabled: true }));
     render(<NavControlsWidget />);
-
-    const button = dockButton();
-    expect(button.textContent).toContain("Dock & Charge");
-    expect(button.className).not.toContain("danger");
-    expect(button.disabled).toBe(false);
+    // Not merely disabled: there is nothing to undock from, and there is no
+    // Dock control to take its place.
+    expect(dockButtonOrNull()).toBeNull();
   });
 
-  it("stays off-dock when raw charge re-latches after confirmed clearance", () => {
+  it("stays absent when raw charge re-latches after confirmed clearance", () => {
     setState(baseState({
       charge_state: "float",
       dock_state: "CLEAR_CONFIRMED",
@@ -90,10 +91,7 @@ describe("NavControlsWidget dock control", () => {
       undock_profile_commissioned: true,
     }));
     render(<NavControlsWidget />);
-
-    const button = dockButton();
-    expect(button.textContent).toContain("Dock & Charge");
-    expect(button.textContent).not.toContain("Undock");
+    expect(dockButtonOrNull()).toBeNull();
   });
 
   it("shows robot-side undock activity started by another dashboard", () => {
@@ -111,10 +109,11 @@ describe("NavControlsWidget dock control", () => {
     expect(button.disabled).toBe(true);
   });
 
-  it("is a single control — never both a dock and an undock button", () => {
+  it("is a single control, and there is no Dock button anywhere", () => {
     setState(baseState({ charge_state: "charging" }));
     render(<NavControlsWidget />);
-    expect(screen.getAllByRole("button", { name: /Undock|Dock & Charge/ })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /Undock/ })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /Dock & Charge/ })).toBeNull();
   });
 
   it("greys out with the reason when the robot never claimed the capability", () => {
@@ -134,10 +133,10 @@ describe("NavControlsWidget dock control", () => {
     expect(screen.getByText(/still moving/)).toBeTruthy();
   });
 
-  it("greys out without hardware telemetry to justify moving", () => {
+  it("is absent without hardware telemetry to say the robot is docked", () => {
     setState(null, PARKED);
     render(<NavControlsWidget />);
-    expect(dockButton().disabled).toBe(true);
+    expect(dockButtonOrNull()).toBeNull();
   });
 
   it("does not expose the old manual charge-release or motor-enable sequence", () => {

@@ -26,15 +26,65 @@ DISABLED_REASON = (
     "WEB_BRIDGE_ENABLE_COMMANDS=1 on the robot to allow them."
 )
 
+# How stale the drive base's own reading may be before it stops being a basis
+# for driving, and how long ago this node may have received it. Two separate
+# questions; both match the dashboard server's thresholds in
+# server/app/commands/gates.py.
+MAX_TELEMETRY_AGE_S = 2.0
+MAX_RECEIPT_AGE_S = 3.0
+
 # action_msgs/GoalStatus terminal codes.
 _STATUS_SUCCEEDED = 4
 _STATUS_CANCELED = 5
 _STATUS_ABORTED = 6
 
+# action_msgs/CancelGoal.Response return codes.
+_CANCEL_REJECTED = 1
+_CANCEL_GOAL_TERMINATED = 3
+
 
 def yaw_to_quaternion(yaw: float) -> tuple[float, float, float, float]:
     """(x, y, z, w) for a rotation of `yaw` about +z."""
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+
+
+def cancel_verdict(response: Any) -> str:
+    """What a CancelGoal reply actually says: "canceling", "finished" or
+    "refused".
+
+    Only "canceling" means the server took the request on — and even then the
+    robot has not stopped yet; its goal still has to reach a terminal state.
+    ERROR_GOAL_TERMINATED is the one empty-list answer that is good news: the
+    goal had already finished, so there was nothing left to cancel. Everything
+    else — a refusal, an unknown goal id (the action server lost the goal, and
+    with it any knowledge of whether the robot stopped), a malformed reply — is
+    read as a refusal, because none of them is evidence the robot stopped.
+    """
+    if getattr(response, "goals_canceling", ()):
+        return "canceling"
+    if int(getattr(response, "return_code", _CANCEL_REJECTED)) == _CANCEL_GOAL_TERMINATED:
+        return "finished"
+    return "refused"
+
+
+def stop_result(goal_outcome: str) -> tuple[str, str]:
+    """Outcome and sentence for a stop, from the terminal state of the goal it
+    was cancelling.
+
+    Only a cancelled goal is a stop that did what it said. Arriving first is
+    also a stopped robot, but a different story and the operator should be told
+    which. An aborted goal is neither: Nav2 gave up for its own reasons, which
+    is not confirmation that the robot came to rest, so the stop is reported as
+    failed rather than quietly claiming success.
+    """
+    if goal_outcome == "canceled":
+        return ("succeeded", "The robot has stopped.")
+    if goal_outcome == "succeeded":
+        return ("succeeded",
+                "The robot reached its destination before it could be stopped.")
+    return ("failed",
+            "The robot's goal ended abnormally while it was being stopped — "
+            "check the robot before assuming it has stopped.")
 
 
 def map_goal_status(status: int) -> str:
@@ -83,6 +133,8 @@ SERVICE_CODE_TEXT = {
 # This is a legacy fallback only: a valid dock_state is authoritative because
 # raw charge can re-latch after CLEAR_CONFIRMED.
 CHARGING_STATES = frozenset({"charging", "charge", "bulk", "float", "overcharge"})
+# ...and those that mean physically on the dock, charging or not.
+ON_DOCK_STATES = CHARGING_STATES | frozenset({"docked", "dock", "on_dock"})
 
 # Undock feedback `state` -> what to show while it runs.
 UNDOCK_STAGE_TEXT = {
@@ -148,40 +200,76 @@ def undock_stage(state: str, hardware_phase: str = "") -> str:
     return UNDOCK_STAGE_TEXT.get((state or "").upper(), state or "Undocking")
 
 
-def precheck(command: str, goal: dict | None, base_state: Any | None) -> str | None:
+def _on_dock(base_state: dict) -> bool:
+    """Is the robot on its charger? Mirrors StateFacts.on_dock on the server.
+
+    A *usable* dock observer is authoritative in both directions: raw
+    charge_state can re-latch after a proven departure, so CLEAR_CONFIRMED
+    stays clear. An observer reporting itself invalid answers nothing and falls
+    back to charge_state — reading it as "not docked" would clear the dock for
+    a robot sitting on its charger with a broken observer.
+    """
+    if base_state.get("dock_state_valid"):
+        return base_state.get("dock_state", "").strip().upper() == "DOCKED_CONFIRMED"
+    return base_state.get("charge_state", "").strip().lower() in ON_DOCK_STATES
+
+
+def precheck(command: str, goal: dict | None, base_state: Any | None,
+             localized: bool = False, base_state_age: float | None = None) -> str | None:
     """Plain-language rejection reason, or None when the command may proceed.
 
     base_state is the latest normalized base_state payload (a dict) or None
     when the hardware bridge hasn't reported yet — fail closed for motion.
+    `localized` is the node's own answer to "is the map-frame fix recent and
+    confident" (BridgeNode._localization_is_usable); it defaults to False so a
+    caller that cannot answer refuses rather than assumes. `base_state_age` is
+    how long ago this node received that payload, which is a different question
+    from the telemetry_age inside it: if the drive-base subscription dies, the
+    last payload keeps reporting whatever age it had when it was sent, forever.
+
+    These repeat the dashboard server's gates (server/app/commands/gates.py)
+    deliberately, in the same words. The server refusing first is the normal
+    case; this is what holds if a frame reaches the robot without having passed
+    it — a replayed command.request, or a server that trusted stale telemetry.
     """
     if command in ("navigate_to_pose", "set_initial_pose") and goal is None:
         return "This command needs a destination."
     if command == "navigate_to_pose":
         if base_state is None:
             return "The robot's drive base has not reported in yet — cannot navigate."
-        if base_state.get("estop_pressed"):
-            return "The emergency stop is pressed. Release it on the robot first."
-        if not base_state.get("motors_enabled"):
-            # The base cuts motor power whenever the charger is engaged. On
-            # 2026-07-28 an operator hit "Enable motors", saw it succeed, and
-            # was told one second later to enable the motors — the charger had
-            # re-latched and tripped the interlock. Telling them to do again
-            # the thing they had just done sent them round that loop five
-            # times; name the actual cause instead.
-            dock_state_valid = base_state.get("dock_state_valid")
-            on_dock = (
-                base_state.get("dock_state", "").strip().upper()
-                == "DOCKED_CONFIRMED"
-                if dock_state_valid is not None
-                else base_state.get("charge_state", "").strip().lower()
-                in CHARGING_STATES
-            )
-            if on_dock:
-                return ("The charger is engaged, which switches the robot's motors "
-                        "off. Move the robot off its dock before driving it.")
-            return "The robot's motors are off. Enable them on the robot first."
+        if (not base_state.get("link_connected")
+                or not 0.0 <= float(base_state.get("telemetry_age", 999.0))
+                <= MAX_TELEMETRY_AGE_S
+                or base_state_age is None
+                or base_state_age > MAX_RECEIPT_AGE_S):
+            # The drive base link is down, its last reading is old, or it
+            # stopped reporting to us altogether. Either way what follows would
+            # be judged from numbers that no longer describe the robot.
+            return ("The robot's hardware readings are stale — wait for fresh "
+                    "data before commanding the robot.")
         if not base_state.get("hardware_state_valid"):
             return "The robot's drive base is not reporting valid data — cannot navigate."
+        if base_state.get("fault_flags"):
+            return (f"The drive base is reporting a fault "
+                    f"(code {int(base_state['fault_flags'])}). "
+                    "Clear it on the robot first.")
+        if base_state.get("estop_pressed"):
+            return "The emergency stop is pressed. Release it on the robot first."
+        # Coming off the dock is undock's job — it releases the charger and
+        # backs off under the dock manager's guarded profile. Checked before
+        # the motors because a hand-docked robot can charge with its motors
+        # still reported enabled, which would otherwise look ready to drive.
+        # It also names the real cause: on 2026-07-28 an operator hit "Enable
+        # motors", saw it succeed, and was told a second later to enable the
+        # motors — the charger had re-latched and tripped the interlock, and
+        # they went round that loop five times.
+        if _on_dock(base_state):
+            return ("The robot is on its charger. Move it off the dock before "
+                    "sending it anywhere.")
+        if not base_state.get("motors_enabled"):
+            return "The robot's motors are off. Enable them on the robot first."
+        if not localized:
+            return "The robot does not know where it is. Set its location first."
     return None
 
 
@@ -312,6 +400,10 @@ class CommandExecutor:
         self._undock_server_misses = 0
         self._node.get_logger().warning(f"undock closed out: {detail}")
         self._result(active["command_id"], "failed", detail)
+        for stop_command_id in self._claim_all_stops(active):
+            self._result(stop_command_id, "failed",
+                         "The robot stopped answering while being stopped. It may "
+                         "still be moving — use the emergency stop on the robot.")
 
     # -- capability advertisement ----------------------------------------------
 
@@ -320,8 +412,8 @@ class CommandExecutor:
 
         The dashboard offers a control only for a capability the robot claims,
         so this is the commissioning switch: nothing is advertised until the
-        dock manager is up. `dock` is deliberately absent — the robot has no
-        dock-in path yet (see docs/COMMAND-PATH-PLAN.md).
+        dock manager is up. `dock` is deliberately absent, and is no longer a
+        command at all — the robot has no dock-in path to advertise.
         """
         capabilities: list[str] = []
         if self._undock_client is not None and self._undock_client.server_is_ready():
@@ -344,12 +436,13 @@ class CommandExecutor:
 
     # -- dispatch --------------------------------------------------------------
 
-    def handle(self, data: dict, base_state: dict | None, current_yaw: float | None) -> None:
+    def handle(self, data: dict, base_state: dict | None, current_yaw: float | None,
+               localized: bool = False, base_state_age: float | None = None) -> None:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
 
-        reason = precheck(command, goal, base_state)
+        reason = precheck(command, goal, base_state, localized, base_state_age)
         if reason is not None:
             self._ack(command_id, False, reason)
             return
@@ -375,6 +468,13 @@ class CommandExecutor:
     # -- navigate_to_pose ------------------------------------------------------
 
     def _navigate(self, command_id: str, goal: dict, current_yaw: float | None) -> None:
+        if self._undock_active is not None:
+            # Two motion owners at once is a state nothing downstream handles —
+            # a stop would cancel one of them and report on the other.
+            self._ack(command_id, False,
+                      "The robot is moving off its dock. Wait for that to finish "
+                      "before sending it somewhere.")
+            return
         if not self._nav_client.server_is_ready():
             self._ack(command_id, False,
                       "The robot's navigation system is not running.")
@@ -413,6 +513,13 @@ class CommandExecutor:
         if self._active is not None:
             self._result(self._active["command_id"], "canceled",
                          "A newer destination replaced this one.")
+            # Any stop still waiting on that goal has lost its subject, and the
+            # robot is now driving to a new one rather than standing still.
+            for stop_command_id in self._claim_all_stops(self._active):
+                self._result(stop_command_id, "failed",
+                             "A new destination replaced the goal being stopped. "
+                             "The robot is moving again — use the emergency stop "
+                             "on the robot.")
         self._active = {"command_id": command_id, "goal_handle": goal_handle}
         self._ack(command_id, True)
         result_future = goal_handle.get_result_async()
@@ -433,39 +540,104 @@ class CommandExecutor:
     def _on_result(self, command_id: str, future) -> None:
         if self._active is None or self._active["command_id"] != command_id:
             return  # already superseded/canceled and reported
+        stops = self._claim_all_stops(self._active)
         self._active = None
         try:
             status = future.result().status
         except Exception as exc:  # noqa: BLE001
             self._result(command_id, "failed", f"Navigation ended abnormally: {exc}")
-            return
-        outcome = map_goal_status(status)
-        detail = {"succeeded": "Arrived at the destination.",
-                  "canceled": "Navigation was canceled.",
-                  "failed": "The robot could not reach the destination."}[outcome]
-        self._result(command_id, outcome, detail)
+            outcome = "failed"
+        else:
+            outcome = map_goal_status(status)
+            self._result(command_id, outcome,
+                         {"succeeded": "Arrived at the destination.",
+                          "canceled": "Navigation was canceled.",
+                          "failed": "The robot could not reach the destination."}[outcome])
+        # The goal is terminal, so Nav2 is no longer driving the robot — only
+        # now can anything true be said about the robot having stopped.
+        for stop_command_id in stops:
+            self._result(stop_command_id, *stop_result(outcome))
 
     # -- stop ------------------------------------------------------------------
 
     def _stop(self, command_id: str) -> None:
+        """Ask the running action to cancel, and say nothing about the robot
+        having stopped until it actually has.
+
+        The cancel request completing only means Nav2 (or the dock manager)
+        answered. Reporting success there told the operator "the robot has
+        stopped" for a cancellation the server had rejected, threw the goal
+        away, and then ignored its result — while the robot kept driving.
+        """
         self._ack(command_id, True)
-        # An undock in progress is the thing to stop. Its own terminal result
-        # closes out the undock command (code CANCELED); this only reports that
-        # the stop request itself landed.
-        undock = self._undock_active
-        if undock is not None:
-            undock["goal_handle"].cancel_goal_async()
-            self._result(command_id, "succeeded", "Asked the robot to stop undocking.")
-            return
-        active = self._active
+        # An undock in progress is the thing to stop; otherwise the goal. The
+        # two are mutually exclusive — _navigate refuses to start while an
+        # undock is running, and _undock while one is.
+        active = self._undock_active or self._active
         if active is None:
             self._result(command_id, "succeeded", "The robot was not navigating.")
             return
-        self._active = None
-        self._result(active["command_id"], "canceled", "Stopped by the operator.")
-        cancel_future = active["goal_handle"].cancel_goal_async()
+        stops = active.setdefault("stop_command_ids", [])
+        already_cancelling = bool(stops)
+        stops.append(command_id)
+        if already_cancelling:
+            # A cancel is already in flight for this goal. Asking again would
+            # get ERROR_GOAL_TERMINATED — which the server returns for a goal
+            # that is merely CANCELING, not only for one that has finished — and
+            # this stop would report "already stopped" while the robot is still
+            # coming to a halt. Both stops are reported off the goal's terminal
+            # result instead.
+            return
+        try:
+            cancel_future = active["goal_handle"].cancel_goal_async()
+        except Exception as exc:  # noqa: BLE001 — surfaced to the operator
+            self._fail_stop(command_id,
+                            f"The robot could not be asked to stop: {exc}.")
+            return
         cancel_future.add_done_callback(
-            lambda _f: self._result(command_id, "succeeded", "The robot has stopped."))
+            lambda f: self._on_cancel_response(command_id, f))
+
+    def _on_cancel_response(self, command_id: str, future) -> None:
+        try:
+            verdict = cancel_verdict(future.result())
+        except Exception as exc:  # noqa: BLE001 — surfaced to the operator
+            self._fail_stop(command_id,
+                            f"The robot did not answer the stop request: {exc}.")
+            return
+        if verdict == "canceling":
+            return  # Reported once the goal reaches a terminal state.
+        if verdict == "finished" and self._claim_stop(command_id):
+            self._result(command_id, "succeeded", "The robot had already stopped.")
+            return
+        if verdict != "finished":
+            self._fail_stop(command_id, "The robot refused the stop request.")
+
+    def _fail_stop(self, command_id: str, detail: str) -> None:
+        """A stop that did not take. The goal is left alone — it is still the
+        robot's active goal — and the operator is pointed at the one control
+        that does not depend on this path."""
+        if not self._claim_stop(command_id):
+            return
+        self._result(command_id, "failed",
+                     f"{detail} It may still be moving — use the emergency "
+                     "stop on the robot.")
+
+    def _claim_stop(self, command_id: str) -> bool:
+        """Claim the right to report this stop, if nothing has yet.
+
+        A stop can be resolved from either end — the cancel reply or the goal's
+        terminal result, whichever arrives first — so both paths claim before
+        reporting and the loser stays quiet.
+        """
+        for active in (self._active, self._undock_active):
+            if active is not None and command_id in active.get("stop_command_ids", ()):
+                active["stop_command_ids"].remove(command_id)
+                return True
+        return False
+
+    def _claim_all_stops(self, active: dict | None) -> list[str]:
+        """Claim every stop still waiting on a goal that has just ended."""
+        return [] if active is None else active.pop("stop_command_ids", [])
 
     # -- undock ----------------------------------------------------------------
 
@@ -487,6 +659,12 @@ class CommandExecutor:
             return
         if self._undock_active is not None:
             self._ack(command_id, False, "The robot is already undocking.")
+            return
+        if self._active is not None:
+            # The other half of _navigate's guard: never two motion owners.
+            self._ack(command_id, False,
+                      "The robot is driving to a destination. Stop it before "
+                      "backing it off the dock.")
             return
 
         goal = self._Undock.Goal()
@@ -546,16 +724,21 @@ class CommandExecutor:
     def _on_undock_result(self, command_id: str, future) -> None:
         if self._undock_active is None or self._undock_active["command_id"] != command_id:
             return
+        stops = self._claim_all_stops(self._undock_active)
         self._undock_active = None
         try:
             result = future.result().result
         except Exception as exc:  # noqa: BLE001
             self._result(command_id, "failed", f"Undocking ended abnormally: {exc}")
-            return
-        code = int(getattr(result, "code", 1))
-        detail = undock_detail(code, getattr(result, "message", ""),
-                               bool(getattr(result, "manual_recovery_required", False)))
-        self._result(command_id, undock_outcome(bool(result.success), code), detail)
+            outcome = "failed"
+        else:
+            code = int(getattr(result, "code", 1))
+            outcome = undock_outcome(bool(result.success), code)
+            self._result(command_id, outcome, undock_detail(
+                code, getattr(result, "message", ""),
+                bool(getattr(result, "manual_recovery_required", False))))
+        for stop_command_id in stops:
+            self._result(stop_command_id, *stop_result(outcome))
 
     # -- charge_release / motor_enable -----------------------------------------
 

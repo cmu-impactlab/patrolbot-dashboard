@@ -6,20 +6,30 @@ dev machine runs Python 3.14 where greenlet wheels are a moving target.)
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 import aiosqlite
 
 from ..protocol.messages import EventData
 from .presets import PRESET_LAYOUTS
 
+log = logging.getLogger("database")
+
+# Rows fetched per round trip when walking a recording. Big enough that paging
+# overhead is negligible, small enough that one page is never a memory problem
+# even when every row is a lidar scan (~3 KB).
+SAMPLE_PAGE = 2000
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     display_name TEXT NOT NULL,
+    help_guide_version_seen INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS layouts (
@@ -32,12 +42,17 @@ CREATE TABLE IF NOT EXISTS layouts (
     UNIQUE(user_id, name)
 );
 CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY,
+    id INTEGER NOT NULL,
     robot_id TEXT NOT NULL,
     ts TEXT NOT NULL,
     severity TEXT NOT NULL,
     title TEXT NOT NULL,
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    -- Keyed by robot as well as id. Ids are allocated globally by the hub
+    -- now, but the key must not depend on that: a restart re-seeds from
+    -- MAX(id), and two robots whose sessions were seeded independently used
+    -- to overwrite each other's rows here.
+    PRIMARY KEY (robot_id, id)
 );
 CREATE TABLE IF NOT EXISTS battery_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +118,15 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # Existing accounts must see each newly versioned guide offer once.
+        # Adding the column with a default preserves every row and marks the
+        # current guide as unseen; CREATE TABLE above covers fresh databases.
+        async with self._db.execute("PRAGMA table_info(users)") as cur:
+            user_columns = {row[1] for row in await cur.fetchall()}
+        if "help_guide_version_seen" not in user_columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN help_guide_version_seen "
+                "INTEGER NOT NULL DEFAULT 0")
         # Migration for databases created before channel selection existed.
         async with self._db.execute("PRAGMA table_info(recordings)") as cur:
             columns = [row[1] for row in await cur.fetchall()]
@@ -110,6 +134,7 @@ class Database:
             await self._db.execute(
                 "ALTER TABLE recordings ADD COLUMN channels TEXT NOT NULL "
                 "DEFAULT '[\"pose\",\"battery\",\"event\"]'")
+        await self._migrate_events_primary_key()
         # Migration for command_audit identity columns (added during hardening).
         async with self._db.execute("PRAGMA table_info(command_audit)") as cur:
             audit_columns = {row[1] for row in await cur.fetchall()}
@@ -133,6 +158,71 @@ class Database:
             )
         await self._db.commit()
 
+    async def _migrate_events_primary_key(self) -> None:
+        """Rebuild events with PRIMARY KEY (robot_id, id) if it predates it.
+
+        SQLite cannot ALTER a primary key, so the table is recreated and
+        copied. Existing rows cannot conflict: the old key was id alone, so
+        (robot_id, id) is at least as unique.
+
+        This runs against a live deployment's database, so it is all-or-
+        nothing: one explicit transaction, a row count checked against what was
+        there before the swap, and a rollback that leaves the original table
+        untouched if anything at all disagrees. `executescript` is deliberately
+        not used — it COMMITs before running, which would have made a failure
+        halfway through unrecoverable.
+
+        The collision this defends against is already prevented upstream by the
+        hub's shared EventIdAllocator, so nothing depends on this migration
+        succeeding; a database that fails it keeps working with the old key.
+        """
+        async with self._db.execute("PRAGMA table_info(events)") as cur:
+            columns = list(await cur.fetchall())
+        if not columns:
+            return
+        key_columns = {row[1] for row in columns if row[5]}  # row[5] = pk position
+        if key_columns == {"robot_id", "id"}:
+            return
+
+        async with self._db.execute("SELECT COUNT(*) FROM events") as cur:
+            before = int((await cur.fetchone())[0])
+        log.info("migrating %d event row(s) to a (robot_id, id) primary key", before)
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
+            await self._db.execute("""
+                CREATE TABLE events_migrated (
+                    id INTEGER NOT NULL,
+                    robot_id TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    PRIMARY KEY (robot_id, id)
+                )""")
+            await self._db.execute(
+                "INSERT INTO events_migrated (id, robot_id, ts, severity, title, message) "
+                "SELECT id, robot_id, ts, severity, title, message FROM events")
+            async with self._db.execute("SELECT COUNT(*) FROM events_migrated") as cur:
+                copied = int((await cur.fetchone())[0])
+            if copied != before:
+                raise RuntimeError(
+                    f"events migration copied {copied} of {before} rows; rolling back")
+            # Only now is the original expendable. Dropping it also drops
+            # idx_events_ts, which is recreated below.
+            await self._db.execute("DROP TABLE events")
+            await self._db.execute("ALTER TABLE events_migrated RENAME TO events")
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts)")
+            await self._db.commit()
+            log.info("events migration complete (%d rows)", copied)
+        except Exception:
+            await self._db.rollback()
+            with contextlib.suppress(Exception):
+                await self._db.execute("DROP TABLE IF EXISTS events_migrated")
+                await self._db.commit()
+            log.exception("events primary-key migration failed; the existing table "
+                          "is unchanged and the server will continue with it")
+
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
@@ -155,6 +245,22 @@ class Database:
             row = await cur.fetchone()
             return int(row["id"])
 
+    async def get_help_guide_version_seen(self, user_id: int) -> int:
+        async with self.db.execute(
+                "SELECT help_guide_version_seen FROM users WHERE id = ?",
+                (user_id,)) as cur:
+            row = await cur.fetchone()
+        return int(row["help_guide_version_seen"]) if row is not None else 0
+
+    async def mark_help_guide_seen(self, user_id: int, version: int) -> int:
+        """Atomically advance a user's guide version, never move it backward."""
+        await self.db.execute(
+            "UPDATE users SET help_guide_version_seen = "
+            "MAX(help_guide_version_seen, ?) WHERE id = ?",
+            (version, user_id))
+        await self.db.commit()
+        return await self.get_help_guide_version_seen(user_id)
+
     # -- events ---------------------------------------------------------------
 
     async def next_event_id(self) -> int:
@@ -167,8 +273,12 @@ class Database:
             "INSERT OR REPLACE INTO events (id, robot_id, ts, severity, title, message) VALUES (?,?,?,?,?,?)",
             (event.id, robot_id, event.ts, event.severity, event.title, event.message),
         )
+        # Retention by rowid, not by id: with more than one robot, "id not in
+        # the newest 5000 ids" would delete a second robot's rows whenever
+        # their ids happened to fall outside the window.
         await self.db.execute(
-            "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 5000)"
+            "DELETE FROM events WHERE rowid NOT IN "
+            "(SELECT rowid FROM events ORDER BY id DESC LIMIT 5000)"
         )
         await self.db.commit()
 
@@ -251,12 +361,71 @@ class Database:
         out["channels"] = json.loads(out["channels"])
         return out
 
-    async def get_recording_samples(self, recording_id: int) -> list[dict[str, Any]]:
+    async def get_recording_samples(self, recording_id: int,
+                                    kinds: list[str] | None = None,
+                                    after_id: int = 0,
+                                    limit: int = SAMPLE_PAGE) -> list[dict[str, Any]]:
+        """One page of samples, oldest first.
+
+        Keyset pagination on the sample id rather than OFFSET: offsets re-scan
+        everything before them, which turns a walk over a large recording into
+        quadratic work. `kinds` pushes the channel filter into SQL, so a replay
+        that only draws pose and path never materializes the lidar scans that
+        dominate a recording's size.
+        """
+        sql = ("SELECT id, ts, kind, data FROM recording_samples "
+               "WHERE recording_id = ? AND id > ?")
+        params: list[Any] = [recording_id, after_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        sql += " ORDER BY id LIMIT ?"
+        params.append(limit)
+        async with self.db.execute(sql, tuple(params)) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def iter_recording_samples(self, recording_id: int,
+                                     kinds: list[str] | None = None,
+                                     page: int = SAMPLE_PAGE) -> AsyncIterator[dict[str, Any]]:
+        """Every sample, one page at a time. Yields to the event loop between
+        pages, so exporting a large recording does not block telemetry."""
+        after_id = 0
+        while True:
+            rows = await self.get_recording_samples(recording_id, kinds, after_id, page)
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            after_id = rows[-1]["id"]
+            if len(rows) < page:
+                return
+
+    async def count_recording_samples(self, recording_id: int,
+                                      kinds: list[str] | None = None) -> int:
+        sql = "SELECT COUNT(*) FROM recording_samples WHERE recording_id = ?"
+        params: list[Any] = [recording_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        async with self.db.execute(sql, tuple(params)) as cur:
+            return int((await cur.fetchone())[0])
+
+    async def recording_sample_kinds(self, recording_id: int) -> list[str]:
+        """Which channels this recording actually holds samples for."""
         async with self.db.execute(
-            "SELECT ts, kind, data FROM recording_samples WHERE recording_id = ? ORDER BY id",
+            "SELECT DISTINCT kind FROM recording_samples WHERE recording_id = ?",
             (recording_id,)
         ) as cur:
-            return [dict(row) for row in await cur.fetchall()]
+            return sorted(row[0] for row in await cur.fetchall())
+
+    async def first_sample_ts(self, recording_id: int) -> str | None:
+        """The recording's own time origin, without reading every sample."""
+        async with self.db.execute(
+            "SELECT MIN(ts) FROM recording_samples WHERE recording_id = ?",
+            (recording_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
     async def delete_recording(self, recording_id: int) -> bool:
         await self.db.execute("DELETE FROM recording_samples WHERE recording_id = ?", (recording_id,))

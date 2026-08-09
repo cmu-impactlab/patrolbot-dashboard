@@ -26,6 +26,13 @@ ros2_ws/log/
 .DS_Store
 infrastructure/nginx/certs/
 infrastructure/.env
-docs/
-/dashboard-audit.txt
+
+# Generated documentation output only. Prose under docs/ is tracked: a blanket
+# ignore hid every new architecture note from git status.
+docs/_build/
+docs/site/
+
+# Local working notes and audit reports. Never tracked — they go stale against
+# the code, and the issue tracker is where status lives.
 audit/
+/dashboard-audit.txt

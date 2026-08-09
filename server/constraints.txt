@@ -1,0 +1,49 @@
+# Resolved runtime dependency set for the production server image.
+#
+# pyproject.toml says what the server *needs* (open lower bounds, so a fresh
+# checkout picks up fixes). This file says what the image actually *ships*, so
+# two builds a month apart are the same build and a broken upstream release
+# cannot arrive unnoticed between them.
+#
+# Scope is deliberate: production runtime only. The CI test matrix installs
+# unconstrained across Python 3.11-3.14 on purpose — that is the early warning
+# that an upstream release breaks us, and pinning it would silence exactly the
+# signal it exists to provide. What is pinned here is package *versions*: the
+# base image tag is mutable, wheels are not hash-pinned, and the setuptools
+# build backend resolves outside constraints because pip build isolation does
+# not read them. See the README for why that line was drawn there.
+#
+# Regenerate (from the repository root, in the same image the Dockerfile uses):
+#
+#   docker run --rm -v "$PWD:/repo:ro" python:3.12-slim bash -c '
+#     cp -r /repo/server /tmp/server && rm -rf /tmp/server/*.egg-info
+#     pip install --quiet --no-cache-dir /tmp/server
+#     pip freeze --exclude-editable | grep -viE "^patrolbot" | sort'
+#
+# Review the diff before committing it: an unexplained jump is the thing this
+# file exists to make visible. scripts/check-constraints.sh fails when the
+# resolved set and this file disagree.
+PyYAML==6.0.3
+aiosqlite==0.22.1
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+click==8.4.2
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.18
+pydantic-settings==2.15.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dotenv==1.2.2
+starlette==1.6.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+uvicorn==0.52.1
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.0.1

@@ -6,6 +6,14 @@
  * same rules on every request and is the actual authorization. A control is
  * greyed out with its reason rather than hidden, so an operator can tell the
  * difference between "this robot can't do that" and "not yet".
+ *
+ * One rule is deliberately NOT mirrored: the server also refuses when it has
+ * not *received* a base_state or pose recently (gates.MAX_RECEIPT_AGE_S), which
+ * catches a robot whose telemetry froze while its heartbeat kept beating. That
+ * needs per-slice receipt times and a ticker to re-evaluate as time passes with
+ * no new frames, neither of which this store has. The consequence is bounded
+ * and in the safe direction: the button stays live for a few seconds longer
+ * than it should, and pressing it returns the server's refusal sentence.
  */
 import type { BaseStateData, CommandType, PoseData } from "../types/protocol";
 
@@ -80,11 +88,12 @@ export function isCharging(facts: StateFacts): boolean {
 }
 
 export function isOnDock(facts: StateFacts): boolean {
-  // Once present, the SBC observer supersedes raw charge_state. That raw
-  // signal can re-latch after the robot has proved it is physically clear.
-  if (facts.dockStateValid !== null) {
-    return facts.dockStateValid
-      && DOCK_OBSERVER_DOCKED.has((facts.dockState ?? "").trim().toUpperCase());
+  // A usable SBC observer supersedes raw charge_state: that raw signal can
+  // re-latch after the robot has proved it is physically clear. An observer
+  // reporting itself invalid answers nothing, so it falls back to charge_state
+  // rather than to "not docked".
+  if (facts.dockStateValid) {
+    return DOCK_OBSERVER_DOCKED.has((facts.dockState ?? "").trim().toUpperCase());
   }
   return ON_DOCK_STATES.has(facts.chargeState.trim().toLowerCase());
 }
@@ -96,7 +105,7 @@ export function telemetryFresh(facts: StateFacts): boolean {
 function hardwareReason(facts: StateFacts): string | null {
   if (!facts.online) return "The robot is not connected right now.";
   if (!telemetryFresh(facts)) {
-    return "The robot's hardware readings are stale — wait for fresh data before changing charging or motor power.";
+    return "The robot's hardware readings are stale — wait for fresh data before commanding the robot.";
   }
   if (!facts.hardwareStateValid) return "The robot's drive base is not reporting valid data.";
   if (facts.faultFlags) {
@@ -162,24 +171,9 @@ export function undockReason(facts: StateFacts): string | null {
   return stationaryReason(facts);
 }
 
-/** Drive to the charging dock and charge. Needs to navigate there, so unlike
- *  undocking it does require the robot to know where it is. */
-export function dockReason(facts: StateFacts): string | null {
-  const reason = hardwareReason(facts);
-  if (reason !== null) return reason;
-  if (!facts.capabilities.includes("dock")) {
-    return "Automatic docking is not commissioned on this robot yet — drive it onto the dock by hand.";
-  }
-  if (isOnDock(facts) && isCharging(facts)) return "The robot is already charging.";
-  if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
-  if (!facts.localized) return "The robot does not know where it is. Set its location first.";
-  return null;
-}
-
 const GATES: Partial<Record<CommandType, (facts: StateFacts) => string | null>> = {
   charge_release: chargeReleaseReason,
   motor_enable: motorEnableReason,
-  dock: dockReason,
   undock: undockReason,
 };
 
@@ -188,18 +182,13 @@ export function rejectionReason(command: CommandType, facts: StateFacts): string
 }
 
 /**
- * The single dock control is a toggle: on the charger it offers Undock,
- * anywhere else it offers Dock. One button, and its meaning is always the
- * opposite of what the robot is currently doing.
+ * Is there anything to undock from? There is no matching Dock control: the
+ * robot has no automatic dock-in path, so it is driven onto its charger by
+ * hand. The button appears only when the robot is on the dock.
  */
-export function dockAction(facts: StateFacts): "dock" | "undock" {
-  if (facts.undockActive || isOnDock(facts)) return "undock";
-  // Invalid observer data is never enough to authorize motion, but the raw
-  // charge signal still picks the least-surprising label: show a disabled
-  // Undock control, with the observer error, to a robot visibly on charge.
-  if (facts.dockStateValid === false
-      && ON_DOCK_STATES.has(facts.chargeState.trim().toLowerCase())) {
-    return "undock";
-  }
-  return "dock";
+export function showsUndock(facts: StateFacts): boolean {
+  // isOnDock already falls back to the raw charge signal when the observer is
+  // unusable, so a robot visibly on charge behind a broken observer still gets
+  // the control — disabled, carrying the observer error.
+  return facts.undockActive || isOnDock(facts);
 }

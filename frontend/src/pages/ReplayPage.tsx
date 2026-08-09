@@ -9,6 +9,7 @@ import {
 } from "../stores/replayStore";
 import { useUiStore } from "../stores/uiStore";
 import { ReplayMap } from "../widgets/LiveMapWidget/ReplayMap";
+import { DashboardTourButton } from "../components/DashboardTourButton";
 
 /** SQLite datetime('now') → parseable ISO ("YYYY-MM-DD HH:MM:SS" is UTC). */
 function iso(sqlite: string): string {
@@ -215,6 +216,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
         <a className="btn" href={`/api/recordings/${recording.id}/export.zip`} download>
           <Download size={14} /> Download data
         </a>
+        <DashboardTourButton replay />
       </header>
 
       <div className="replay-body">
