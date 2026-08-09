@@ -178,7 +178,11 @@ def normalize_base_state(state: Any) -> dict:
     charge = CHARGE_STATE_NAMES.get(int(state.charge_state), f"state_{int(state.charge_state)}")
     if not getattr(state, "charge_state_valid", True):
         charge = "unknown"
-    bumpers_valid = getattr(state, "bumpers_valid", True)
+    # None means the message type has no such field at all. It is not a claim
+    # that the readings are good — downstream requires an explicit True before
+    # it will let the robot back off a dock on the strength of them.
+    raw_bumpers_valid = getattr(state, "bumpers_valid", None)
+    bumpers_valid = None if raw_bumpers_valid is None else bool(raw_bumpers_valid)
     # The SBC-owned dock observer is authoritative for physical dock contact.
     # charge_state is only one noisy input to it and can re-latch after the
     # robot has proved that it is clear. Keep both signals in the dashboard
@@ -197,8 +201,13 @@ def normalize_base_state(state: Any) -> dict:
         "estop_pressed": bool(state.estop_pressed),
         "fault_flags": int(state.fault_flags),
         "stall_value": int(state.stall_value),
-        "bumpers_front": bool(state.front_bumper_pressed) if bumpers_valid else False,
-        "bumpers_rear": bool(state.rear_bumper_pressed) if bumpers_valid else False,
+        # Forward the readings *and* whether they mean anything. Zeroing them
+        # on invalid data and dropping the flag told the dashboard "not
+        # pressed" for a bumper nothing could read — a safety sensor reporting
+        # all-clear from a controller that was switched off.
+        "bumpers_valid": bumpers_valid,
+        "bumpers_front": bool(state.front_bumper_pressed) if bumpers_valid is not False else False,
+        "bumpers_rear": bool(state.rear_bumper_pressed) if bumpers_valid is not False else False,
         "dock_state": dock_state,
         "dock_state_valid": dock_state_valid,
         "dock_phase": int(getattr(state, "dock_phase", 0)),

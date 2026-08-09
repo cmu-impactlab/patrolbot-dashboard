@@ -29,6 +29,7 @@ function baseState(overrides: Partial<BaseStateData> = {}): BaseStateData {
     stall_value: 0,
     bumpers_front: false,
     bumpers_rear: false,
+    bumpers_valid: true,
     ...overrides,
   };
 }
@@ -37,6 +38,10 @@ function setState(base: BaseStateData | null, pose: PoseData | null = PARKED,
                   capabilities: string[] = CAPS) {
   useTelemetryStore.setState({
     connection: { state: "online", last_seen: null },
+    // The controls read stale telemetry as absent, the way the server's gates
+    // do, so these fixtures have to say the frames just arrived.
+    baseStateAt: base === null ? null : performance.now(),
+    poseReceivedAt: pose === null ? 0 : performance.now(),
     baseState: base,
     pose,
     capabilities,

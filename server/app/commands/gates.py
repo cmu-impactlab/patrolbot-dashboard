@@ -73,6 +73,9 @@ class StateFacts:
     fault_flags: int = 0
     bumpers_front: bool = False
     bumpers_rear: bool = False
+    # Whether the two above mean anything. None is "the robot did not say",
+    # which older bridges do not; False is "it said they are meaningless".
+    bumpers_valid: bool | None = None
     dock_state: str | None = None
     dock_state_valid: bool | None = None
     undock_active: bool = False
@@ -144,6 +147,7 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
         facts.fault_flags = int(base_state.fault_flags)
         facts.bumpers_front = bool(base_state.bumpers_front)
         facts.bumpers_rear = bool(base_state.bumpers_rear)
+        facts.bumpers_valid = getattr(base_state, "bumpers_valid", None)
         facts.dock_state = getattr(base_state, "dock_state", None)
         facts.dock_state_valid = getattr(base_state, "dock_state_valid", None)
         facts.undock_active = bool(getattr(base_state, "undock_active", False))
@@ -292,6 +296,14 @@ def undock_reason(facts: StateFacts) -> str | None:
         return "The robot is not on its dock."
     if facts.estop_pressed:
         return "The emergency stop is pressed. Release it on the robot first."
+    if facts.bumpers_valid is not True:
+        # Backing off the dock is the one motion where the rear bumper is the
+        # only thing watching, so this needs the robot to say its readings are
+        # good — not merely to have not said they are bad. A robot that never
+        # reports the flag does not get the benefit of the doubt for motion.
+        return ("The robot cannot confirm its bumper readings, so it cannot "
+                "tell whether anything is behind it. Check the robot before "
+                "undocking.")
     if facts.bumpers_rear:
         return ("The rear bumper is pressed — clear whatever is behind the "
                 "robot before backing it off the dock.")

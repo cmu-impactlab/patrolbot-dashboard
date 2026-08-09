@@ -4,6 +4,7 @@ import {
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { factsFrom, showsUndock, undockReason } from "../lib/dockGates";
+import { useIsFresh } from "../lib/freshness";
 
 const OUTCOME_COPY: Record<string, string> = {
   succeeded: "Done",
@@ -59,7 +60,13 @@ export function NavControlsWidget() {
   // onto the charger by hand. The disabled reason is the same sentence the
   // server would reject with, so the UI never silently disagrees with the
   // robot.
-  const facts = factsFrom(connection.state, baseState, pose, capabilities,
+  // Stale slices are handed to the gate mirror as absent, which is how the
+  // server's own gates read them: they judge receipt age, so a browser working
+  // from a frozen frame would otherwise offer a control the server refuses.
+  const baseFresh = useIsFresh(useTelemetryStore((state) => state.baseStateAt));
+  const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
+  const facts = factsFrom(connection.state, baseFresh ? baseState : null,
+    poseFresh ? pose : null, capabilities,
     active?.command === "navigate_to_pose");
   const onDock = showsUndock(facts);
   const undockBlockedReason = undockReason(facts);

@@ -25,6 +25,7 @@ function facts(overrides: Partial<StateFacts> = {}): StateFacts {
     estopPressed: false,
     faultFlags: 0,
     bumpersRear: false,
+    bumpersValid: true,
     dockState: null,
     dockStateValid: null,
     undockActive: false,
@@ -222,5 +223,18 @@ describe("when the undock button appears", () => {
       dockStateValid: true,
       undockActive: true,
     }))).toBe(true);
+  });
+});
+
+
+describe("bumper readings the robot cannot make", () => {
+  it("needs the robot to vouch for its bumpers before undocking", () => {
+    // Both ways of not knowing: told they are meaningless, and never told.
+    // Silence is not a claim that a safety sensor works.
+    for (const unproven of [false, null] as const) {
+      expect(undockReason(facts({ bumpersValid: unproven })))
+        .toContain("cannot confirm its bumper readings");
+    }
+    expect(undockReason(facts({ bumpersValid: true }))).toBeNull();
   });
 });

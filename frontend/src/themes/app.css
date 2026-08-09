@@ -1117,6 +1117,16 @@ a { color: inherit; }
   z-index: 6;
 }
 
+.map-meta-stale {
+  left: 8px;
+  right: 8px;
+  bottom: 34px;
+  max-width: 34ch;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn-bg) 92%, transparent);
+  border-color: var(--warn);
+}
+
 .map-empty {
   height: 100%;
   display: grid;

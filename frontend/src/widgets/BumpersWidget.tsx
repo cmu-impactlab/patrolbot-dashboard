@@ -1,4 +1,5 @@
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { useIsFresh } from "../lib/freshness";
 import {
   ROBOT_FOOTPRINT_M, ROBOT_LENGTH_M, WHEEL_HALF_LENGTH_M, WHEEL_Y_M,
 } from "../lib/robotGeometry";
@@ -61,20 +62,25 @@ const REAR_PANELS = [
   [P.rearL, P.sideLB],
 ] as const;
 
-function PanelGroup({ panels, pressed }: {
+function PanelGroup({ panels, pressed, known }: {
   panels: typeof FRONT_PANELS | typeof REAR_PANELS;
   pressed: boolean;
+  known: boolean;
 }) {
+  // Unknown is drawn dashed rather than as an unpressed panel. A solid grey
+  // bumper is a claim that nothing is touching it.
   return (
-    <g className={pressed ? "bumper-hit" : ""}>
+    <g className={known && pressed ? "bumper-hit" : ""}>
       {panels.map(([a, b], index) => (
         <path
           key={index}
           d={`M ${pt(a, PANEL_SCALE)} L ${pt(b, PANEL_SCALE)}`}
           fill="none"
-          stroke={pressed ? "var(--danger)" : "var(--muted-bg)"}
+          stroke={!known ? "var(--text-faint)" : pressed ? "var(--danger)" : "var(--muted-bg)"}
           strokeWidth="9"
           strokeLinecap="round"
+          strokeDasharray={known ? undefined : "3 11"}
+          opacity={known ? undefined : 0.7}
         />
       ))}
     </g>
@@ -83,8 +89,14 @@ function PanelGroup({ panels, pressed }: {
 
 export function BumpersWidget() {
   const baseState = useTelemetryStore((state) => state.baseState);
-  const front = baseState?.bumpers_front ?? false;
-  const rear = baseState?.bumpers_rear ?? false;
+  const fresh = useIsFresh(useTelemetryStore((state) => state.baseStateAt));
+  // Two ways to not know: the robot says the readings are meaningless, or it
+  // has stopped sending them. "Clear" is an all-clear from a safety sensor and
+  // needs the robot to be currently saying so — an explicit bumpers_valid on a
+  // frame that arrived recently. Silence is not consent.
+  const known = baseState != null && baseState.bumpers_valid === true && fresh;
+  const front = known && (baseState?.bumpers_front ?? false);
+  const rear = known && (baseState?.bumpers_rear ?? false);
 
   return (
     <div className="bumpers-widget">
@@ -92,8 +104,8 @@ export function BumpersWidget() {
            aria-label="Robot bumper diagram (top view)">
         <text x="100" y="18" textAnchor="middle" className="bumper-label">FRONT</text>
 
-        <PanelGroup panels={FRONT_PANELS} pressed={front} />
-        <PanelGroup panels={REAR_PANELS} pressed={rear} />
+        <PanelGroup panels={FRONT_PANELS} pressed={front} known={known} />
+        <PanelGroup panels={REAR_PANELS} pressed={rear} known={known} />
 
         {/* Octagonal chassis (510 mm front-to-back x 426 mm across, FRONT up) */}
         <path d={BODY} fill="var(--surface-2)" stroke="var(--border)" strokeWidth="2" />
@@ -117,16 +129,23 @@ export function BumpersWidget() {
         <div className="kv">
           <span className="k">Front bumper</span>
           <span className="v" style={{ color: front ? "var(--danger)" : undefined }}>
-            {baseState ? (front ? "PRESSED" : "Clear") : "—"}
+            {!baseState ? "—" : !known ? "Unknown" : front ? "PRESSED" : "Clear"}
           </span>
         </div>
         <div className="kv">
           <span className="k">Rear bumper</span>
           <span className="v" style={{ color: rear ? "var(--danger)" : undefined }}>
-            {baseState ? (rear ? "PRESSED" : "Clear") : "—"}
+            {!baseState ? "—" : !known ? "Unknown" : rear ? "PRESSED" : "Clear"}
           </span>
         </div>
       </div>
+      {baseState && !known && (
+        <p className="subtext">
+          The dashboard cannot confirm the robot's bumper readings right now,
+          so it does not know whether anything is touching them. Check around
+          the robot yourself before moving it.
+        </p>
+      )}
       {(front || rear) && (
         <p className="subtext" style={{ color: "var(--danger)", fontWeight: 600 }}>
           The robot touched something. Check that its path is clear before continuing.

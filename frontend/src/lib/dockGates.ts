@@ -35,6 +35,8 @@ export interface StateFacts {
   estopPressed: boolean;
   faultFlags: number;
   bumpersRear: boolean;
+  /** Whether bumpersRear means anything; null when the robot did not say. */
+  bumpersValid: boolean | null;
   dockState: string | null;
   dockStateValid: boolean | null;
   undockActive: boolean;
@@ -69,6 +71,7 @@ export function factsFrom(
     estopPressed: baseState?.estop_pressed ?? false,
     faultFlags: baseState?.fault_flags ?? 0,
     bumpersRear: baseState?.bumpers_rear ?? false,
+    bumpersValid: baseState?.bumpers_valid ?? null,
     dockState: baseState?.dock_state ?? null,
     dockStateValid: baseState?.dock_state_valid ?? null,
     undockActive: baseState?.undock_active ?? false,
@@ -162,6 +165,9 @@ export function undockReason(facts: StateFacts): string | null {
   if (facts.undockActive) return "The robot is already undocking.";
   if (!isOnDock(facts)) return "The robot is not on its dock.";
   if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
+  if (facts.bumpersValid !== true) {
+    return "The robot cannot confirm its bumper readings, so it cannot tell whether anything is behind it. Check the robot before undocking.";
+  }
   if (facts.bumpersRear) {
     return "The rear bumper is pressed — clear whatever is behind the robot before backing it off the dock.";
   }

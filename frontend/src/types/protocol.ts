@@ -87,6 +87,9 @@ export interface BaseStateData {
   stall_value: number;
   bumpers_front: boolean;
   bumpers_rear: boolean;
+  /** Whether the two above mean anything. Absent on recordings and robots
+   *  from before the flag was forwarded. */
+  bumpers_valid?: boolean | null;
   /** Authoritative SBC dock observer. charge_state can remain latched after
    * physical departure, so a valid CLEAR_CONFIRMED wins over it. Optional for
    * recordings and robots from before the observer was added. */
@@ -192,6 +195,9 @@ export interface SnapshotData {
   last_known_pose?: GoalData | null;
   capabilities?: string[];
   events: EventData[];
+  /** Seconds since the server received each slice, so a browser joining late
+   *  can age them from when they actually arrived rather than from now. */
+  slice_ages_s?: Record<string, number | null>;
 }
 
 export type CommandType =

@@ -259,7 +259,11 @@ class RobotState:
                     "The dashboard stopped receiving data from the robot.",
                 ))
             elif state == "online" and self.connection in ("offline", "stale"):
-                events.append(self.add_event("info", "Robot connected", "The robot is sending live data."))
+                # The heartbeat is the Pi's, so this says the Pi is reachable —
+                # not that the robot behind it is reporting anything.
+                events.append(self.add_event(
+                    "info", "Robot connected",
+                    "The dashboard is connected to the robot's onboard computer."))
             self.connection = state
         return events
 
@@ -276,6 +280,9 @@ class RobotState:
             path=self.path.data,
             recording=self.recording,
             stalled=self._stalled,
+            base_state_age_s=self.base_state.age(),
+            diagnostics_age_s=self.diagnostics.age(),
+            pose_age_s=self.pose.age(),
         )
         health = derive_health(
             connection=self.connection,
@@ -285,6 +292,14 @@ class RobotState:
             pose=self.pose.data,
             resources=self.resources.data,
             lidar_age_s=self.lidar.age(),
+            # Receipt ages, not the ages the robot reports about itself: the
+            # point is to notice a slice that stopped arriving, and a payload
+            # that stopped arriving cannot tell us it did.
+            base_state_age_s=self.base_state.age(),
+            battery_age_s=self.battery.age(),
+            diagnostics_age_s=self.diagnostics.age(),
+            pose_age_s=self.pose.age(),
+            resources_age_s=self.resources.age(),
             battery_low_percent=self.settings.battery_low_percent,
             battery_critical_percent=self.settings.battery_critical_percent,
         )
@@ -328,4 +343,12 @@ class RobotState:
             path=self.path.data,
             capabilities=list(self.capabilities),
             events=list(self.events)[:100],
+            # Only the slices a browser ages for itself. Lidar and diagnostics
+            # are judged server-side and carry no payload here worth timing.
+            slice_ages_s={
+                "pose": self.pose.age(),
+                "base_state": self.base_state.age(),
+                "battery": self.battery.age(),
+                "resources": self.resources.age(),
+            },
         )

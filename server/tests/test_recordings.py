@@ -24,6 +24,18 @@ def hello_frame() -> str:
     })
 
 
+def base_state_frame(seq: int) -> str:
+    """A healthy drive base. The status pill refuses to characterise a robot it
+    has no current drive-base data for, so a robot that only says hello reads
+    as needing attention rather than as ready/recording."""
+    return encode("telemetry.base_state", "patrolbot-01", seq, {
+        "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+        "hardware_state_valid": True, "charge_state": "idle", "motors_enabled": True,
+        "estop_pressed": False, "fault_flags": 0, "stall_value": 0,
+        "bumpers_front": False, "bumpers_rear": False, "bumpers_valid": True,
+    })
+
+
 def pose_frame(seq: int, x: float) -> str:
     return encode("telemetry.pose", "patrolbot-01", seq, {
         "x": x, "y": 0.0, "yaw": 0.0, "linear_velocity": 0.3, "angular_velocity": 0.0,
@@ -37,6 +49,7 @@ def test_recording_lifecycle(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
+        robot.send_text(base_state_frame(1))
 
         started = client.post("/api/recordings/start", json={"name": "Patrol A"})
         assert started.status_code == 200

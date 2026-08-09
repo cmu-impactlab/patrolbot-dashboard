@@ -3,13 +3,32 @@ import { useBatteryHistory } from "../api/queries";
 import { formatMinutes } from "../lib/format";
 import { ESTIMATE_COPY } from "../lib/plainLanguage";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { MAX_BATTERY_AGE_MS, useIsFresh } from "../lib/freshness";
 
 export function BatteryWidget() {
   const battery = useTelemetryStore((state) => state.battery);
+  const batteryFresh = useIsFresh(
+    useTelemetryStore((state) => state.batteryAt), MAX_BATTERY_AGE_MS);
   const history = useBatteryHistory(120);
 
   if (!battery) {
     return <p className="subtext">No battery data yet.</p>;
+  }
+
+  if (!batteryFresh) {
+    // The robot's battery stops being reported when its drive base goes off,
+    // while the Pi keeps the socket alive. Showing the last percentage as the
+    // current charge is how an operator plans a task around a battery nobody
+    // has heard from.
+    return (
+      <p className="subtext">
+        The robot has stopped reporting its battery. The last reading was{" "}
+        {battery.percentage != null
+          ? `${Math.round(battery.percentage)}%`
+          : `${battery.voltage.toFixed(1)} V`}
+        , but it is too old to rely on.
+      </p>
+    );
   }
 
   const percentage = battery.percentage;

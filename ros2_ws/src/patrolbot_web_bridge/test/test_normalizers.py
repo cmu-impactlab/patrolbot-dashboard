@@ -275,3 +275,36 @@ def test_map_signature_detects_change():
     different = normalizers.map_signature(grid([100, 100, 100, 0]))
     assert same_a == same_b
     assert same_a != different
+
+
+def test_bumper_validity_reaches_the_dashboard():
+    """The drive base zeroes its bumper readings when it cannot read them. The
+    dashboard used to receive only the zeros, so a bumper nothing could read
+    was indistinguishable from a bumper with nothing touching it."""
+    class State:
+        session_generation = 1
+        link_connected = False
+        telemetry_age = 270045.0
+        hardware_state_valid = False
+        charge_state = 2
+        charge_state_valid = False
+        motors_enabled = True
+        estop_pressed = False
+        fault_flags = 0
+        stall_value = 0
+        bumpers_valid = False
+        front_bumper_pressed = False
+        rear_bumper_pressed = False
+        dock_state = "UNKNOWN"
+        dock_state_valid = False
+
+    payload = normalizers.normalize_base_state(State())
+    assert payload["bumpers_valid"] is False
+
+    class Readable(State):
+        bumpers_valid = True
+        rear_bumper_pressed = True
+
+    payload = normalizers.normalize_base_state(Readable())
+    assert payload["bumpers_valid"] is True
+    assert payload["bumpers_rear"] is True
