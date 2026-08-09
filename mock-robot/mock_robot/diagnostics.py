@@ -61,6 +61,10 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
         "estop_pressed": estop,
         "fault_flags": 0,
         "stall_value": 0,
+        # The simulated drive base can always read its bumpers. Saying so
+        # explicitly matters: undock requires a robot to confirm the readings
+        # are good, not merely to stay silent about them.
+        "bumpers_valid": True,
         "bumpers_front": bumper_front,
         "bumpers_rear": bumper_rear,
         "dock_state": dock_state,

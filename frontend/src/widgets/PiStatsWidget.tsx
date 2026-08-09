@@ -1,6 +1,7 @@
 import { Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
 import { useEffect, useState } from "react";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { MAX_RESOURCES_AGE_MS, useIsFresh } from "../lib/freshness";
 
 function useTelemetryRate(): number {
   const [rate, setRate] = useState(0);
@@ -21,9 +22,22 @@ export function PiStatsWidget() {
   const history = useTelemetryStore((state) => state.resourceHistory);
   const wsConnected = useTelemetryStore((state) => state.wsConnected);
   const rate = useTelemetryRate();
+  const fresh = useIsFresh(
+    useTelemetryStore((state) => state.resourcesAt), MAX_RESOURCES_AGE_MS);
 
   if (!resources) {
     return <p className="subtext">No data from the robot's onboard computer yet.</p>;
+  }
+
+  if (!fresh) {
+    // CPU load and temperature are statements about right now. Left on screen
+    // after the reports stop, they are a picture of a moment that has passed.
+    return (
+      <p className="subtext">
+        The robot's onboard computer has stopped reporting itself. The last
+        readings are too old to rely on.
+      </p>
+    );
   }
 
   return (

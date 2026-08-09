@@ -31,7 +31,7 @@ def facts(**overrides) -> gates.StateFacts:
                 base_state_age=0.1, pose_age=0.1,
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
-                bumpers_front=False, bumpers_rear=False, localized=True,
+                bumpers_front=False, bumpers_rear=False, bumpers_valid=True, localized=True,
                 stationary=True, capabilities=ALL_CAPS)
     return gates.StateFacts(**{**base, **overrides})
 
@@ -115,7 +115,8 @@ def base_state_frame(sequence: int, **overrides) -> str:
     data = {"session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
-            "stall_value": 0, "bumpers_front": False, "bumpers_rear": False}
+            "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
+            "bumpers_valid": True}
     data.update(overrides)
     return encode("telemetry.base_state", "patrolbot-01", sequence, data)
 

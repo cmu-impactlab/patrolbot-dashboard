@@ -115,3 +115,53 @@ describe("telemetryStore", () => {
     expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
   });
 });
+
+describe("snapshot freshness", () => {
+  it("backdates hydrated slices instead of timing them from arrival", () => {
+    // A snapshot catches up a browser that just connected, and its values can
+    // be arbitrarily old. Timing them from arrival showed days-old readings as
+    // current for the first 15 seconds after loading the page.
+    const store = useTelemetryStore.getState();
+    store.handleFrame({
+      version: 1,
+      type: "server.snapshot",
+      robot_id: "patrolbot-01",
+      sequence: 1,
+      timestamp: new Date().toISOString(),
+      data: {
+        connection: { state: "online", last_seen: null },
+        robot_status: { status: "ready", detail: "" },
+        system_health: { overall: "healthy", subsystems: [] },
+        map_version: 1,
+        base_state: { bumpers_valid: true } as never,
+        events: [],
+        slice_ages_s: { base_state: 270_000, pose: 270_000 },
+      },
+    } as never);
+
+    const { baseStateAt, poseReceivedAt } = useTelemetryStore.getState();
+    expect(baseStateAt).not.toBeNull();
+    // 270 000 s ago, not "now".
+    expect(performance.now() - (baseStateAt as number)).toBeGreaterThan(1e8);
+    expect(performance.now() - poseReceivedAt).toBeGreaterThan(1e8);
+  });
+
+  it("treats a slice the server never received as never received", () => {
+    useTelemetryStore.getState().handleFrame({
+      version: 1,
+      type: "server.snapshot",
+      robot_id: "patrolbot-01",
+      sequence: 2,
+      timestamp: new Date().toISOString(),
+      data: {
+        connection: { state: "online", last_seen: null },
+        robot_status: { status: "ready", detail: "" },
+        system_health: { overall: "healthy", subsystems: [] },
+        map_version: 1,
+        events: [],
+        slice_ages_s: { base_state: null },
+      },
+    } as never);
+    expect(useTelemetryStore.getState().baseStateAt).toBeNull();
+  });
+});

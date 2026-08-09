@@ -101,6 +101,11 @@ class BaseStateData(BaseModel):
     stall_value: int
     bumpers_front: bool
     bumpers_rear: bool
+    # Whether the two above mean anything. Optional, because recordings and
+    # robots from before the flag exists do not send it — but absence is not a
+    # claim that the readings are good: the UI shows Unknown and the undock
+    # gate refuses without an explicit True.
+    bumpers_valid: bool | None = None
     # The SBC dock observer is the source of truth for physical clearance.
     # These remain optional so a dashboard can still read recordings and
     # fixtures produced before that observer was commissioned.
@@ -270,6 +275,12 @@ class SnapshotData(BaseModel):
     last_known_pose: GoalData | None = None
     capabilities: list[str] = Field(default_factory=list)
     events: list[EventData] = Field(default_factory=list)
+    # How long ago the server received each slice above, in seconds. A snapshot
+    # is a catch-up for a browser that just connected, and the values in it can
+    # be arbitrarily old — without these the browser would time them from its
+    # own arrival and show days-old readings as current for the first 15
+    # seconds. None means the slice was never received.
+    slice_ages_s: dict[str, float | None] = Field(default_factory=dict)
 
 
 TYPE_REGISTRY: dict[str, type[BaseModel]] = {

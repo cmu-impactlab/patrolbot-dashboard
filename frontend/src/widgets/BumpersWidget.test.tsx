@@ -8,6 +8,7 @@ import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { BumpersWidget } from "./BumpersWidget";
 import { ROBOT_LENGTH_M, ROBOT_WIDTH_M } from "../lib/robotGeometry";
+import { useTelemetryStore } from "../stores/telemetryStore";
 
 const VIEWBOX_W = 200;
 const VIEWBOX_H = 240;
@@ -93,4 +94,76 @@ describe("BumpersWidget robot diagram", () => {
     const halfWidth = Math.max(...points.map(([x]) => x)) - VIEWBOX_W / 2;
     expect(Math.abs(centres[1] - VIEWBOX_W / 2)).toBeCloseTo(halfWidth, 6);
   });
+});
+
+describe("bumper readings the robot cannot make", () => {
+  afterEach(cleanup);
+
+  function setBaseState(overrides: Record<string, unknown> | null) {
+    useTelemetryStore.setState({
+      connection: { state: "online", last_seen: null },
+      baseStateAt: overrides === null ? null : performance.now(),
+      baseState: overrides === null ? null : ({
+        session_generation: 1,
+        link_connected: true,
+        telemetry_age: 0.1,
+        hardware_state_valid: true,
+        charge_state: "not_charging",
+        motors_enabled: true,
+        estop_pressed: false,
+        fault_flags: 0,
+        stall_value: 0,
+        bumpers_front: false,
+        bumpers_rear: false,
+        ...overrides,
+      } as never),
+    });
+  }
+
+  it("says Unknown when the robot never vouches for the readings", () => {
+    // Silence is not an all-clear from a safety sensor.
+    setBaseState({});
+    const { getAllByText, queryByText } = render(<BumpersWidget />);
+    expect(getAllByText("Unknown")).toHaveLength(2);
+    expect(queryByText("Clear")).toBeNull();
+  });
+
+  it("says Unknown once the drive base stops reporting", () => {
+    // The Pi keeps the socket alive with the drive base switched off, so a
+    // valid "clear" frame would otherwise stay on screen indefinitely.
+    setBaseState({ bumpers_valid: true });
+    useTelemetryStore.setState({ baseStateAt: performance.now() - 60_000 });
+    const { getAllByText } = render(<BumpersWidget />);
+    expect(getAllByText("Unknown")).toHaveLength(2);
+  });
+
+  it("says Unknown rather than Clear when the readings are invalid", () => {
+    // The drive base zeroes its bumpers when it cannot read them. Rendering
+    // that as "Clear" is an all-clear from a sensor nothing could read.
+    setBaseState({ bumpers_valid: false });
+    const { getAllByText, queryByText } = render(<BumpersWidget />);
+    expect(getAllByText("Unknown")).toHaveLength(2);
+    expect(queryByText("Clear")).toBeNull();
+  });
+
+  it("explains that the operator has to look themselves", () => {
+    setBaseState({ bumpers_valid: false });
+    const { getByText } = render(<BumpersWidget />);
+    expect(getByText(/cannot confirm the robot's bumper readings/)).toBeTruthy();
+  });
+
+  it("does not show a pressed bumper as pressed when it cannot be read", () => {
+    setBaseState({ bumpers_valid: false, bumpers_rear: true });
+    const { queryByText, getAllByText } = render(<BumpersWidget />);
+    expect(queryByText("PRESSED")).toBeNull();
+    expect(getAllByText("Unknown")).toHaveLength(2);
+  });
+
+  it("still reads Clear for a robot currently vouching for them", () => {
+    setBaseState({ bumpers_valid: true });
+    const { getAllByText } = render(<BumpersWidget />);
+    expect(getAllByText("Clear")).toHaveLength(2);
+  });
+
+
 });

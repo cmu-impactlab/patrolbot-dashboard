@@ -55,6 +55,17 @@ export interface TelemetryState {
   batteryHistory: BatterySample[];
   frameCount: number;
   lastFrameAt: string | null;
+  /**
+   * When the last drive-base frame arrived, by the browser's clock. `lastFrameAt`
+   * moves on *any* frame, so with the drive base off the Pi's own heartbeat and
+   * resources kept it current while every drive-base fact went stale — and the
+   * widgets showing those facts had no way to tell.
+   */
+  baseStateAt: number | null;
+  /** Same, for the battery slice. */
+  batteryAt: number | null;
+  /** Same, for the robot computer's own resource reports. */
+  resourcesAt: number | null;
   /** Alert ids the user has read; read alerts move to the "Seen" section. */
   seenEventIds: number[];
   /** Robot's last-known pose persisted server-side when it last went offline. */
@@ -145,6 +156,9 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   batteryHistory: [],
   frameCount: 0,
   lastFrameAt: null,
+  baseStateAt: null,
+  batteryAt: null,
+  resourcesAt: null,
   seenEventIds: loadSeenIds(),
   lastKnownPose: null,
   poseSetThisSession: false,
@@ -189,6 +203,14 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
     switch (frame.type) {
       case "server.snapshot": {
         const data = frame.data as SnapshotData;
+        // A snapshot catches a late-joining browser up on values that may be
+        // arbitrarily old. Timing them from arrival would show days-old
+        // readings as current; the server sends how long ago it received each
+        // one, so they are backdated to when they actually arrived.
+        const receivedAt = (slice: string): number | null => {
+          const age = data.slice_ages_s?.[slice];
+          return age == null ? null : performance.now() - age * 1000;
+        };
         set({
           ...bump,
           connection: data.connection,
@@ -197,9 +219,13 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           pose: data.pose ?? null,
           battery: data.battery ?? null,
           baseState: data.base_state ?? null,
+          baseStateAt: receivedAt("base_state"),
           diagnostics: data.diagnostics ?? null,
           resources: data.resources ?? null,
           path: data.path ?? null,
+          poseReceivedAt: receivedAt("pose") ?? 0,
+          batteryAt: receivedAt("battery"),
+          resourcesAt: receivedAt("resources"),
           mapVersion: data.map_version,
           events: data.events,
           lastKnownPose: data.last_known_pose ?? null,
@@ -262,6 +288,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         set({
           ...bump,
           battery: frame.data,
+          batteryAt: performance.now(),
           batteryHistory: cap(
             get().batteryHistory,
             {
@@ -275,7 +302,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         });
         break;
       case "telemetry.base_state":
-        set({ ...bump, baseState: frame.data });
+        set({ ...bump, baseState: frame.data, baseStateAt: performance.now() });
         break;
       case "telemetry.diagnostics":
         set({ ...bump, diagnostics: frame.data });
@@ -283,6 +310,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
       case "telemetry.resources":
         set({
           ...bump,
+          resourcesAt: performance.now(),
           resources: frame.data,
           resourceHistory: cap(
             get().resourceHistory,

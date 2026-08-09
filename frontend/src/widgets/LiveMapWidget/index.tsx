@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMapQuery } from "../../api/queries";
 import { useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
+import { useIsFresh } from "../../lib/freshness";
 import { useUiStore, type MapLayers } from "../../stores/uiStore";
 import type { MapData } from "../../types/protocol";
 import {
@@ -296,6 +297,8 @@ export function LiveMapWidget() {
   const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
   const pickHoverRef = useRef<[number, number] | null>(null);
   const pickMode = useCommandStore((state) => state.pickMode);
+  const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
+  const hasPose = useTelemetryStore((state) => state.pose) !== null;
 
   const map = mapQuery.data ?? null;
 
@@ -494,6 +497,14 @@ export function LiveMapWidget() {
       <div className="map-meta">
         {map.name} · {map.resolution.toFixed(2)} m/cell · v{map.map_version}
       </div>
+      {!poseFresh && hasPose && (
+        // The marker is still drawn — where the robot last was is useful — but
+        // it must not be read as where the robot is.
+        <div className="map-meta map-meta-stale">
+          The robot has stopped reporting its position. The marker is its last
+          known place, not where it is now.
+        </div>
+      )}
     </div>
   );
 }
