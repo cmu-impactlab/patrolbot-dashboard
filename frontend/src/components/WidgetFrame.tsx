@@ -8,7 +8,7 @@ import {
   MoreVertical,
   X,
 } from "lucide-react";
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useLayoutStore } from "../stores/layoutStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
@@ -99,7 +99,9 @@ export function WidgetFrame({ id }: { id: string }) {
               The robot is offline — showing the last known data.
             </div>
           )}
-          <Component />
+          <Suspense fallback={null}>
+            <Component />
+          </Suspense>
         </div>
       )}
     </section>

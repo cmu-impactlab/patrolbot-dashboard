@@ -76,3 +76,7 @@ jobs:
         working-directory: frontend
       - run: npx vite build
         working-directory: frontend
+      # Guards what a browser must download before the dashboard is usable.
+      # Lazily loaded chunks are reported but not counted.
+      - run: npm run check-bundle
+        working-directory: frontend

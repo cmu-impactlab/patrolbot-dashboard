@@ -1,19 +1,29 @@
-import type { ComponentType } from "react";
+import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 import { AlertsWidget } from "./AlertsWidget";
-import { BatteryWidget } from "./BatteryWidget";
 import { BumpersWidget } from "./BumpersWidget";
 import { LiveMapWidget, MapSettings } from "./LiveMapWidget";
 import { NavControlsWidget } from "./NavControlsWidget";
-import { PiStatsWidget } from "./PiStatsWidget";
 import { RecordingsWidget } from "./RecordingsWidget";
 import { RobotStatusWidget } from "./RobotStatusWidget";
 import { SystemHealthWidget } from "./SystemHealthWidget";
+
+// The two charting widgets are the whole reason the charts chunk exists, and
+// it is the largest thing the dashboard downloads. Loading them lazily means
+// the map, controls and status widgets render without waiting for it, and a
+// layout without either one never fetches it at all. WidgetFrame provides the
+// Suspense boundary.
+const BatteryWidget = lazy(async () => ({
+  default: (await import("./BatteryWidget")).BatteryWidget,
+}));
+const PiStatsWidget = lazy(async () => ({
+  default: (await import("./PiStatsWidget")).PiStatsWidget,
+}));
 
 export interface WidgetDefinition {
   id: string;
   title: string;
   description: string;
-  component: ComponentType;
+  component: ComponentType | LazyExoticComponent<ComponentType>;
   /** Optional extra header control (e.g. the map's layer menu). */
   settings?: ComponentType;
   defaultSize: { w: number; h: number; minW?: number; minH?: number };

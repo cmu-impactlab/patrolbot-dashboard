@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useLayoutsQuery } from "./api/queries";
 import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
@@ -8,10 +8,17 @@ import { TourPrompt } from "./components/TourPrompt";
 import { TopBar } from "./components/TopBar";
 import { consumeTourUrl, shouldStartTourFromUrl } from "./lib/dashboardTour";
 import { replayIdFromUrl } from "./lib/replayTab";
-import { ReplayPage } from "./pages/ReplayPage";
 import { useLayoutStore, type SavedLayout } from "./stores/layoutStore";
 import { useUiStore } from "./stores/uiStore";
 import { useTelemetrySocket } from "./websocket/useTelemetrySocket";
+
+// Replay is a whole separate view, reached only by ?replay=<id>, and it brings
+// its own map renderer and playback store. Loading it lazily keeps all of that
+// out of the dashboard's initial download: an operator opening the dashboard to
+// watch a robot never pays for the replay viewer, and vice versa.
+const ReplayPage = lazy(async () => ({
+  default: (await import("./pages/ReplayPage")).ReplayPage,
+}));
 
 function Dashboard() {
   useTelemetrySocket();
@@ -55,7 +62,13 @@ export default function App() {
   const replayId = tourRequested ? null : replayIdFromUrl();
   return (
     <AuthGate>
-      {replayId === null ? <Dashboard /> : <ReplayPage recordingId={replayId} />}
+      {replayId === null ? (
+        <Dashboard />
+      ) : (
+        <Suspense fallback={<div className="replay-page" aria-busy="true" />}>
+          <ReplayPage recordingId={replayId} />
+        </Suspense>
+      )}
     </AuthGate>
   );
 }
