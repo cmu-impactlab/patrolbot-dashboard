@@ -150,7 +150,9 @@ class CommandBroker:
         #    out, and applies its own weaker check to navigation — but a hidden
         #    or disabled button is not authorization. The decision is made
         #    here, from telemetry, whatever the browser believed.
-        reason = self._validate_robot_state(session, command)
+        reason = self._validate_robot_state(
+            session, command,
+            allow_unlocalized=bool(payload.allow_unlocalized))
         if reason is not None:
             await self._reject_audited(client, robot_id, command_id, command, reason)
             return
@@ -231,8 +233,15 @@ class CommandBroker:
                 return "That destination is too far away to be valid."
         return None
 
-    def _validate_robot_state(self, session: "RobotSession", command: str) -> str | None:
-        """Refusal reason for a gated command, from live state."""
+    def _validate_robot_state(self, session: "RobotSession", command: str,
+                              allow_unlocalized: bool = False) -> str | None:
+        """Refusal reason for a gated command, from live state.
+
+        `allow_unlocalized` is the operator's per-command override, carried
+        from the request rather than read from telemetry. Every other fact here
+        still applies: it waives exactly one check, the one asking whether the
+        robot currently knows where it is.
+        """
         if command not in gates.GATES:
             return None
         state = session.state
@@ -247,7 +256,8 @@ class CommandBroker:
                                        # arriving keeps its last self-reported
                                        # age forever. See gates.MAX_RECEIPT_AGE_S.
                                        base_state_age=state.base_state.age(),
-                                       pose_age=state.pose.age())
+                                       pose_age=state.pose.age(),
+                                       allow_unlocalized=allow_unlocalized)
         return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:

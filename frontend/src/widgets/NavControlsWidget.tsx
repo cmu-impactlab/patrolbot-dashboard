@@ -37,6 +37,8 @@ export function NavControlsWidget() {
   const pickMode = useCommandStore((state) => state.pickMode);
   const stoppedGoal = useCommandStore((state) => state.stoppedGoal);
   const setPickMode = useCommandStore((state) => state.setPickMode);
+  const allowUnlocalized = useCommandStore((state) => state.allowUnlocalized);
+  const setAllowUnlocalized = useCommandStore((state) => state.setAllowUnlocalized);
   const stop = useCommandStore((state) => state.stop);
   const resume = useCommandStore((state) => state.resume);
   const cancel = useCommandStore((state) => state.cancel);
@@ -52,7 +54,7 @@ export function NavControlsWidget() {
   // Navigation is hard-blocked until the operator has set the robot's 2D
   // location this session, so the robot is never sent anywhere from an
   // unconfirmed pose.
-  const canNavigate = online && poseSetThisSession;
+  const canNavigate = online && (poseSetThisSession || allowUnlocalized);
   const gateHint = "Set the robot's 2D location before sending it anywhere.";
 
   // Undock is offered only when the robot is on its charger; there is no Dock
@@ -79,7 +81,7 @@ export function NavControlsWidget() {
           The robot is not connected — commands are unavailable.
         </div>
       )}
-      {online && !poseSetThisSession && pickMode === "none" && (
+      {online && !poseSetThisSession && !allowUnlocalized && pickMode === "none" && (
         <div className="nav-gate-banner">
           <Crosshair size={13} /> {gateHint}
         </div>
@@ -118,6 +120,28 @@ export function NavControlsWidget() {
           )}
         </div>
       )}
+      <details className="nav-advanced">
+        <summary>Advanced</summary>
+        <label className="nav-advanced-row">
+          <input
+            type="checkbox"
+            checked={allowUnlocalized}
+            onChange={(event) => setAllowUnlocalized(event.target.checked)}
+          />
+          <span>
+            Send a destination even if the robot does not know where it is
+          </span>
+        </label>
+        <p className="nav-advanced-note">
+          The robot will plan from a position it does not trust, so it may take
+          a wrong route or collide. RViz has always allowed this — Nav2 has no
+          localization check of its own — so this only gives the dashboard the
+          same reach. It waives that one question and nothing else: a robot
+          that has stopped reporting its position, has its motors off, a fault
+          raised or the e-stop pressed is still refused. Clears itself after
+          one destination, and on reconnect.
+        </p>
+      </details>
       <div className="nav-buttons">
         <button
           className={`btn wide primary ${pickMode === "goal" ? "active" : ""}`}

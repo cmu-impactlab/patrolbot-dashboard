@@ -81,6 +81,8 @@ class StateFacts:
     undock_active: bool = False
     undock_profile_commissioned: bool | None = None
     localized: bool = False
+    # Set from the operator's per-command override, not from telemetry.
+    allow_unlocalized: bool = False
     stationary: bool = False
     capabilities: tuple[str, ...] = ()
     # A navigate_to_pose this server is still waiting on. `stationary` does not
@@ -124,7 +126,8 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                      capabilities: list[str] | None = None,
                      navigating: bool = False,
                      base_state_age: float | None = None,
-                     pose_age: float | None = None) -> StateFacts:
+                     pose_age: float | None = None,
+                     allow_unlocalized: bool = False) -> StateFacts:
     """Flatten live robot state into gate facts. Missing telemetry stays at the
     fail-closed defaults, so an absent base_state refuses everything.
 
@@ -136,7 +139,8 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                        capabilities=tuple(capabilities or ()),
                        navigating=navigating,
                        base_state_age=base_state_age,
-                       pose_age=pose_age)
+                       pose_age=pose_age,
+                       allow_unlocalized=allow_unlocalized)
     if base_state is not None:
         facts.link_connected = bool(base_state.link_connected)
         facts.telemetry_age = float(base_state.telemetry_age)
@@ -236,7 +240,7 @@ def navigate_reason(facts: StateFacts) -> str | None:
     if not facts.pose_fresh:
         return ("The dashboard has not had a recent position update from the "
                 "robot — wait for fresh data before sending it anywhere.")
-    if not facts.localized:
+    if not facts.localized and not facts.allow_unlocalized:
         return "The robot does not know where it is. Set its location first."
     return None
 
