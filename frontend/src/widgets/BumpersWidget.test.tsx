@@ -94,6 +94,22 @@ describe("BumpersWidget robot diagram", () => {
     const halfWidth = Math.max(...points.map(([x]) => x)) - VIEWBOX_W / 2;
     expect(Math.abs(centres[1] - VIEWBOX_W / 2)).toBeCloseTo(halfWidth, 6);
   });
+
+  it("draws each bumper group as one continuous solid bar", () => {
+    const { container } = render(<BumpersWidget />);
+    const bars = Array.from(container.querySelectorAll<SVGPathElement>("[data-bumper]"));
+
+    expect(bars).toHaveLength(2);
+    expect(bars.map((bar) => bar.getAttribute("data-bumper"))).toEqual(["front", "rear"]);
+    for (const bar of bars) {
+      // Four connected points make the three facets one bar. There must be no
+      // dash pattern that turns an unknown bumper into separate bubbles.
+      expect(pathPoints(bar.getAttribute("d") ?? "")).toHaveLength(4);
+      expect(bar.getAttribute("stroke-dasharray")).toBeNull();
+      expect(bar.getAttribute("stroke-linecap")).toBe("round");
+      expect(bar.getAttribute("stroke-linejoin")).toBe("round");
+    }
+  });
 });
 
 describe("bumper readings the robot cannot make", () => {
@@ -165,5 +181,13 @@ describe("bumper readings the robot cannot make", () => {
     expect(getAllByText("Clear")).toHaveLength(2);
   });
 
+  it("keeps the continuous bar shape when a bumper is pressed", () => {
+    setBaseState({ bumpers_valid: true, bumpers_front: true });
+    const { container } = render(<BumpersWidget />);
+    const front = container.querySelector<SVGPathElement>('[data-bumper="front"]');
 
+    expect(front?.getAttribute("data-state")).toBe("pressed");
+    expect(front?.classList.contains("bumper-hit")).toBe(true);
+    expect(pathPoints(front?.getAttribute("d") ?? "")).toHaveLength(4);
+  });
 });

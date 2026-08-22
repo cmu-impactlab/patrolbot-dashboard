@@ -7,11 +7,10 @@ import {
 /**
  * Top-down view of the PatrolBot at its true proportions: the octagonal
  * 510 x 426 mm footprint from lib/robotGeometry (the polygon Nav2 plans
- * with, out of the robot's own ARIA params), whose perimeter facets are the
- * segmented bumper panels — three across the front (left diagonal, front
- * face, right diagonal), three across the rear, with the drive wheels on the
- * flat side faces. The hardware reports each group as a whole, so all three
- * panels of a hit group light together.
+ * with, out of the robot's own ARIA params), with a continuous bumper bar
+ * following the three front facets and another following the three rear
+ * facets. The hardware reports each group as a whole, so each complete bar
+ * changes state together.
  *
  * The robot is longer than it is wide; an earlier version of this drawing had
  * those axes the other way round.
@@ -48,42 +47,37 @@ const LASER_HALF = Math.abs(P.frontL[0]) * 0.85;
 const BODY = `M ${pt(P.frontL)} L ${pt(P.frontR)} L ${pt(P.sideRT)} L ${pt(P.sideRB)} ` +
   `L ${pt(P.rearR)} L ${pt(P.rearL)} L ${pt(P.sideLB)} L ${pt(P.sideLT)} Z`;
 
-// Bumper panels: the three front facets and three rear facets, drawn as
-// thick strips slightly outside the body outline.
+// Bumper bars follow the three front facets and three rear facets as one
+// continuous stroke per hardware-reported group, slightly outside the body.
 const PANEL_SCALE = 1.12;
-const FRONT_PANELS = [
-  [P.sideLT, P.frontL],
-  [P.frontL, P.frontR],
-  [P.frontR, P.sideRT],
-] as const;
-const REAR_PANELS = [
-  [P.sideRB, P.rearR],
-  [P.rearR, P.rearL],
-  [P.rearL, P.sideLB],
-] as const;
+const FRONT_BAR = [P.sideLT, P.frontL, P.frontR, P.sideRT] as const;
+const REAR_BAR = [P.sideRB, P.rearR, P.rearL, P.sideLB] as const;
 
-function PanelGroup({ panels, pressed, known }: {
-  panels: typeof FRONT_PANELS | typeof REAR_PANELS;
+function BumperBar({ points, position, pressed, known }: {
+  points: typeof FRONT_BAR | typeof REAR_BAR;
+  position: "front" | "rear";
   pressed: boolean;
   known: boolean;
 }) {
-  // Unknown is drawn dashed rather than as an unpressed panel. A solid grey
-  // bumper is a claim that nothing is touching it.
+  const state = !known ? "unknown" : pressed ? "pressed" : "clear";
+  const d = points.map((point, index) =>
+    `${index === 0 ? "M" : "L"} ${pt(point, PANEL_SCALE)}`).join(" ");
+
+  // Unknown stays visibly subdued, but remains the same physical bar shape.
+  // Text below the diagram carries the explicit Unknown/Clear distinction.
   return (
-    <g className={known && pressed ? "bumper-hit" : ""}>
-      {panels.map(([a, b], index) => (
-        <path
-          key={index}
-          d={`M ${pt(a, PANEL_SCALE)} L ${pt(b, PANEL_SCALE)}`}
-          fill="none"
-          stroke={!known ? "var(--text-faint)" : pressed ? "var(--danger)" : "var(--muted-bg)"}
-          strokeWidth="9"
-          strokeLinecap="round"
-          strokeDasharray={known ? undefined : "3 11"}
-          opacity={known ? undefined : 0.7}
-        />
-      ))}
-    </g>
+    <path
+      data-bumper={position}
+      data-state={state}
+      className={known && pressed ? "bumper-hit" : undefined}
+      d={d}
+      fill="none"
+      stroke={!known ? "var(--text-faint)" : pressed ? "var(--danger)" : "var(--muted-bg)"}
+      strokeWidth="9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      opacity={known ? undefined : 0.45}
+    />
   );
 }
 
@@ -104,8 +98,8 @@ export function BumpersWidget() {
            aria-label="Robot bumper diagram (top view)">
         <text x="100" y="18" textAnchor="middle" className="bumper-label">FRONT</text>
 
-        <PanelGroup panels={FRONT_PANELS} pressed={front} known={known} />
-        <PanelGroup panels={REAR_PANELS} pressed={rear} known={known} />
+        <BumperBar points={FRONT_BAR} position="front" pressed={front} known={known} />
+        <BumperBar points={REAR_BAR} position="rear" pressed={rear} known={known} />
 
         {/* Octagonal chassis (510 mm front-to-back x 426 mm across, FRONT up) */}
         <path d={BODY} fill="var(--surface-2)" stroke="var(--border)" strokeWidth="2" />
@@ -152,8 +146,8 @@ export function BumpersWidget() {
         </p>
       )}
       <p className="subtext">
-        The hardware reports each bumper group as a whole, so all panels of a
-        hit group light together.
+        The hardware reports each bumper group as a whole, so the entire front
+        or rear bar changes state together.
       </p>
     </div>
   );
