@@ -10,7 +10,7 @@ import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { BaseStateData, PoseData } from "../types/protocol";
 
-const CAPS = ["undock"];
+const CAPS = ["undock", "motor_enable"];
 
 const PARKED: PoseData = {
   x: 1, y: 1, yaw: 0, linear_velocity: 0, angular_velocity: 0, localized: true,
@@ -55,6 +55,14 @@ function dockButton(): HTMLButtonElement {
 
 function dockButtonOrNull(): HTMLButtonElement | null {
   return screen.queryByRole("button", { name: /Undock|Undocking/ }) as HTMLButtonElement | null;
+}
+
+function openAdvanced() {
+  fireEvent.click(screen.getByText("Advanced"));
+}
+
+function motorEnableButton(): HTMLButtonElement {
+  return screen.getByRole("button", { name: /Turn motors on|Turning motors on/ }) as HTMLButtonElement;
 }
 
 describe("NavControlsWidget dock control", () => {
@@ -144,12 +152,11 @@ describe("NavControlsWidget dock control", () => {
     expect(dockButtonOrNull()).toBeNull();
   });
 
-  it("does not expose the old manual charge-release or motor-enable sequence", () => {
+  it("keeps charge release out of the UI", () => {
     setState(baseState({ charge_state: "charging" }));
     render(<NavControlsWidget />);
 
     expect(screen.queryByRole("button", { name: /Release charging/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Turn motors on/ })).toBeNull();
   });
 
   it("sends the matching command when pressed", () => {
@@ -160,5 +167,87 @@ describe("NavControlsWidget dock control", () => {
 
     fireEvent.click(dockButton());
     expect(sent).toEqual(["undock"]);
+  });
+});
+
+describe("NavControlsWidget advanced motor enable", () => {
+  beforeEach(() => {
+    useCommandStore.setState({ active: null, lastResult: null, stoppedGoal: null });
+  });
+
+  afterEach(cleanup);
+
+  it("keeps motor enable inside the collapsed Advanced disclosure", () => {
+    setState(baseState({ charge_state: "not_charging", motors_enabled: false }));
+    render(<NavControlsWidget />);
+
+    const advanced = screen.getByText("Advanced").closest("details") as HTMLDetailsElement;
+    expect(advanced.open).toBe(false);
+    expect(advanced.contains(motorEnableButton())).toBe(true);
+    openAdvanced();
+    expect(advanced.open).toBe(true);
+  });
+
+  it("requires confirmation before sending motor_enable from Advanced", () => {
+    setState(baseState({ charge_state: "not_charging", motors_enabled: false }));
+    const sent: string[] = [];
+    useCommandStore.setState({ send: (command) => { sent.push(command); } });
+    render(<NavControlsWidget />);
+
+    openAdvanced();
+    const button = motorEnableButton();
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm motor enable" }));
+
+    expect(sent).toEqual(["motor_enable"]);
+  });
+
+  it.each([
+    [{ motors_enabled: true }, "already on"],
+    [{ charge_state: "charging" }, "release charging"],
+    [{ estop_pressed: true }, "emergency stop"],
+    [{ fault_flags: 4 }, "fault"],
+  ])("disables motor enable when %o", (overrides, reason) => {
+    setState(baseState({ charge_state: "not_charging", ...overrides }));
+    render(<NavControlsWidget />);
+
+    openAdvanced();
+    const button = motorEnableButton();
+    expect(button.disabled).toBe(true);
+    expect(button.title.toLowerCase()).toContain(reason);
+  });
+
+  it("disables motor enable while a navigation goal is active", () => {
+    setState(baseState({ charge_state: "not_charging" }));
+    useCommandStore.setState({
+      active: {
+        commandId: "nav-1", command: "navigate_to_pose", phase: "running",
+        stage: null, distanceRemaining: null,
+      },
+    });
+    render(<NavControlsWidget />);
+
+    openAdvanced();
+    const button = motorEnableButton();
+    expect(button.disabled).toBe(true);
+    expect(button.title.toLowerCase()).toContain("stop it before enabling the motors");
+  });
+
+  it("shows the in-flight state and prevents a duplicate request", () => {
+    setState(baseState({ charge_state: "not_charging" }));
+    useCommandStore.setState({
+      active: {
+        commandId: "enable-1", command: "motor_enable", phase: "running",
+        stage: null, distanceRemaining: null,
+      },
+    });
+    render(<NavControlsWidget />);
+
+    openAdvanced();
+    expect(motorEnableButton().textContent).toContain("Turning motors on");
+    expect(motorEnableButton().disabled).toBe(true);
   });
 });

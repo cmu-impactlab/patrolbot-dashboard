@@ -14,9 +14,9 @@ recover from on its own — stale or invalid telemetry, an active fault, a
 pressed e-stop, an obstructed rear bumper, a robot already moving, or a base
 that never claimed the capability at all.
 
-`charge_release` and `motor_enable` remain available as separate, separately
-audited commands for the robot-side and diagnostic paths; the dashboard UI
-does not send them.
+`charge_release` remains available for robot-side and diagnostic paths but the
+dashboard UI does not send it. `motor_enable` is exposed only under the
+dashboard's Advanced disclosure and keeps these authoritative gates.
 """
 from __future__ import annotations
 
@@ -81,6 +81,8 @@ class StateFacts:
     undock_active: bool = False
     undock_profile_commissioned: bool | None = None
     localized: bool = False
+    # Set from the operator's per-command override, not from telemetry.
+    allow_unlocalized: bool = False
     stationary: bool = False
     capabilities: tuple[str, ...] = ()
     # A navigate_to_pose this server is still waiting on. `stationary` does not
@@ -124,7 +126,8 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                      capabilities: list[str] | None = None,
                      navigating: bool = False,
                      base_state_age: float | None = None,
-                     pose_age: float | None = None) -> StateFacts:
+                     pose_age: float | None = None,
+                     allow_unlocalized: bool = False) -> StateFacts:
     """Flatten live robot state into gate facts. Missing telemetry stays at the
     fail-closed defaults, so an absent base_state refuses everything.
 
@@ -136,7 +139,8 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                        capabilities=tuple(capabilities or ()),
                        navigating=navigating,
                        base_state_age=base_state_age,
-                       pose_age=pose_age)
+                       pose_age=pose_age,
+                       allow_unlocalized=allow_unlocalized)
     if base_state is not None:
         facts.link_connected = bool(base_state.link_connected)
         facts.telemetry_age = float(base_state.telemetry_age)
@@ -236,7 +240,7 @@ def navigate_reason(facts: StateFacts) -> str | None:
     if not facts.pose_fresh:
         return ("The dashboard has not had a recent position update from the "
                 "robot — wait for fresh data before sending it anywhere.")
-    if not facts.localized:
+    if not facts.localized and not facts.allow_unlocalized:
         return "The robot does not know where it is. Set its location first."
     return None
 
@@ -266,6 +270,8 @@ def motor_enable_reason(facts: StateFacts) -> str | None:
     reason = _hardware_reason(facts)
     if reason is not None:
         return reason
+    if "motor_enable" not in facts.capabilities:
+        return "Motor enable is not available on this robot."
     if facts.charging:
         return ("The robot is still on charge. Release charging before "
                 "enabling the motors.")
@@ -273,6 +279,9 @@ def motor_enable_reason(facts: StateFacts) -> str | None:
         return "The emergency stop is pressed. Release it on the robot first."
     if facts.motors_enabled:
         return "The motors are already on."
+    if facts.navigating:
+        return ("The robot is still driving to a destination. Stop it before "
+                "enabling the motors.")
     return _stationary_reason(facts)
 
 

@@ -366,3 +366,102 @@ def test_navigate_is_refused_while_an_undock_is_running():
     acks = [d for kind, d in executor._ws.sent if kind == "command.ack"]
     assert acks[0]["accepted"] is False and "off its dock" in acks[0]["reason"]
     assert executor._active is None
+
+
+def test_the_localization_override_is_honoured_on_the_robot_too():
+    """Defence in depth has to know about the override, or it defeats it.
+
+    This precheck deliberately repeats the dashboard server's gates, so a
+    bypass the server honours and the robot does not would simply be refused
+    one hop later, and the operator would see the same sentence with no way
+    past it.
+    """
+    from patrolbot_web_bridge.commands import precheck
+
+    base = _navigable_base_state()
+    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+
+    blocked = precheck("navigate_to_pose", goal, base, localized=False,
+                       base_state_age=0.1, odom_age=0.1)
+    assert blocked is not None and "know where it is" in blocked
+
+    allowed = precheck("navigate_to_pose", goal, base, localized=False,
+                       base_state_age=0.1, allow_unlocalized=True,
+                       odom_age=0.1, operator_authorized=True)
+    assert allowed is None
+
+
+def test_the_robot_side_override_waives_only_localization():
+    """One waiver, not a master key."""
+    from patrolbot_web_bridge.commands import precheck
+
+    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    for field, value in (("motors_enabled", False),
+                         ("estop_pressed", True),
+                         ("fault_flags", 4),
+                         ("hardware_state_valid", False)):
+        base = _navigable_base_state()
+        base[field] = value
+        reason = precheck("navigate_to_pose", goal, base, localized=False,
+                          base_state_age=0.1, allow_unlocalized=True,
+                          odom_age=0.1, operator_authorized=True)
+        assert reason is not None, field
+
+
+def test_the_robot_side_override_defaults_off():
+    """Omitting the flag must behave exactly as before."""
+    from patrolbot_web_bridge.commands import precheck
+
+    reason = precheck("navigate_to_pose", {"x": 1.0, "y": 2.0, "yaw": 0.0},
+                      _navigable_base_state(), localized=False,
+                      base_state_age=0.1, odom_age=0.1)
+    assert reason is not None and "know where it is" in reason
+
+
+def _navigable_base_state() -> dict:
+    """Off the charger, motors live, telemetry fresh and valid."""
+    return {
+        "link_connected": True,
+        "telemetry_age": 0.1,
+        "hardware_state_valid": True,
+        "fault_flags": 0,
+        "estop_pressed": False,
+        "motors_enabled": True,
+        "charge_state": "discharging",
+    }
+
+
+def test_the_override_cannot_waive_a_dead_position_stream():
+    """"Unsure where it is" and "no longer saying where it is" are different.
+
+    Only the first is the operator's to accept. The bridge is the barrier that
+    has to hold when a frame arrives without passing the dashboard server, and
+    without this it would have no pose-recency check left at all once the
+    override was set.
+    """
+    from patrolbot_web_bridge.commands import MAX_ODOM_AGE_S, precheck
+
+    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    for odom_age in (None, MAX_ODOM_AGE_S + 0.1):
+        reason = precheck("navigate_to_pose", goal, _navigable_base_state(),
+                          localized=False, base_state_age=0.1,
+                          allow_unlocalized=True, odom_age=odom_age,
+                          operator_authorized=True)
+        assert reason is not None, odom_age
+        assert "stopped reporting its position" in reason
+
+
+def test_the_override_needs_the_server_authorization_stamp():
+    """A browser cannot authorize itself past a safety gate.
+
+    operator_authorized is stamped by the dashboard server from the verified
+    session role and is never settable by the browser, exactly as the guarded
+    undock requires. An unstamped override is treated as not asked for.
+    """
+    from patrolbot_web_bridge.commands import precheck
+
+    reason = precheck("navigate_to_pose", {"x": 1.0, "y": 2.0, "yaw": 0.0},
+                      _navigable_base_state(), localized=False,
+                      base_state_age=0.1, allow_unlocalized=True,
+                      odom_age=0.1, operator_authorized=False)
+    assert reason is not None and "know where it is" in reason

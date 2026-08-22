@@ -33,7 +33,13 @@ export function useTelemetrySocket(): void {
             useTelemetryStore.getState().handleFrame(frame);
         }
       },
-      onOpen: () => store.setWsConnected(true),
+      onOpen: () => {
+        store.setWsConnected(true);
+        // A reconnect may be a different robot or a different session, so an
+        // armed safety override must not survive it — especially since the
+        // Advanced disclosure it was armed in is collapsed by default.
+        useCommandStore.getState().resetOverrides();
+      },
       onClose: () => useTelemetryStore.getState().setWsConnected(false),
     });
     socket.connect();

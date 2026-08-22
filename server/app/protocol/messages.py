@@ -184,6 +184,12 @@ class CommandRequestData(BaseModel):
     # Set only when the operator has explicitly confirmed taking control away
     # from whoever currently holds the single-operator lease.
     takeover: bool = False
+    # Operator override for one command only, never persisted: send the goal
+    # even though the robot reports it does not know where it is. RViz has
+    # always been able to do this -- Nav2 has no localization gate of its own --
+    # so this restores parity for the dashboard rather than granting anything
+    # new. It is deliberately per-command so it cannot be left switched on.
+    allow_unlocalized: bool = False
     # Stamped by the server from the verified session role before forwarding,
     # and ignored on the way in — a browser cannot authorize itself. The robot
     # requires it for guarded motion (the dock manager's Undock goal).

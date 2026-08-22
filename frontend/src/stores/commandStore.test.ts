@@ -93,3 +93,89 @@ describe("commandStore reconnect safety", () => {
     expect(sender).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("commandStore.allowUnlocalized", () => {
+  beforeEach(() => {
+    useCommandStore.setState({
+      active: null, stoppedGoal: null, lastResult: null, pickMode: "none",
+      lastAttempt: null, allowUnlocalized: false,
+    });
+    registerCommandSender(null);
+  });
+
+  it("is off by default, so an ordinary goal carries no override", () => {
+    const sent: string[] = [];
+    registerCommandSender((frame) => { sent.push(frame); return true; });
+
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+
+    expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(false);
+  });
+
+  it("carries the override once, then disarms itself", () => {
+    const sent: string[] = [];
+    registerCommandSender((frame) => { sent.push(frame); return true; });
+    useCommandStore.getState().setAllowUnlocalized(true);
+
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(true);
+    expect(useCommandStore.getState().allowUnlocalized).toBe(false);
+
+    // Suppressing a safety gate must be re-armed deliberately every time; a
+    // second destination cannot inherit the first one's override.
+    useCommandStore.getState().send("navigate_to_pose", { x: 5, y: 6, yaw: 0 });
+    expect(JSON.parse(sent[1]).data.allow_unlocalized).toBe(false);
+  });
+
+  it("does not attach the override to commands that are not destinations", () => {
+    const sent: string[] = [];
+    registerCommandSender((frame) => { sent.push(frame); return true; });
+    useCommandStore.getState().setAllowUnlocalized(true);
+
+    useCommandStore.getState().send("stop");
+
+    expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(false);
+    // ...and it is still armed for the destination it was meant for.
+    expect(useCommandStore.getState().allowUnlocalized).toBe(true);
+  });
+});
+
+describe("commandStore override safety", () => {
+  beforeEach(() => {
+    useCommandStore.setState({
+      active: null, stoppedGoal: null, lastResult: null, pickMode: "none",
+      lastAttempt: null, allowUnlocalized: false,
+    });
+    registerCommandSender(null);
+  });
+
+  it("keeps the override armed when the frame could not be sent", () => {
+    registerCommandSender(() => false); // socket refused the frame
+    useCommandStore.getState().setAllowUnlocalized(true);
+
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+
+    // Nothing reached the robot, so the operator should not have to re-arm.
+    expect(useCommandStore.getState().allowUnlocalized).toBe(true);
+  });
+
+  it("drops the override on reconnect, which may be a different robot", () => {
+    useCommandStore.getState().setAllowUnlocalized(true);
+    useCommandStore.getState().resetOverrides();
+    expect(useCommandStore.getState().allowUnlocalized).toBe(false);
+  });
+
+  it("does not let takeOver replay a destination with a spent override", () => {
+    const sent: string[] = [];
+    registerCommandSender((frame) => { sent.push(frame); return true; });
+    useCommandStore.getState().setAllowUnlocalized(true);
+
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(true);
+
+    // Taking control back re-sends the same destination; suppressing a safety
+    // gate has to be re-armed deliberately rather than inherited.
+    useCommandStore.getState().takeOver();
+    expect(JSON.parse(sent[1]).data.allow_unlocalized).toBe(false);
+  });
+});

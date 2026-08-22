@@ -32,6 +32,13 @@ DISABLED_REASON = (
 # server/app/commands/gates.py.
 MAX_TELEMETRY_AGE_S = 2.0
 MAX_RECEIPT_AGE_S = 3.0
+# How stale the robot's own position stream may be before navigation is
+# refused. /odom arrives at ~22.7 Hz, so 3 s is roughly seventy missed samples
+# — generous enough to ride out a scheduling hiccup, tight enough that a dead
+# pose stream is caught. This is NOT waivable by the localization override:
+# "the robot is unsure where it is" and "the robot has stopped saying where it
+# is" are different failures, and only the first is the operator's to accept.
+MAX_ODOM_AGE_S = 3.0
 
 # action_msgs/GoalStatus terminal codes.
 _STATUS_SUCCEEDED = 4
@@ -215,7 +222,10 @@ def _on_dock(base_state: dict) -> bool:
 
 
 def precheck(command: str, goal: dict | None, base_state: Any | None,
-             localized: bool = False, base_state_age: float | None = None) -> str | None:
+             localized: bool = False, base_state_age: float | None = None,
+             allow_unlocalized: bool = False,
+             odom_age: float | None = None,
+             operator_authorized: bool = False) -> str | None:
     """Plain-language rejection reason, or None when the command may proceed.
 
     base_state is the latest normalized base_state payload (a dict) or None
@@ -268,8 +278,27 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
                     "sending it anywhere.")
         if not base_state.get("motors_enabled"):
             return "The robot's motors are off. Enable them on the robot first."
-        if not localized:
+        # An exceptional flag needs the server's verified-role stamp, the same
+        # way the guarded undock does. A browser cannot authorize itself past a
+        # safety gate; anything arriving here unstamped is treated as if the
+        # override had not been asked for.
+        override = allow_unlocalized and operator_authorized
+        # Bound to the override only, so the ordinary path keeps exactly the
+        # behaviour it had. On that path `localized` already implies a recent
+        # AMCL pose; the override is precisely what removes that implication,
+        # and would otherwise leave the bridge with no pose-recency check at
+        # all. "Unsure where it is" and "no longer saying where it is" are
+        # different failures, and only the first is the operator's to accept.
+        # This matters because the bridge is the barrier that has to hold when
+        # a crafted or replayed frame arrives without passing the server.
+        if override and (odom_age is None or odom_age > MAX_ODOM_AGE_S):
+            return ("The robot has stopped reporting its position — wait for "
+                    "fresh data before sending it anywhere.")
+        if not localized and not override:
             return "The robot does not know where it is. Set its location first."
+        # RViz has always been able to send a goal on a bad fix -- Nav2 has no
+        # localization gate of its own -- so the override restores parity
+        # rather than granting anything new. Every check above still applies.
     return None
 
 
@@ -437,15 +466,27 @@ class CommandExecutor:
     # -- dispatch --------------------------------------------------------------
 
     def handle(self, data: dict, base_state: dict | None, current_yaw: float | None,
-               localized: bool = False, base_state_age: float | None = None) -> None:
+               localized: bool = False, base_state_age: float | None = None,
+               odom_age: float | None = None) -> None:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
 
-        reason = precheck(command, goal, base_state, localized, base_state_age)
+        allow_unlocalized = bool(data.get("allow_unlocalized", False))
+        operator_authorized = bool(data.get("operator_authorized", False))
+        reason = precheck(command, goal, base_state, localized, base_state_age,
+                          allow_unlocalized, odom_age, operator_authorized)
         if reason is not None:
             self._ack(command_id, False, reason)
             return
+        # Logged only once the command is actually going ahead, so a goal
+        # refused for some other reason leaves no misleading override record
+        # behind. A suppressed safety gate has to be visible in the log.
+        if (allow_unlocalized and operator_authorized
+                and command == "navigate_to_pose" and not localized):
+            self._node.get_logger().warning(
+                "LOCALIZATION GATE OVERRIDDEN by operator: navigating with an "
+                "unusable map-frame fix (command %s)", command_id)
 
         if command == "navigate_to_pose":
             self._navigate(command_id, goal, current_yaw)

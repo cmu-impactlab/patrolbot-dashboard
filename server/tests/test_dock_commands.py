@@ -70,6 +70,8 @@ def test_motor_enable_needs_charge_released_first():
     ({"estop_pressed": True}, "emergency stop"),
     ({"motors_enabled": True}, "already on"),
     ({"stationary": False}, "still moving"),
+    ({"navigating": True}, "stop it before enabling"),
+    ({"capabilities": ("undock",)}, "not available"),
     ({"fault_flags": 1}, "fault"),
 ])
 def test_motor_enable_refusals(overrides, fragment):
@@ -339,8 +341,8 @@ def test_undock_forwarded_straight_from_charging(client):
 
 
 def test_motor_enable_rejected_while_charging(client):
-    """The separate motor_enable command (not sent by the dashboard UI) keeps
-    its own interlock: motors must not go live on the charger."""
+    """The Advanced motor-enable action keeps its own interlock: motors must
+    not go live on the charger."""
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
@@ -532,3 +534,51 @@ def test_undock_needs_the_robot_to_vouch_for_its_bumpers():
 
     assert gates.undock_reason(
         facts(charge_state="docked", motors_enabled=True, bumpers_valid=True)) is None
+
+
+def _nav_facts(**overrides) -> gates.StateFacts:
+    """A robot off its charger with the motors live — otherwise navigable."""
+    return facts(charge_state="discharging", motors_enabled=True, **overrides)
+
+
+def test_the_localization_override_lets_a_goal_through():
+    """The operator's Advanced bypass, at the layer that actually authorizes.
+
+    RViz has always been able to send a goal on a bad fix, because Nav2 has no
+    localization gate of its own. The dashboard refusing was a dashboard-only
+    restriction, so this restores parity rather than granting new reach.
+    """
+    from app.commands import gates
+
+    blocked = _nav_facts(localized=False)
+    assert gates.navigate_reason(blocked) is not None
+
+    overridden = _nav_facts(localized=False, allow_unlocalized=True)
+    assert gates.navigate_reason(overridden) is None
+
+
+def test_the_override_waives_only_the_localization_check():
+    """Every other navigation gate still refuses with the override armed.
+
+    It is one waiver, not a master key: a robot with its motors off, a fault
+    raised, an e-stop pressed or stale telemetry must still be refused.
+    """
+    from app.commands import gates
+
+    for field, value in (("motors_enabled", False),
+                         ("estop_pressed", True),
+                         ("fault_flags", 4),
+                         ("hardware_state_valid", False)):
+        facts = _nav_facts(localized=False, allow_unlocalized=True)
+        setattr(facts, field, value)
+        assert gates.navigate_reason(facts) is not None, field
+
+
+def test_the_override_defaults_off():
+    """A request that never mentions it must behave exactly as before."""
+    from app.commands import gates
+    from app.protocol.messages import CommandRequestData
+
+    assert gates.StateFacts().allow_unlocalized is False
+    payload = CommandRequestData(command_id="c1", command="navigate_to_pose")
+    assert payload.allow_unlocalized is False

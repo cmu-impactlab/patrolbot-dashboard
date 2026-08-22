@@ -89,6 +89,8 @@ describe("motor enable", () => {
     [{ estopPressed: true }, "emergency stop"],
     [{ motorsEnabled: true }, "already on"],
     [{ stationary: false }, "still moving"],
+    [{ navigating: true }, "stop it before enabling"],
+    [{ capabilities: ["undock"] }, "not available"],
   ])("refuses %o", (overrides, fragment) => {
     expect(motorEnableReason(facts({ ...RELEASED, ...overrides }))?.toLowerCase())
       .toContain(fragment);

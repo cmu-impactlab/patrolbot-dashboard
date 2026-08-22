@@ -150,6 +150,7 @@ class WebBridgeNode(Node):
         self._latest_base_state: dict | None = None
         self._latest_base_state_at = 0.0
         self._latest_odom: Odometry | None = None
+        self._latest_odom_at = 0.0
         self._latest_amcl: PoseWithCovarianceStamped | None = None
         self._latest_amcl_at = 0.0
         self._latest_map: OccupancyGrid | None = None
@@ -222,6 +223,7 @@ class WebBridgeNode(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         self._latest_odom = msg
+        self._latest_odom_at = self.get_clock().now().nanoseconds / 1e9
         self._maybe_send_pose()
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
@@ -369,8 +371,13 @@ class WebBridgeNode(Node):
             if self._latest_base_state is not None:
                 base_state_age = (self.get_clock().now().nanoseconds / 1e9
                                   - self._latest_base_state_at)
+            odom_age = None
+            if self._latest_odom is not None:
+                odom_age = (self.get_clock().now().nanoseconds / 1e9
+                            - self._latest_odom_at)
             self._commands.handle(data, self._latest_base_state, current_yaw,
-                                  self._localization_is_usable(), base_state_age)
+                                  self._localization_is_usable(), base_state_age,
+                                  odom_age)
 
     def _refresh_capabilities(self) -> None:
         """Tell the dashboard which dock operations are actually available.

@@ -45,8 +45,14 @@ interface CommandState {
   /** The most recent command intent, remembered so "Take over" can re-send it
    *  with the takeover flag after a single-operator-lease rejection. */
   lastAttempt: { command: CommandType; goal?: GoalData } | null;
+  /** Operator override, armed under Advanced: send the next destination even
+   *  though the robot reports it does not know where it is. Cleared as soon as
+   *  it is used, so it can never be left switched on. */
+  allowUnlocalized: boolean;
 
   setPickMode: (mode: PickMode) => void;
+  setAllowUnlocalized: (allow: boolean) => void;
+  resetOverrides: () => void;
   send: (command: CommandType, goal?: GoalData, takeover?: boolean) => void;
   stop: () => void;
   resume: () => void;
@@ -71,8 +77,16 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   pickMode: "none",
   stoppedGoal: null,
   lastAttempt: null,
+  allowUnlocalized: false,
 
   setPickMode: (mode) => set({ pickMode: mode }),
+
+  setAllowUnlocalized: (allow) => set({ allowUnlocalized: allow }),
+
+  // A reconnect is treated elsewhere as possibly a different robot, so an
+  // override armed against the old session must not carry over to it. Called
+  // from the socket layer on every (re)connect.
+  resetOverrides: () => set({ allowUnlocalized: false }),
 
   stop: () => {
     // Remember the destination in effect right now so Resume can restore it.
@@ -115,6 +129,10 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     }
     // Remember the intent so a lease rejection can be retried as a takeover.
     set({ lastAttempt: { command, goal } });
+    // Read the override once and disarm it. A takeover re-send of the same
+    // destination therefore has to be armed again deliberately, which is the
+    // point: the operator re-confirms driving on a fix the robot distrusts.
+    const allowUnlocalized = command === "navigate_to_pose" && get().allowUnlocalized;
     const commandId = crypto.randomUUID();
     const frame = JSON.stringify({
       version: 1,
@@ -122,7 +140,10 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       robot_id: useTelemetryStore.getState().robotId,
       sequence: ++sequence,
       timestamp: new Date().toISOString(),
-      data: { command_id: commandId, command, goal: goal ?? null, takeover },
+      data: {
+        command_id: commandId, command, goal: goal ?? null, takeover,
+        allow_unlocalized: allowUnlocalized,
+      },
     });
     if (!sendFrame?.(frame)) {
       set({
@@ -134,8 +155,12 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       });
       return;
     }
+    // Disarm only now the frame is actually away. Clearing it before the send
+    // would lose an override the operator legitimately armed if the socket
+    // dropped the frame, and silently demand they arm it again.
     set({
       pickMode: "none",
+      allowUnlocalized: allowUnlocalized ? false : get().allowUnlocalized,
       active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null },
     });
   },

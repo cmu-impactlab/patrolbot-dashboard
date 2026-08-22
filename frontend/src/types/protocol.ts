@@ -215,6 +215,11 @@ export interface CommandRequestData {
   /** Set only when the operator confirms taking control from the current
    *  lease holder. */
   takeover?: boolean;
+  /** Operator override for this one command: send the destination even though
+   *  the robot reports it does not know where it is. RViz has always been able
+   *  to do this — Nav2 has no localization gate of its own — so this restores
+   *  parity rather than granting anything new. Never persisted. */
+  allow_unlocalized?: boolean;
   /** Server-stamped from the verified session role on the way to the robot.
    *  Browsers never set this; anything sent here is overwritten. */
   operator_authorized?: boolean;
