@@ -105,10 +105,11 @@ Server-side broker rules:
   driven onto its charger by hand. The command, its gate, its UI control and
   the mock's implementation of it were removed rather than left advertising a
   capability nothing implements.
-  `charge_release` and `motor_enable` remain separate commands for the
-  robot-side and diagnostic paths (charge release stays zero-motion and
-  motor-disabled; motor enable refuses while charging), and the dashboard UI
-  does not send them. The UI mirrors these rules in
+  `charge_release` remains a robot-side and diagnostic command (zero-motion and
+  motor-disabled); the dashboard UI does not send it. `motor_enable` is an
+  explicit, confirmation-gated Advanced dashboard action that refuses while
+  charging, while moving, during active navigation, or when hardware
+  telemetry/capability is unsafe or unavailable. The UI mirrors these rules in
   `frontend/src/lib/dockGates.ts` to grey out the control and explain why;
   the server decision is the authoritative one.
 - The bridge executes commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1`;

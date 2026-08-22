@@ -70,6 +70,8 @@ def test_motor_enable_needs_charge_released_first():
     ({"estop_pressed": True}, "emergency stop"),
     ({"motors_enabled": True}, "already on"),
     ({"stationary": False}, "still moving"),
+    ({"navigating": True}, "stop it before enabling"),
+    ({"capabilities": ("undock",)}, "not available"),
     ({"fault_flags": 1}, "fault"),
 ])
 def test_motor_enable_refusals(overrides, fragment):
@@ -339,8 +341,8 @@ def test_undock_forwarded_straight_from_charging(client):
 
 
 def test_motor_enable_rejected_while_charging(client):
-    """The separate motor_enable command (not sent by the dashboard UI) keeps
-    its own interlock: motors must not go live on the charger."""
+    """The Advanced motor-enable action keeps its own interlock: motors must
+    not go live on the charger."""
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()

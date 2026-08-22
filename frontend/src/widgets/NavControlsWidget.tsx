@@ -1,9 +1,13 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import {
-  ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, X,
+  ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, Power, X,
 } from "lucide-react";
+import { useState } from "react";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
-import { factsFrom, showsUndock, undockReason } from "../lib/dockGates";
+import {
+  factsFrom, motorEnableReason, showsUndock, undockReason,
+} from "../lib/dockGates";
 import { useIsFresh } from "../lib/freshness";
 
 const OUTCOME_COPY: Record<string, string> = {
@@ -15,10 +19,10 @@ const OUTCOME_COPY: Record<string, string> = {
 };
 
 /**
- * Goal-based commands only (send-to-destination, set-location, stop, undock).
- * There is deliberately no joystick/velocity control — undock included, which
- * is an action the robot executes rather than velocity published from a
- * browser.
+ * Navigation plus explicitly gated hardware actions. There is deliberately no
+ * joystick/velocity control — undock is an action the robot executes rather
+ * than velocity published from a browser, and Advanced motor enable changes
+ * drive power without sending motion.
  *
  * There is no Dock control to pair with Undock: the robot has no automatic
  * dock-in path, so it is driven onto its charger by hand. Undock appears only
@@ -26,6 +30,7 @@ const OUTCOME_COPY: Record<string, string> = {
  * otherwise — a permanently disabled button reads as something broken.
  */
 export function NavControlsWidget() {
+  const [motorEnableConfirmOpen, setMotorEnableConfirmOpen] = useState(false);
   const connection = useTelemetryStore((state) => state.connection);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
   const baseState = useTelemetryStore((state) => state.baseState);
@@ -73,6 +78,11 @@ export function NavControlsWidget() {
   const onDock = showsUndock(facts);
   const undockBlockedReason = undockReason(facts);
   const undockBusy = active?.command === "undock" || facts.undockActive;
+  const motorEnableBusy = active?.command === "motor_enable";
+  const motorEnableBlockedReason = motorEnableReason(facts);
+  const motorEnableUiReason = motorEnableBlockedReason ?? (active
+    ? "Wait for the current command to finish before enabling the motors."
+    : null);
 
   return (
     <div>
@@ -141,7 +151,65 @@ export function NavControlsWidget() {
           raised or the e-stop pressed is still refused. Clears itself after
           one destination, and on reconnect.
         </p>
+        <div className="nav-advanced-motor">
+          <button
+            className="btn danger"
+            disabled={motorEnableUiReason !== null || motorEnableBusy}
+            onClick={() => setMotorEnableConfirmOpen(true)}
+            title={motorEnableUiReason
+              ?? "Enable drive power without commanding the robot to move"}
+          >
+            <Power size={15} />
+            {motorEnableBusy ? "Turning motors on…" : "Turn motors on"}
+          </button>
+          <p className="nav-advanced-note">
+            Enables drive power only; it does not command movement. The robot
+            must be connected, released from charging, stopped, fault-free,
+            and clear of the emergency stop.
+          </p>
+          {motorEnableUiReason && (
+            <p className="nav-advanced-note nav-motor-reason">
+              Motor enable — {motorEnableUiReason}
+            </p>
+          )}
+        </div>
       </details>
+      <Dialog.Root open={motorEnableConfirmOpen} onOpenChange={setMotorEnableConfirmOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content" style={{ maxWidth: 420 }}>
+            <Dialog.Title asChild>
+              <h2>Turn the motors on?</h2>
+            </Dialog.Title>
+            <Dialog.Description className="subtext">
+              This enables drive power but does not command movement. Confirm
+              that the area around the robot is clear before continuing.
+            </Dialog.Description>
+            {motorEnableUiReason && (
+              <p className="nav-advanced-note nav-motor-reason">
+                Motor enable — {motorEnableUiReason}
+              </p>
+            )}
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button className="btn">Cancel</button>
+              </Dialog.Close>
+              <button
+                className="btn danger"
+                disabled={motorEnableUiReason !== null || motorEnableBusy}
+                onClick={() => {
+                  if (motorEnableUiReason !== null || motorEnableBusy) return;
+                  setMotorEnableConfirmOpen(false);
+                  send("motor_enable");
+                }}
+                title={motorEnableUiReason ?? "Confirm motor enable"}
+              >
+                <Power size={15} /> Confirm motor enable
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <div className="nav-buttons">
         <button
           className={`btn wide primary ${pickMode === "goal" ? "active" : ""}`}

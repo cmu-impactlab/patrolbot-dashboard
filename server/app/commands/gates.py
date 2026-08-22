@@ -14,9 +14,9 @@ recover from on its own — stale or invalid telemetry, an active fault, a
 pressed e-stop, an obstructed rear bumper, a robot already moving, or a base
 that never claimed the capability at all.
 
-`charge_release` and `motor_enable` remain available as separate, separately
-audited commands for the robot-side and diagnostic paths; the dashboard UI
-does not send them.
+`charge_release` remains available for robot-side and diagnostic paths but the
+dashboard UI does not send it. `motor_enable` is exposed only under the
+dashboard's Advanced disclosure and keeps these authoritative gates.
 """
 from __future__ import annotations
 
@@ -270,6 +270,8 @@ def motor_enable_reason(facts: StateFacts) -> str | None:
     reason = _hardware_reason(facts)
     if reason is not None:
         return reason
+    if "motor_enable" not in facts.capabilities:
+        return "Motor enable is not available on this robot."
     if facts.charging:
         return ("The robot is still on charge. Release charging before "
                 "enabling the motors.")
@@ -277,6 +279,9 @@ def motor_enable_reason(facts: StateFacts) -> str | None:
         return "The emergency stop is pressed. Release it on the robot first."
     if facts.motors_enabled:
         return "The motors are already on."
+    if facts.navigating:
+        return ("The robot is still driving to a destination. Stop it before "
+                "enabling the motors.")
     return _stationary_reason(facts)
 
 

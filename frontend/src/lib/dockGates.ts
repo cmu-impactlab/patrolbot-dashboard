@@ -142,9 +142,15 @@ export function chargeReleaseReason(facts: StateFacts): string | null {
 export function motorEnableReason(facts: StateFacts): string | null {
   const reason = hardwareReason(facts);
   if (reason !== null) return reason;
+  if (!facts.capabilities.includes("motor_enable")) {
+    return "Motor enable is not available on this robot.";
+  }
   if (isCharging(facts)) return "The robot is still on charge. Release charging before enabling the motors.";
   if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
   if (facts.motorsEnabled) return "The motors are already on.";
+  if (facts.navigating) {
+    return "The robot is still driving to a destination. Stop it before enabling the motors.";
+  }
   return stationaryReason(facts);
 }
 
