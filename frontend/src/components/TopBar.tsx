@@ -10,6 +10,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
 import { useUiStore } from "../stores/uiStore";
 import { CONNECTION_COPY, STATUS_COPY } from "../lib/plainLanguage";
 import { WidgetLibrary } from "./WidgetLibrary";
+import { SoftwareStop } from "./SoftwareStop";
 import { DashboardTourButton } from "./DashboardTourButton";
 
 export function TopBar() {
@@ -26,6 +27,8 @@ export function TopBar() {
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
   const authUser = useAuthStore((state) => state.user);
+  const tourActive = useUiStore(state => state.tourActive);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -46,7 +49,7 @@ export function TopBar() {
       onSuccess: () => {
         useLayoutStore.getState().registerCustom({
           name, is_preset: false, layout: doc, updated_at: new Date().toISOString(),
-        });
+        }, state.revision);
         setSaveOpen(false);
         setSaveName("");
         setSaveError("");
@@ -81,6 +84,9 @@ export function TopBar() {
       </span>
       <div className="spacer" />
 
+      <div className="compact-stop"><SoftwareStop /></div>
+      <button className="btn compact-menu-toggle" aria-expanded={menuOpen || tourActive} aria-controls="dashboard-actions" onClick={() => setMenuOpen(!menuOpen)}>Menu</button>
+      <div id="dashboard-actions" className={`topbar-actions ${menuOpen || tourActive ? "open" : ""}`}>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
           <button className="btn" data-tour="layouts">
@@ -150,6 +156,7 @@ export function TopBar() {
             </p>
             <input
               className="text-input"
+              aria-label="Dashboard name"
               placeholder="Dashboard name"
               value={saveName}
               autoFocus
@@ -197,6 +204,8 @@ export function TopBar() {
           </a>
         </span>
       )}
+      </div>
+      {deleteLayout.isError && <p role="alert">Dashboard deletion failed. Please try again.</p>}
       <WidgetLibrary open={libraryOpen} onOpenChange={setLibraryOpen} />
     </header>
   );

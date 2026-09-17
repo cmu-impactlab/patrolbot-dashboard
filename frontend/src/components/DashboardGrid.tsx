@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Responsive, type Layouts } from "react-grid-layout";
 import { useSaveLayout } from "../api/queries";
-import { useLayoutStore } from "../stores/layoutStore";
+import { BREAKPOINTS, COLUMNS, breakpointFor, useLayoutStore } from "../stores/layoutStore";
 import { WIDGET_REGISTRY } from "../widgets/registry";
 import { WidgetFrame } from "./WidgetFrame";
+
+// react-grid-layout uses > while our integer container boundaries are inclusive.
+const gridBreakpoints = Object.fromEntries(Object.entries(BREAKPOINTS).map(([key, value]) => [key, Math.max(0, value - 1)]));
 
 /**
  * Container width via ResizeObserver rather than react-grid-layout's
@@ -36,40 +39,49 @@ export function DashboardGrid() {
   const setLayouts = useLayoutStore((state) => state.setLayouts);
   const markSaved = useLayoutStore((state) => state.markSaved);
   const save = useSaveLayout();
+  const minimized = useLayoutStore(state => state.minimized);
+  const revision = useLayoutStore(state => state.revision);
+  const { mutate, isPending, isError, reset } = save;
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [containerRef, width] = useContainerWidth();
 
   // Debounced persistence: 1 s after the last layout change.
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty || isPending || isError) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      save.mutate(useLayoutStore.getState().doc());
-      markSaved();
+      const state = useLayoutStore.getState();
+      const savingRevision = state.revision;
+      mutate(state.doc(), { onSuccess: () => markSaved(savingRevision) });
     }, 1000);
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-  }, [dirty, layouts, widgets, save, markSaved]);
+  }, [dirty, revision, isPending, isError, mutate, markSaved]);
 
+  useEffect(() => { useLayoutStore.getState().setBreakpoint(breakpointFor(width)); }, [width]);
+  const displayLayouts = Object.fromEntries(Object.entries(layouts).map(([key, items]) =>
+    [key, items.map(item => item.i in minimized ? { ...item, h: 2, minH: 2 } : { ...item })]));
   const known = widgets.filter((id) => id in WIDGET_REGISTRY);
 
   return (
     <div ref={containerRef} className={editMode ? "edit-mode" : ""}>
+      {isError && <div role="alert">Dashboard changes are unsaved. <button className="btn" onClick={() => reset()}>Retry saving</button></div>}
       {width > 0 && (
         <Responsive
           className="layout"
           width={width}
-          layouts={layouts as Layouts}
-          breakpoints={{ lg: 996, md: 768, sm: 480, xs: 0 }}
-          cols={{ lg: 12, md: 10, sm: 6, xs: 4 }}
+          layouts={displayLayouts as Layouts}
+          breakpoints={gridBreakpoints}
+          cols={COLUMNS}
           rowHeight={32}
           margin={[10, 10]}
           draggableHandle=".drag-handle"
           isDraggable={editMode}
           isResizable={editMode}
           resizeHandles={["se", "sw"]}
-          onLayoutChange={(_current, all) => setLayouts(all, editMode)}
+          onDragStop={(current) => setLayouts({ [breakpointFor(width)]: current })}
+          onResizeStop={(current) => setLayouts({ [breakpointFor(width)]: current })}
         >
           {known.map((id) => (
             <div key={id}>

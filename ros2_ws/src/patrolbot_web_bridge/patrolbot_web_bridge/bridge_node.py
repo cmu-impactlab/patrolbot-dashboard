@@ -103,21 +103,14 @@ class WebBridgeNode(Node):
             # 0.05 m/s and REJECTS anything above. Off now that the real
             # sequence has been exercised.
             ("undock_validation_mode", False),
-            # The dock is a fixed place, so a robot that reports charging is by
-            # definition at the dock pose. Ask the dock manager to seed
-            # localization from its configured dock pose when we see charging
-            # without a valid AMCL fix. The service is guarded — it runs its
-            # own zero-motion dock checks and refuses if the robot is not
-            # genuinely docked — so this can only ever confirm the truth.
-            #
-            # Was briefly OFF (2026-07-26): seeding worked, but a converged
-            # AMCL pose then killed the dock manager — _localization_health()
-            # derived its booleans from the numpy-backed covariance array, so
-            # rosidl's DockReadiness/Undock-feedback converter hit
-            # PyBool_Check -> SIGABRT, and the 20 s retry made it a crash loop.
-            # Fixed in patrolbot_dock_manager (bool() around valid/at_dock),
-            # same bug class as this repo's commit 3961041, so back ON.
-            ("auto_dock_pose_on_charge", True),
+            # Manual-only. AMCL normally goes silent while a docked robot is
+            # stationary, so pose age is not evidence that its last estimate
+            # is wrong. Automatically treating that silence as a lost fix
+            # republished the configured dock pose every 20-30 seconds and
+            # overwrote operator-set /initialpose estimates. The typed guarded
+            # initializer remains available for an explicit operator request,
+            # but charging or dock residence must never authorize a pose reset.
+            ("auto_dock_pose_on_charge", False),
             ("auto_dock_pose_retry_s", 20.0),
             # How old an AMCL fix may be and still count as localized for the
             # purposes of seeding. Generous: AMCL goes quiet on a stationary

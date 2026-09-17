@@ -1,0 +1,41 @@
+name: Mobile browser acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium webkit
+        working-directory: frontend
+      - run: npm run check:e2e
+        working-directory: frontend
+      - run: npm run test:e2e
+        working-directory: frontend
+      - run: python -m venv server/.venv
+      - run: server/.venv/bin/pip install ./server ./mock-robot
+      - run: npm run test:mock-browser
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: mobile-browser-traces
+          path: |
+            frontend/test-results/
+            frontend/test-results-mock/
+          retention-days: 7

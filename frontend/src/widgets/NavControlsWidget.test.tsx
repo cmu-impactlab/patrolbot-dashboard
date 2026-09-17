@@ -6,6 +6,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NavControlsWidget } from "./NavControlsWidget";
+import { useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { BaseStateData, PoseData } from "../types/protocol";
@@ -36,7 +37,9 @@ function baseState(overrides: Partial<BaseStateData> = {}): BaseStateData {
 
 function setState(base: BaseStateData | null, pose: PoseData | null = PARKED,
                   capabilities: string[] = CAPS) {
+  useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
   useTelemetryStore.setState({
+    wsConnected: true,
     connection: { state: "online", last_seen: null },
     // The controls read stale telemetry as absent, the way the server's gates
     // do, so these fixtures have to say the frames just arrived.

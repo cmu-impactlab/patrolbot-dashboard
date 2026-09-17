@@ -3,6 +3,7 @@ import {
   ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, Power, X,
 } from "lucide-react";
 import { useState } from "react";
+import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import {
@@ -30,6 +31,8 @@ const OUTCOME_COPY: Record<string, string> = {
  * otherwise — a permanently disabled button reads as something broken.
  */
 export function NavControlsWidget() {
+  const mayCommand = canCommand(useAuthStore(state => state.user));
+  const wsConnected = useTelemetryStore(state => state.wsConnected);
   const [motorEnableConfirmOpen, setMotorEnableConfirmOpen] = useState(false);
   const connection = useTelemetryStore((state) => state.connection);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
@@ -49,7 +52,7 @@ export function NavControlsWidget() {
   const cancel = useCommandStore((state) => state.cancel);
   const takeOver = useCommandStore((state) => state.takeOver);
 
-  const online = connection.state === "online";
+  const online = wsConnected && connection.state === "online";
   // A rejection from the single-operator lease — offer an explicit takeover.
   const leaseBlocked =
     active === null &&
@@ -86,6 +89,7 @@ export function NavControlsWidget() {
 
   return (
     <div>
+      {!mayCommand && <div className="nav-disabled-banner">Your account has read-only access. An operator account is required for robot commands.</div>}
       {!online && (
         <div className="nav-disabled-banner">
           The robot is not connected — commands are unavailable.
@@ -122,7 +126,7 @@ export function NavControlsWidget() {
           {leaseBlocked && (
             <button
               className="btn"
-              onClick={takeOver}
+              disabled={!mayCommand || !online} onClick={takeOver}
               title="Take control from the current operator and re-send your command"
             >
               Take over
@@ -154,7 +158,7 @@ export function NavControlsWidget() {
         <div className="nav-advanced-motor">
           <button
             className="btn danger"
-            disabled={motorEnableUiReason !== null || motorEnableBusy}
+            disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy)}
             onClick={() => setMotorEnableConfirmOpen(true)}
             title={motorEnableUiReason
               ?? "Enable drive power without commanding the robot to move"}
@@ -196,9 +200,9 @@ export function NavControlsWidget() {
               </Dialog.Close>
               <button
                 className="btn danger"
-                disabled={motorEnableUiReason !== null || motorEnableBusy}
+                disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy)}
                 onClick={() => {
-                  if (motorEnableUiReason !== null || motorEnableBusy) return;
+                  if (!canCommand(useAuthStore.getState().user) || motorEnableUiReason !== null || motorEnableBusy) return;
                   setMotorEnableConfirmOpen(false);
                   send("motor_enable");
                 }}
@@ -213,7 +217,7 @@ export function NavControlsWidget() {
       <div className="nav-buttons">
         <button
           className={`btn wide primary ${pickMode === "goal" ? "active" : ""}`}
-          disabled={!canNavigate}
+          disabled={!mayCommand || (!canNavigate)}
           onClick={() => setPickMode(pickMode === "goal" ? "none" : "goal")}
           title={canNavigate ? "Pick a destination on the map" : gateHint}
         >
@@ -221,7 +225,7 @@ export function NavControlsWidget() {
         </button>
         <button
           className={`btn ${pickMode === "initialpose" ? "active" : ""}`}
-          disabled={!online}
+          disabled={!mayCommand || (!online)}
           onClick={() => setPickMode(pickMode === "initialpose" ? "none" : "initialpose")}
           title="Tell the robot where it actually is on the map"
         >
@@ -230,7 +234,7 @@ export function NavControlsWidget() {
         {onDock && (
           <button
             className="btn danger"
-            disabled={undockBlockedReason !== null || undockBusy}
+            disabled={!mayCommand || (undockBlockedReason !== null || undockBusy)}
             onClick={() => send("undock")}
             title={undockBlockedReason
               ?? "Move the robot clear of its charging dock and turn it around"}
@@ -243,7 +247,7 @@ export function NavControlsWidget() {
           <>
             <button
               className="btn success"
-              disabled={!canNavigate}
+              disabled={!mayCommand || (!canNavigate)}
               onClick={resume}
               title={canNavigate ? "Send the robot back to the destination it was stopped on" : gateHint}
             >
@@ -261,7 +265,7 @@ export function NavControlsWidget() {
           <>
             <button
               className="btn danger"
-              disabled={!online}
+              disabled={!mayCommand || (!online)}
               onClick={stop}
               title="Pause the robot here; you can resume afterwards"
             >
@@ -269,7 +273,7 @@ export function NavControlsWidget() {
             </button>
             <button
               className="btn"
-              disabled={!online}
+              disabled={!mayCommand || (!online)}
               onClick={cancel}
               title="Cancel the destination and stop the robot (no resume)"
             >
@@ -279,7 +283,7 @@ export function NavControlsWidget() {
         ) : (
           <button
             className="btn wide danger"
-            disabled={!online}
+            disabled={!mayCommand || (!online)}
             onClick={stop}
             title="Cancel navigation and stop the robot"
           >

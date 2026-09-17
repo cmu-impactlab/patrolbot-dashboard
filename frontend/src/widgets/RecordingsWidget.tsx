@@ -162,6 +162,7 @@ export function RecordingsWidget() {
           <input
             className="text-input"
             style={{ margin: 0, flex: 1 }}
+            aria-label="Recording name"
             placeholder="Recording name"
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -193,6 +194,11 @@ export function RecordingsWidget() {
           </label>
         </div>
       )}
+      {!mayRecord && <p className="subtext">{readOnlyNote}</p>}
+      {!online && <p className="subtext">Connect the robot to start a recording.</p>}
+      {!mayDelete && rows.length > 0 && <p className="subtext">Deleting recordings requires an administrator account.</p>}
+      {listQuery.isError && <p role="alert">Recordings could not be loaded. <button className="btn" onClick={() => listQuery.refetch()}>Retry</button></p>}
+      {(remove.isError || stopMutation.isError) && <p role="alert">The recording change failed. Please try again.</p>}
       {error && <p className="subtext" style={{ color: "var(--danger)" }}>{error}</p>}
 
       {rows.filter((row) => row.status === "done").map((row) => (

@@ -4,6 +4,7 @@ import { useMapQuery } from "../../api/queries";
 import { useReplayStore } from "../../stores/replayStore";
 import { ROBOT_LENGTH_M, traceFootprint } from "../../lib/robotGeometry";
 import type { MapData } from "../../types/protocol";
+import { MapGesture } from "./gestures";
 import { buildMapBitmap } from "./bitmap";
 import { cssVar } from "./colors";
 import { fitView, followView, fitPoints, zoomAt, worldToScreen, type View } from "./transform";
@@ -135,7 +136,8 @@ export function ReplayMap({ theme }: { theme: string }) {
   const viewRef = useRef<View | null>(null);
   const bitmapRef = useRef<{ key: string; bitmap: HTMLCanvasElement } | null>(null);
   const signatureRef = useRef("");
-  const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
+  const gesture = useRef(new MapGesture());
+  const [interacting, setInteracting] = useState(false);
   const [panning, setPanning] = useState(false);
   const [follow, setFollow] = useState(false);
 
@@ -157,6 +159,8 @@ export function ReplayMap({ theme }: { theme: string }) {
   useEffect(() => {
     viewRef.current = null;
     signatureRef.current = "";
+    gesture.current.cancel();
+    setPanning(false);
   }, [poses]);
 
   useEffect(() => {
@@ -220,31 +224,28 @@ export function ReplayMap({ theme }: { theme: string }) {
                              event.clientY - rect.top, event.deltaY < 0 ? 1.15 : 1 / 1.15);
   };
 
+  const point = (event: React.PointerEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
   const onPointerDown = (event: React.PointerEvent) => {
-    if (!viewRef.current) return;
-    (event.target as Element).setPointerCapture(event.pointerId);
-    dragRef.current = {
-      sx: event.clientX, sy: event.clientY,
-      panX: viewRef.current.panX, panY: viewRef.current.panY,
-    };
-    setPanning(true);
-    setFollow(false);
+    if (!viewRef.current || (event.pointerType !== "mouse" && !interacting)) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gesture.current.down(event.pointerId, point(event));
+    setPanning(true); setFollow(false);
   };
-
   const onPointerMove = (event: React.PointerEvent) => {
-    const drag = dragRef.current;
-    if (!drag || !viewRef.current) return;
-    viewRef.current = {
-      zoom: viewRef.current.zoom,
-      panX: drag.panX + (event.clientX - drag.sx),
-      panY: drag.panY + (event.clientY - drag.sy),
-    };
+    if (viewRef.current) viewRef.current = gesture.current.move(event.pointerId, point(event), viewRef.current);
   };
-
-  const onPointerUp = () => {
-    dragRef.current = null;
-    setPanning(false);
+  const onPointerUp = (event: React.PointerEvent) => {
+    gesture.current.up(event.pointerId); setPanning(gesture.current.pointers.size > 0);
   };
+  const cancel = () => { gesture.current.cancel(); setPanning(false); };
+  useEffect(() => {
+    document.addEventListener("visibilitychange", cancel);
+    return () => document.removeEventListener("visibilitychange", cancel);
+  }, []);
 
   const zoomBy = (factor: number) => {
     const canvas = canvasRef.current;
@@ -265,12 +266,16 @@ export function ReplayMap({ theme }: { theme: string }) {
       <canvas
         ref={canvasRef}
         className={`map-canvas ${panning ? "panning" : ""}`}
+        aria-label="Recorded robot map"
+        style={{ touchAction: interacting ? "none" : "pan-y pinch-zoom" }}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={cancel}
+        onLostPointerCapture={onPointerUp}
       />
+<div className="map-interaction"><button className="btn" onClick={() => { cancel(); setInteracting(!interacting); }}>{interacting ? "Done" : "Interact with map"}</button></div>
       <div className="map-controls">
         <button className="btn" onClick={() => zoomBy(1.25)} title="Zoom in">
           <Plus size={15} />

@@ -1,4 +1,5 @@
-import { Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
+import { useChartInspection } from "../lib/useChartInspection";
+import { Line, LineChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
 import { useEffect, useState } from "react";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { MAX_RESOURCES_AGE_MS, useIsFresh } from "../lib/freshness";
@@ -18,6 +19,7 @@ function useTelemetryRate(): number {
 }
 
 export function PiStatsWidget() {
+  const inspection = useChartInspection();
   const resources = useTelemetryStore((state) => state.resources);
   const history = useTelemetryStore((state) => state.resourceHistory);
   const wsConnected = useTelemetryStore((state) => state.wsConnected);
@@ -77,9 +79,11 @@ export function PiStatsWidget() {
         </div>
       </div>
       <div className="section-label">Processor load</div>
-      <div className="chart-box" style={{ height: 70 }}>
+      <div {...inspection.events} className="chart-box" style={{ height: 70 }}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={history} margin={{ top: 4, right: 2, bottom: 0, left: 2 }}>
+            <Tooltip trigger={inspection.trigger} formatter={value => [`${Number(value).toFixed(0)}%`, "Processor load"]} labelFormatter={() => "Processor history"}
+              contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }} />
             <YAxis domain={[0, 100]} hide />
             <Line
               dataKey="cpu"

@@ -1,3 +1,4 @@
+import { WIDGET_SIZES } from "./defaultSizes";
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 import { AlertsWidget } from "./AlertsWidget";
 import { BumpersWidget } from "./BumpersWidget";
@@ -39,7 +40,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     description: "Occupancy map with the robot, its path and sensors",
     component: LiveMapWidget,
     settings: MapSettings,
-    defaultSize: { w: 6, h: 16, minW: 3, minH: 6 },
+    defaultSize: WIDGET_SIZES.liveMap,
     needsRobot: true,
     noPadding: true,
   },
@@ -48,7 +49,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Robot Status",
     description: "Primary state, motors, localization and speed",
     component: RobotStatusWidget,
-    defaultSize: { w: 3, h: 9, minW: 2, minH: 4 },
+    defaultSize: WIDGET_SIZES.robotStatus,
     needsRobot: true,
   },
   battery: {
@@ -56,7 +57,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Battery",
     description: "Charge level, voltage, estimated runtime and trend",
     component: BatteryWidget,
-    defaultSize: { w: 3, h: 12, minW: 2, minH: 5 },
+    defaultSize: WIDGET_SIZES.battery,
     needsRobot: true,
   },
   systemHealth: {
@@ -64,7 +65,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "System Health",
     description: "Per-subsystem health with plain-language explanations",
     component: SystemHealthWidget,
-    defaultSize: { w: 4, h: 13, minW: 3, minH: 5 },
+    defaultSize: WIDGET_SIZES.systemHealth,
     needsRobot: true,
   },
   alerts: {
@@ -72,7 +73,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Alerts",
     description: "Event history with severity and acknowledgment",
     component: AlertsWidget,
-    defaultSize: { w: 4, h: 10, minW: 3, minH: 4 },
+    defaultSize: WIDGET_SIZES.alerts,
     needsRobot: false,
   },
   piStats: {
@@ -80,7 +81,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Robot Computer & Network",
     description: "Raspberry Pi resources, link quality and telemetry rate",
     component: PiStatsWidget,
-    defaultSize: { w: 4, h: 10, minW: 3, minH: 4 },
+    defaultSize: WIDGET_SIZES.piStats,
     needsRobot: true,
   },
   bumpers: {
@@ -88,7 +89,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Bumpers",
     description: "Top-down view showing which bumper strip was hit",
     component: BumpersWidget,
-    defaultSize: { w: 3, h: 13, minW: 2, minH: 8 },
+    defaultSize: WIDGET_SIZES.bumpers,
     needsRobot: true,
   },
   recordings: {
@@ -96,7 +97,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Recordings",
     description: "Record telemetry sessions and replay them on the map",
     component: RecordingsWidget,
-    defaultSize: { w: 4, h: 13, minW: 3, minH: 6 },
+    defaultSize: WIDGET_SIZES.recordings,
     needsRobot: false,
   },
   navControls: {
@@ -104,7 +105,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDefinition> = {
     title: "Navigation",
     description: "Send the robot to a destination, undock it, fix its location, or stop it",
     component: NavControlsWidget,
-    defaultSize: { w: 3, h: 9, minW: 2, minH: 5 },
+    defaultSize: WIDGET_SIZES.navControls,
     needsRobot: true,
   },
 };

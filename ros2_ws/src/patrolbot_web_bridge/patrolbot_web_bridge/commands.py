@@ -486,7 +486,7 @@ class CommandExecutor:
                 and command == "navigate_to_pose" and not localized):
             self._node.get_logger().warning(
                 "LOCALIZATION GATE OVERRIDDEN by operator: navigating with an "
-                "unusable map-frame fix (command %s)", command_id)
+                f"unusable map-frame fix (command {command_id})")
 
         if command == "navigate_to_pose":
             self._navigate(command_id, goal, current_yaw)

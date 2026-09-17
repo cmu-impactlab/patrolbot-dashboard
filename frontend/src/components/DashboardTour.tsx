@@ -42,7 +42,7 @@ const CORE_STEPS: TourStep[] = [
     target: '[data-tour="layouts"]',
     title: "Choose a dashboard layout",
     description: "Layouts arrange widgets for different tasks. Your named dashboards also appear in this menu.",
-    instruction: "Click this menu whenever you want to switch layouts or save the current arrangement.",
+    instruction: "Open this menu whenever you want to switch layouts or save the current arrangement.",
   },
 ];
 
@@ -58,7 +58,7 @@ const WIDGET_TOURS: WidgetTour[] = [
     step: {
       target: '[data-tour="widget-liveMap"]', title: "Use the Live Map",
       description: "The map shows the robot, its heading, nearby laser points, planned path, traveled path, and selected destination.",
-      instruction: "Pan or zoom here, and always confirm the map matches the robot's real floor.",
+      instruction: "On touch screens, choose Interact with map to pan or pinch, then Done to scroll the dashboard. Position selections show a preview and require confirmation. Always confirm the map matches the robot's real floor.",
     },
   },
   {
@@ -116,7 +116,7 @@ const WIDGET_TOURS: WidgetTour[] = [
       description: role === "observer"
         ? "Your Observer account can inspect Navigation, but movement controls remain disabled. Ask an operator or administrator when the robot must move."
         : `Your ${role === "administrator" ? "Administrator" : "Operator"} account can set location, send a destination, stop, or undock when the displayed safety checks pass.`,
-      instruction: "Before any movement control is clicked, clear the path, keep a person at the robot, and use the physical emergency stop for emergencies.",
+      instruction: "On touch screens, choose Interact with map to pan or pinch. Selecting a position shows a preview: adjust heading, then explicitly confirm or Cancel. Before any movement control is clicked, clear the path, keep a person at the robot, and use the physical emergency stop for emergencies.",
     }),
   },
   {
@@ -167,7 +167,7 @@ export function buildTourSteps(
     description: missingNames.length > 0
       ? `This layout does not currently show ${listNames(missingNames)}. You can add any of them without replacing the widgets already here.`
       : "This layout already shows every available widget, but you can still remove, move, resize, or minimize them.",
-    instruction: "Click Edit dashboard, then Add widget. Click Add beside each widget you want, arrange it, and click Done editing. Your current layout saves automatically.",
+    instruction: "Open Menu on a phone or tablet, then Edit dashboard and Add widget. Use drag handles or the widget menu’s Move up/down and size controls. Widgets are shared; arrangements save separately for each screen size. Choose Done editing when finished.",
   };
   const role = user?.role ?? "observer";
   const widgetSteps = WIDGET_TOURS

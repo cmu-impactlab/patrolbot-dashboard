@@ -21,6 +21,7 @@ export function WidgetLibrary({
           <Dialog.Title asChild>
             <h2>Widget library</h2>
           </Dialog.Title>
+          <Dialog.Close className="btn dialog-close" aria-label="Close widget library">×</Dialog.Close>
           {Object.values(WIDGET_REGISTRY).map((definition) => {
             const present = widgets.includes(definition.id);
             return (
@@ -31,6 +32,7 @@ export function WidgetLibrary({
                 </div>
                 <button
                   className="btn"
+                  aria-label={`${present ? "Added" : "Add"} ${definition.title}`}
                   disabled={present}
                   onClick={() => addWidget(definition.id, definition.defaultSize)}
                 >

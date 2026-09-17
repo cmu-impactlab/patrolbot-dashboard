@@ -7,6 +7,8 @@ is fine when it has actually stopped with a safety fault.
 Codes are verbatim from patrolbot_interfaces/action/Undock.action and
 patrolbot_interfaces/srv/{ChargeRelease,MotorEnable}.srv.
 """
+from pathlib import Path
+
 from patrolbot_web_bridge.commands import (
     SERVICE_CODE_TEXT,
     UNDOCK_CODE_TEXT,
@@ -30,6 +32,13 @@ CANCELED = 9
 TIMEOUT = 10
 SESSION_CHANGED = 11
 SAFETY_FAULT = 12
+
+
+def test_charging_never_enables_automatic_dock_pose_reset_by_default():
+    bridge_source = (Path(__file__).parents[1] / "patrolbot_web_bridge" /
+                     "bridge_node.py").read_text(encoding="utf-8")
+    assert '("auto_dock_pose_on_charge", False)' in bridge_source
+    assert '("auto_dock_pose_on_charge", True)' not in bridge_source
 
 
 def test_every_undock_code_has_operator_copy():

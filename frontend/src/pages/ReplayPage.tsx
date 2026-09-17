@@ -159,6 +159,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
   const t = usePlayhead();
 
   useEffect(() => {
+    setError("");
     let cancelled = false;
     fetchRecordingDetail(recordingId)
       .then((detail) => {
@@ -181,7 +182,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
+      if (target && /^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(target.tagName)) return;
       const store = useReplayStore.getState();
       if (event.code === "Space") {
         event.preventDefault();
@@ -197,7 +198,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
   }, []);
 
   if (error) {
-    return <div className="replay-page"><p className="subtext">{error}</p></div>;
+    return <div className="replay-page"><p className="subtext">{error}</p><a className="btn" href="/">Return to dashboard</a></div>;
   }
   if (!recording) {
     return <div className="replay-page" aria-busy="true"><p className="subtext">Loading replay…</p></div>;
@@ -216,6 +217,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
         <a className="btn" href={`/api/recordings/${recording.id}/export.zip`} download>
           <Download size={14} /> Download data
         </a>
+        <a className="btn" href="/">Return to dashboard</a>
         <DashboardTourButton replay />
       </header>
 

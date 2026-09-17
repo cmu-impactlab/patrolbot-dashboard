@@ -5,6 +5,7 @@ import { DashboardGrid } from "./components/DashboardGrid";
 import { DashboardTour } from "./components/DashboardTour";
 import { RestorePosePrompt } from "./components/RestorePosePrompt";
 import { TourPrompt } from "./components/TourPrompt";
+import { MapSelectionHost } from "./components/MapSelectionHost";
 import { TopBar } from "./components/TopBar";
 import { consumeTourUrl, shouldStartTourFromUrl } from "./lib/dashboardTour";
 import { replayIdFromUrl } from "./lib/replayTab";
@@ -44,6 +45,7 @@ function Dashboard() {
   return (
     <div className="app-shell">
       <TopBar />
+      <MapSelectionHost />
       <div className="dashboard-scroll" data-tour="dashboard">
         <DashboardGrid />
       </div>

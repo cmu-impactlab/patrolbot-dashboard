@@ -36,3 +36,8 @@ docs/site/
 # the code, and the issue tracker is where status lives.
 audit/
 /dashboard-audit.txt
+
+# Browser test artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/test-results-mock/

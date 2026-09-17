@@ -53,7 +53,7 @@ describe("dynamic tour steps", () => {
       .find((item) => item.title === "Add and arrange your own widgets")!;
     expect(step.description).toContain("Battery");
     expect(step.description).toContain("Navigation");
-    expect(step.instruction).toMatch(/Click Edit dashboard, then Add widget.*Click Add.*Done editing/);
+    expect(step.instruction).toMatch(/Open Menu.*Edit dashboard and Add widget.*Move up\/down.*Done editing/);
   });
 
   it("tailors Navigation and Recordings to the signed-in role", () => {

@@ -465,3 +465,42 @@ def test_the_override_needs_the_server_authorization_stamp():
                       base_state_age=0.1, allow_unlocalized=True,
                       odom_age=0.1, operator_authorized=False)
     assert reason is not None and "know where it is" in reason
+
+
+def test_authorized_override_logs_once_and_reaches_navigation():
+    """Jazzy's RcutilsLogger takes one formatted message, unlike stdlib logging.
+
+    The deployed two-argument warning call raised TypeError here and restarted
+    the web bridge before the goal could reach the action client.
+    """
+    warnings = []
+    navigations = []
+    logger = SimpleNamespace(warning=lambda message: warnings.append(message))
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor._node = SimpleNamespace(get_logger=lambda: logger)
+    executor._ws = _Ws()
+    executor._navigate = (
+        lambda command_id, goal, current_yaw:
+        navigations.append((command_id, goal, current_yaw)))
+
+    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    executor.handle(
+        {
+            "command_id": "override-goal",
+            "command": "navigate_to_pose",
+            "goal": goal,
+            "allow_unlocalized": True,
+            "operator_authorized": True,
+        },
+        _navigable_base_state(),
+        current_yaw=0.25,
+        localized=False,
+        base_state_age=0.1,
+        odom_age=0.1,
+    )
+
+    assert warnings == [
+        "LOCALIZATION GATE OVERRIDDEN by operator: navigating with an "
+        "unusable map-frame fix (command override-goal)"
+    ]
+    assert navigations == [("override-goal", goal, 0.25)]

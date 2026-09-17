@@ -10,6 +10,11 @@ import type { MapData } from "../../types/protocol";
 import {
   ROBOT_LENGTH_M, ROBOT_SWING_RADIUS_M, WHEEL_HALF_LENGTH_M, WHEEL_Y_M, traceFootprint,
 } from "../../lib/robotGeometry";
+import { MapCommandFeedback } from "../../components/MapCommandFeedback";
+import { MapGesture } from "./gestures";
+import { useAuthStore } from "../../stores/authStore";
+import { mapCommandReason } from "../../lib/mapCommand";
+import type { GoalData } from "../../types/protocol";
 import { buildMapBitmap } from "./bitmap";
 import { cssVar } from "./colors";
 import { fitView, followView, screenToWorld, worldToScreen, zoomAt, type View } from "./transform";
@@ -293,7 +298,16 @@ export function LiveMapWidget() {
   // Last drawn scene signature; identical means there is nothing new to paint.
   const signatureRef = useRef<string>("");
   const [panning, setPanning] = useState(false);
-  const dragRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null);
+  const gesture = useRef(new MapGesture());
+  const fullscreen = useUiStore(state => state.fullscreenWidget === "liveMap");
+  const [interacting, setInteracting] = useState(fullscreen);
+  const [pending, setPending] = useState<{ mode: "goal" | "initialpose"; goal: GoalData } | null>(null);
+  const pendingRef = useRef<typeof pending>(null);
+  const [error, setError] = useState<string | null>(null);
+  const online = useTelemetryStore(state => state.wsConnected && state.connection.state === "online");
+  const user = useAuthStore(state => state.user);
+  const baseSession = useTelemetryStore(state => state.baseState?.session_generation);
+  const robotId = useTelemetryStore(state => state.robotId);
   const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
   const pickHoverRef = useRef<[number, number] | null>(null);
   const pickMode = useCommandStore((state) => state.pickMode);
@@ -306,7 +320,8 @@ export function LiveMapWidget() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !map) return;
-    const ctx = canvas.getContext("2d")!;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
     let raf = 0;
 
     const render = () => {
@@ -361,97 +376,102 @@ export function LiveMapWidget() {
     return () => cancelAnimationFrame(raf);
   }, [map, theme]);
 
-  // Interactions
-  const onWheel = (event: React.WheelEvent) => {
-    if (!viewRef.current) return;
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-    viewRef.current = zoomAt(viewRef.current, event.clientX - rect.left, event.clientY - rect.top, factor);
-  };
-
-  const onPointerDown = (event: React.PointerEvent) => {
-    if (!viewRef.current) return;
-    (event.target as Element).setPointerCapture(event.pointerId);
-    const mode = useCommandStore.getState().pickMode;
-    if (mode !== "none") {
-      // RViz-style pose picking: the press anchors the position; dragging
-      // stretches an arrow whose direction becomes the orientation.
-      const rect = canvasRef.current!.getBoundingClientRect();
-      const ax = event.clientX - rect.left;
-      const ay = event.clientY - rect.top;
-      pickArrowRef.current = { ax, ay, ex: ax, ey: ay, mode };
-      return;
-    }
-    dragRef.current = {
-      sx: event.clientX,
-      sy: event.clientY,
-      panX: viewRef.current.panX,
-      panY: viewRef.current.panY,
-    };
-    setPanning(true);
-    setFollowRobot(false);
-  };
-
-  const onPointerMove = (event: React.PointerEvent) => {
-    if (pickArrowRef.current) {
-      const rect = canvasRef.current!.getBoundingClientRect();
-      const pick = pickArrowRef.current;
-      // The arrow only encodes direction — cap its length so it stays a
-      // compass needle instead of stretching across the map.
-      let dx = event.clientX - rect.left - pick.ax;
-      let dy = event.clientY - rect.top - pick.ay;
-      const length = Math.hypot(dx, dy);
-      if (length > MAX_ARROW_PX) {
-        dx *= MAX_ARROW_PX / length;
-        dy *= MAX_ARROW_PX / length;
-      }
-      pick.ex = pick.ax + dx;
-      pick.ey = pick.ay + dy;
-      return;
-    }
-    if (useCommandStore.getState().pickMode !== "none") {
-      const rect = canvasRef.current!.getBoundingClientRect();
-      pickHoverRef.current = [event.clientX - rect.left, event.clientY - rect.top];
-      return;
-    }
-    pickHoverRef.current = null;
-    const drag = dragRef.current;
-    if (!drag || !viewRef.current) return;
-    viewRef.current = {
-      zoom: viewRef.current.zoom,
-      panX: drag.panX + (event.clientX - drag.sx),
-      panY: drag.panY + (event.clientY - drag.sy),
-    };
-  };
-
-  const onPointerUp = () => {
-    const pick = pickArrowRef.current;
+  const clear = () => {
+    gesture.current.cancel();
     pickArrowRef.current = null;
     pickHoverRef.current = null;
-    dragRef.current = null;
+    pendingRef.current = null;
+    setPending(null);
     setPanning(false);
-    if (!pick || !viewRef.current) return;
-    const [wx, wy] = screenToWorld(viewRef.current, pick.ax, pick.ay);
-    // Screen y grows downward, world y upward — negate the y component.
-    const dragged = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay) > 8;
-    const yaw = dragged
-      ? Math.round(Math.atan2(-(pick.ey - pick.ay), pick.ex - pick.ax) * 1000) / 1000
-      : null; // plain click: navigate keeps the current heading
-    useCommandStore.getState().send(
-      pick.mode === "goal" ? "navigate_to_pose" : "set_initial_pose",
-      { x: Math.round(wx * 100) / 100, y: Math.round(wy * 100) / 100, yaw },
-    );
+    setError(null);
   };
+
+  useEffect(() => {
+    clear();
+    if (pickMode !== "none") { setInteracting(true); setFollowRobot(false); }
+  }, [pickMode, online, mapVersion, robotId, fullscreen, user, baseSession]);
+  useEffect(() => {
+    const hide = () => { if (document.hidden) { clear(); useCommandStore.getState().setPickMode("none"); } };
+    document.addEventListener("visibilitychange", hide);
+    return () => document.removeEventListener("visibilitychange", hide);
+  }, []);
+  useEffect(() => { viewRef.current = null; signatureRef.current = ""; }, [mapVersion, robotId]);
+
+  const point = (event: React.PointerEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+  const onWheel = (event: React.WheelEvent) => {
+    if (!viewRef.current || pendingRef.current) return;
+    const rect = canvasRef.current!.getBoundingClientRect();
+    viewRef.current = zoomAt(viewRef.current, event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1.15 : 1 / 1.15);
+  };
+  const onPointerDown = (event: React.PointerEvent) => {
+    if (!viewRef.current || (event.pointerType === "mouse" && event.button !== 0)) return;
+    if (event.pointerType !== "mouse" && !interacting) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const p = point(event);
+    gesture.current.down(event.pointerId, p);
+    pendingRef.current = null; setPending(null); setError(null);
+    setFollowRobot(false);
+    if (gesture.current.multi) { pickArrowRef.current = null; setPanning(true); return; }
+    const mode = useCommandStore.getState().pickMode;
+    if (mode !== "none") {
+      pickArrowRef.current = { ax: p.x, ay: p.y, ex: p.x, ey: p.y, mode };
+    } else { setPanning(true); }
+  };
+  const onPointerMove = (event: React.PointerEvent) => {
+    const p = point(event);
+    if (pickArrowRef.current && gesture.current.pointers.has(event.pointerId) && !gesture.current.multi) {
+      const pick = pickArrowRef.current;
+      let dx = p.x - pick.ax, dy = p.y - pick.ay;
+      const length = Math.hypot(dx, dy);
+      if (length > MAX_ARROW_PX) { dx *= MAX_ARROW_PX / length; dy *= MAX_ARROW_PX / length; }
+      pick.ex = pick.ax + dx; pick.ey = pick.ay + dy;
+      gesture.current.pointers.set(event.pointerId, p);
+    } else if (viewRef.current && gesture.current.pointers.has(event.pointerId)) {
+      viewRef.current = gesture.current.move(event.pointerId, p, viewRef.current);
+    } else if (event.pointerType === "mouse" && pickMode !== "none" && !pendingRef.current) {
+      pickHoverRef.current = [p.x, p.y];
+    }
+  };
+  const submit = (selection: NonNullable<typeof pending>) => {
+    const reason = mapCommandReason(selection.mode);
+    if (reason) { setError(reason); return; }
+    clear(); // Consume before sending: repeated taps cannot resubmit.
+    useCommandStore.getState().send(selection.mode === "goal" ? "navigate_to_pose" : "set_initial_pose", selection.goal);
+  };
+  const onPointerUp = (event: React.PointerEvent) => {
+    const selectable = gesture.current.up(event.pointerId);
+    setPanning(gesture.current.pointers.size > 0);
+    const pick = pickArrowRef.current;
+    if (!selectable || !pick || !viewRef.current) return;
+    const [x, y] = screenToWorld(viewRef.current, pick.ax, pick.ay);
+    const dragged = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay) > 8;
+    const selection = { mode: pick.mode, goal: { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100,
+      yaw: dragged ? Math.round(Math.atan2(-(pick.ey - pick.ay), pick.ex - pick.ax) * 1000) / 1000 : null } };
+    pickHoverRef.current = null;
+    if (event.pointerType === "mouse") { pickArrowRef.current = null; submit(selection); }
+    else { pendingRef.current = selection; setPending(selection); }
+  };
+  const cancelPointer = (event: React.PointerEvent) => {
+    // Normal implicit capture release follows pointerup. Only an active
+    // pointer losing capture invalidates the gesture; it never submits.
+    if (gesture.current.pointers.has(event.pointerId)) clear();
+  };
+  const done = () => { clear(); setInteracting(false); useCommandStore.getState().setPickMode("none"); };
 
   const zoomButtons = (factor: number) => {
     const canvas = canvasRef.current;
     if (!canvas || !viewRef.current) return;
+    clear();
     viewRef.current = zoomAt(viewRef.current, canvas.clientWidth / 2, canvas.clientHeight / 2, factor);
   };
 
   const fit = () => {
     const canvas = canvasRef.current;
     if (!canvas || !map) return;
+    clear();
     setFollowRobot(false);
     viewRef.current = fitView(map, canvas.clientWidth, canvas.clientHeight);
   };
@@ -469,13 +489,34 @@ export function LiveMapWidget() {
       <canvas
         ref={canvasRef}
         className={`map-canvas ${panning ? "panning" : ""} ${pickMode !== "none" ? "picking" : ""}`}
+        aria-label="Live robot map"
+        style={{ touchAction: interacting ? "none" : "pan-y pinch-zoom" }}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={cancelPointer}
+        onLostPointerCapture={cancelPointer}
         onPointerLeave={() => { pickHoverRef.current = null; }}
       />
+      <div className="map-interaction"><button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
+        {pickMode !== "none" && !pending && <p className="map-pick-help">Touch: tap, adjust heading, then confirm. Mouse: release to send.</p>}
+      </div>
+      {pending && <div className="map-confirm" role="region" aria-label="Confirm map selection">
+        <div>Position: {pending.goal.x}, {pending.goal.y} m</div>
+        <label>Heading: {pending.goal.yaw == null ? "Default" : `${Math.round(pending.goal.yaw * 180 / Math.PI)}°`}
+          <input aria-label="Heading" type="range" min="-180" max="180" value={(pending.goal.yaw ?? 0) * 180 / Math.PI} onChange={event => {
+            const yaw = Number(event.target.value) * Math.PI / 180;
+            const next = { ...pending, goal: { ...pending.goal, yaw } }; pendingRef.current = next; setPending(next);
+            const pick = pickArrowRef.current; if (pick) { pick.ex = pick.ax + 60 * Math.cos(yaw); pick.ey = pick.ay - 60 * Math.sin(yaw); }
+          }} />
+        </label>
+        {error && <p role="alert">{error}</p>}
+        <div className="actions"><button className="btn" onClick={done}>Cancel</button>
+          <button className="btn primary" onClick={() => { if (pendingRef.current) submit(pendingRef.current); }}>{pending.mode === "goal" ? "Send destination" : "Set location"}</button></div>
+      </div>}
+      {fullscreen && !pending && pickMode === "none" && <MapCommandFeedback />}
+      {!pending && error && <div className="map-confirm" role="alert">{error}</div>}
       <div className="map-controls">
         <button className="btn" onClick={() => zoomButtons(1.25)} title="Zoom in">
           <Plus size={15} />
@@ -488,7 +529,7 @@ export function LiveMapWidget() {
         </button>
         <button
           className={`btn ${followRobot ? "active" : ""}`}
-          onClick={() => setFollowRobot(!followRobot)}
+          onClick={() => { clear(); setFollowRobot(!followRobot); }}
           title="Follow robot"
         >
           <Crosshair size={15} />

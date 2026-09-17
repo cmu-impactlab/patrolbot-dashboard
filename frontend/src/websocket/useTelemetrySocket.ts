@@ -21,9 +21,14 @@ export function useTelemetrySocket(): void {
           case "command.result":
             commands.handleResult(frame.data);
             break;
+          case "server.snapshot":
+            commands.setPickMode("none");
+            useTelemetryStore.getState().handleFrame(frame);
+            break;
           case "state.connection":
             // A (re)connecting robot may be a different robot with the same
             // map_version — refetch rather than trust the cached map.
+            commands.setPickMode("none");
             if (frame.data.state === "online") {
               queryClient.invalidateQueries({ queryKey: ["map"] });
             }
@@ -40,13 +45,17 @@ export function useTelemetrySocket(): void {
         // Advanced disclosure it was armed in is collapsed by default.
         useCommandStore.getState().resetOverrides();
       },
-      onClose: () => useTelemetryStore.getState().setWsConnected(false),
+      onClose: () => {
+        useCommandStore.getState().setPickMode("none");
+        useTelemetryStore.getState().setWsConnected(false);
+      },
     });
     socket.connect();
     registerCommandSender((frame) => socket.send(frame));
     return () => {
       registerCommandSender(null);
       socket.close();
+      store.setWsConnected(false);
     };
   }, [queryClient]);
 }

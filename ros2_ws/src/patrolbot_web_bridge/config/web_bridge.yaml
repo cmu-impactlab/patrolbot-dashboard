@@ -61,6 +61,12 @@
     undock_reverse_speed: 0.10
     undock_validation_mode: false
 
+    # Manual-only. A stationary AMCL estimate naturally becomes old while the
+    # robot charges; age alone must not overwrite an operator-set /initialpose
+    # with the configured dock pose. The guarded initializer is still
+    # available when an operator explicitly requests it.
+    auto_dock_pose_on_charge: false
+
     # Charge-signal conditioning. A charger latching against marginal dock
     # contacts inverted charge_state every few seconds on 2026-07-28, and the
     # battery driver's status bit claimed "charging" for 81 consecutive

@@ -1,3 +1,4 @@
+import { useChartInspection } from "../lib/useChartInspection";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useBatteryHistory } from "../api/queries";
 import { formatMinutes } from "../lib/format";
@@ -6,6 +7,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
 import { MAX_BATTERY_AGE_MS, useIsFresh } from "../lib/freshness";
 
 export function BatteryWidget() {
+  const inspection = useChartInspection();
   const battery = useTelemetryStore((state) => state.battery);
   const batteryFresh = useIsFresh(
     useTelemetryStore((state) => state.batteryAt), MAX_BATTERY_AGE_MS);
@@ -87,7 +89,7 @@ export function BatteryWidget() {
         )}
       </div>
       <div className="section-label">Voltage — last 2 hours</div>
-      <div className="chart-box">
+      <div {...inspection.events} className="chart-box">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
             <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={40} stroke="var(--text-faint)" />
@@ -97,7 +99,7 @@ export function BatteryWidget() {
               stroke="var(--text-faint)"
               tickFormatter={(value: number) => value.toFixed(1)}
             />
-            <Tooltip
+            <Tooltip trigger={inspection.trigger}
               contentStyle={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

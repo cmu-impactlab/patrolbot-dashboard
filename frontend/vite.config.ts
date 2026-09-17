@@ -1,6 +1,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+// Override for an isolated mock backend when testing from LAN devices.
+const backend = process.env.PATROLBOT_DEV_BACKEND ?? "http://localhost:8000";
+
 export default defineConfig({
   plugins: [react()],
   // react-draggable (inside react-grid-layout) reads process.env at runtime;
@@ -47,10 +50,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://localhost:8000",
-      "/auth": "http://localhost:8000",
+      "/api": backend,
+      "/auth": backend,
       "/ws": {
-        target: "ws://localhost:8000",
+        target: backend.replace(/^http/, "ws"),
         ws: true,
         // Without this the dev server prints a bare "read ECONNRESET" stack
         // for the two cases that actually happen: the backend isn't running
@@ -70,6 +73,7 @@ export default defineConfig({
     },
   },
   test: {
+    include: ["src/**/*.test.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["src/test-setup.ts"],
   },

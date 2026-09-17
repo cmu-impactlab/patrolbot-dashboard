@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { Crosshair, MapPin } from "lucide-react";
 import { useEffect, useState } from "react";
+import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 
@@ -11,6 +12,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
  * operator explicitly clicks a button.
  */
 export function RestorePosePrompt({ enabled = true }: { enabled?: boolean }) {
+  const mayCommand = canCommand(useAuthStore(state => state.user));
   const connection = useTelemetryStore((state) => state.connection);
   const lastKnownPose = useTelemetryStore((state) => state.lastKnownPose);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
@@ -26,7 +28,7 @@ export function RestorePosePrompt({ enabled = true }: { enabled?: boolean }) {
     if (!online) setDismissed(false);
   }, [online]);
 
-  const open = enabled && online && !poseSetThisSession && lastKnownPose != null && !dismissed;
+  const open = mayCommand && enabled && online && !poseSetThisSession && lastKnownPose != null && !dismissed;
 
   const restore = () => {
     if (lastKnownPose) send("set_initial_pose", lastKnownPose);

@@ -24,10 +24,12 @@ export class DashboardSocket {
     const socket = new WebSocket(this.url);
     this.socket = socket;
     socket.onopen = () => {
+      if (this.closed || this.socket !== socket) return;
       this.retry = 0;
       this.callbacks.onOpen();
     };
     socket.onmessage = (message) => {
+      if (this.closed || this.socket !== socket) return;
       try {
         const frame = JSON.parse(message.data) as AnyFrame;
         if (frame.version !== 1) {
@@ -40,8 +42,9 @@ export class DashboardSocket {
       }
     };
     socket.onclose = () => {
+      // A socket retired by effect cleanup cannot invalidate its replacement.
+      if (this.closed || this.socket !== socket) return;
       this.callbacks.onClose();
-      if (this.closed) return;
       const delay = Math.min(10_000, 500 * 2 ** this.retry) * (1 + Math.random() * 0.3);
       this.retry += 1;
       this.timer = setTimeout(() => this.open(), delay);
