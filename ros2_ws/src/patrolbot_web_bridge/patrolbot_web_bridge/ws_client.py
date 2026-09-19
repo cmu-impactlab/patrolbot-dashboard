@@ -39,12 +39,14 @@ def _json_default(obj):
     """Coerce numpy scalars/arrays that leak in from ROS messages (e.g. a
     covariance-derived bool_ in the pose payload) to native Python types.
     Duck-typed so the bridge needs no hard numpy import."""
-    item = getattr(obj, "item", None)
-    if callable(item):
-        return obj.item()
+    # Arrays also expose item(), but it raises unless they contain one value.
+    # tolist() handles both arrays and NumPy scalar types without a hard import.
     tolist = getattr(obj, "tolist", None)
     if callable(tolist):
-        return obj.tolist()
+        return tolist()
+    item = getattr(obj, "item", None)
+    if callable(item):
+        return item()
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 

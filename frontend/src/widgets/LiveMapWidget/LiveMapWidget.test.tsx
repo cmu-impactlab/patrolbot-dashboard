@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LiveMapWidget } from ".";
+import { LiveMapWidget, poseNeedsUncertaintyRing } from ".";
 import { registerCommandSender, useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useAuthStore } from "../../stores/authStore";
@@ -32,6 +32,14 @@ beforeEach(() => {
   useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
   useCommandStore.setState({ active: null, pickMode: "initialpose", lastResult: null });
   useUiStore.setState({ fullscreenWidget: null, followRobot: false });
+});
+
+describe("localization uncertainty display", () => {
+  it("follows the bridge localized verdict rather than covariance trace", () => {
+    expect(poseNeedsUncertaintyRing({ localized: true, covariance_trace: 0.5374 })).toBe(false);
+    expect(poseNeedsUncertaintyRing({ localized: false, covariance_trace: 0.02 })).toBe(true);
+    expect(poseNeedsUncertaintyRing({ covariance_trace: 0.9 })).toBe(false);
+  });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); registerCommandSender(null); });
 function mount() {

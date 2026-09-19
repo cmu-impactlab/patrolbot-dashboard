@@ -25,7 +25,7 @@ def make_odom(x=1.0, y=2.0, yaw=0.5, vx=0.3, wz=0.1):
 def make_amcl(x=1.5, y=2.5, yaw=1.0, var=0.01):
     cov = [0.0] * 36
     cov[0] = cov[7] = cov[35] = var
-    return NS(pose=NS(pose=NS(position=NS(x=x, y=y), orientation=quaternion(yaw)),
+    return NS(pose=NS(pose=NS(position=NS(x=x, y=y, z=0.0), orientation=quaternion(yaw)),
                       covariance=cov))
 
 
@@ -48,6 +48,47 @@ def test_pose_uncertain_when_covariance_high():
     pose = normalizers.normalize_pose(make_amcl(var=0.5), make_odom())
     assert pose["localized"] is False
     assert pose["covariance_trace"] > 0.25
+
+
+@pytest.mark.parametrize(
+    "covariance,expected",
+    [
+        ((0.2238, 0.2453, 0.0683), True),
+        ((0.1, 0.1, 0.05), True),  # exact trace boundary
+        ((0.25, 0.01, 0.01), True),  # exact x-axis boundary
+        ((0.250001, 0.01, 0.01), False),
+        ((0.01, 0.01, 0.250001), False),  # yaw over-limit
+        ((0.0, 0.01, 0.01), False),
+        ((-1e-9, 0.01, 0.01), False),
+        ((math.nan, 0.01, 0.01), False),
+    ],
+)
+def test_amcl_localization_uses_positive_per_axis_covariance_contract(
+    covariance, expected
+):
+    amcl = make_amcl()
+    amcl.pose.covariance[0], amcl.pose.covariance[7], amcl.pose.covariance[35] = covariance
+    assert normalizers.amcl_localization_usable(amcl) is expected
+
+
+@pytest.mark.parametrize("attribute", ["x", "y", "z"])
+def test_normalize_pose_marks_nonfinite_pose_geometry_unlocalized(attribute):
+    amcl = make_amcl()
+    setattr(amcl.pose.pose.position, attribute, math.nan)
+    pose = normalizers.normalize_pose(amcl, make_odom())
+    assert pose["localized"] is False
+
+
+@pytest.mark.parametrize("attribute", ["x", "y", "z", "w"])
+def test_normalize_pose_rejects_nonfinite_quaternion_component(attribute):
+    amcl = make_amcl()
+    setattr(amcl.pose.pose.orientation, attribute, math.nan)
+    assert normalizers.amcl_localization_usable(amcl) is False
+
+
+@pytest.mark.parametrize("limit", [0.0, -1.0, math.nan, math.inf])
+def test_invalid_covariance_limit_fails_closed(limit):
+    assert normalizers.amcl_localization_usable(make_amcl(), limit) is False
 
 
 def test_pose_payload_is_json_serializable_with_numpy_covariance():

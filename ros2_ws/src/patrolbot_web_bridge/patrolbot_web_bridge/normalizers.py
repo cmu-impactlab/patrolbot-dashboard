@@ -30,6 +30,38 @@ def _finite(value: float, digits: int = 3) -> float | None:
     return round(value, digits)
 
 
+def amcl_localization_usable(amcl_pose: Any, position_limit: float = 0.25) -> bool:
+    """Apply the dashboard's shared AMCL covariance contract.
+
+    Dock Manager uses the three planar diagonal entries independently. Keep
+    the dashboard aligned with that contract: every entry must be finite and
+    strictly positive, then each must be within the existing per-axis limit.
+    Pose geometry is checked here as well so a finite covariance cannot make a
+    malformed AMCL pose look localized.
+    """
+    try:
+        limit = float(position_limit)
+        if not math.isfinite(limit) or limit <= 0.0:
+            return False
+        pose = amcl_pose.pose.pose
+        values = (
+            pose.position.x, pose.position.y, pose.position.z,
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w,
+            amcl_pose.pose.covariance[0],
+            amcl_pose.pose.covariance[7],
+            amcl_pose.pose.covariance[35],
+        )
+        if not all(math.isfinite(float(value)) for value in values):
+            return False
+        covariance = tuple(float(amcl_pose.pose.covariance[index])
+                           for index in (0, 7, 35))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
+    return all(0.0 < value <= limit
+               for value in covariance)
+
+
 def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> dict:
     """Pose from AMCL when available (map frame), else odom; twist from odom.
 
@@ -43,7 +75,7 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> 
         # array is numpy-backed, so coerce to native Python types — a numpy
         # bool_ (or float64) here would break json.dumps downstream.
         trace = float(covariance[0] + covariance[7] + covariance[35])
-        localized = bool(trace < covariance_warn)
+        localized = amcl_localization_usable(amcl_pose, covariance_warn)
         frame = "map"
     elif odom is not None:
         pose = odom.pose.pose

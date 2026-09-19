@@ -34,7 +34,9 @@
     scan_mirror: true
     scan_angle_offset: 0.0
 
-    # Pose covariance trace above which the UI shows "location uncertain".
+    # Per-axis AMCL covariance limit for the localized verdict. The numeric
+    # value remains 0.25 and matches Dock Manager's position/yaw defaults;
+    # covariance_trace remains telemetry for display/export, not this gate.
     covariance_warn_threshold: 0.25
 
     # Undock (patrolbot_dock_manager's /patrolbot/undock action). These are

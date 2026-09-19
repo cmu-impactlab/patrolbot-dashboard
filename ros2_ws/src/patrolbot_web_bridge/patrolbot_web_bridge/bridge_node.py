@@ -315,15 +315,22 @@ class WebBridgeNode(Node):
         bridge believed localization was fine and never re-seeded the dock
         pose, while the dock manager (which does check age) sat refusing to
         undock with "localization invalid".
+
+        This dashboard age is a 30-second display/command freshness policy.
+        Dock Manager retains the separate 0.5-second safety freshness policy;
+        a parked valid pose may become unrefreshed, but that never authorizes
+        undock. Keep the two policies explicit rather than changing either
+        threshold to hide a contract mismatch.
         """
         if self._latest_amcl is None:
             return False
         age = self.get_clock().now().nanoseconds / 1e9 - self._latest_amcl_at
         if age > float(self.cfg["localization_max_age_s"]):
             return False
-        covariance = self._latest_amcl.pose.covariance
-        trace = float(covariance[0] + covariance[7] + covariance[35])
-        return trace <= float(self.cfg["covariance_warn_threshold"])
+        return normalizers.amcl_localization_usable(
+            self._latest_amcl,
+            float(self.cfg["covariance_warn_threshold"]),
+        )
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         signature = normalizers.map_signature(msg)

@@ -14,7 +14,7 @@ import { MapCommandFeedback } from "../../components/MapCommandFeedback";
 import { MapGesture } from "./gestures";
 import { useAuthStore } from "../../stores/authStore";
 import { mapCommandReason } from "../../lib/mapCommand";
-import type { GoalData } from "../../types/protocol";
+import type { GoalData, PoseData } from "../../types/protocol";
 import { buildMapBitmap } from "./bitmap";
 import { cssVar } from "./colors";
 import { fitView, followView, screenToWorld, worldToScreen, zoomAt, type View } from "./transform";
@@ -30,6 +30,13 @@ const MIN_LEGIBLE_ROBOT_PX = 16;
 
 /** Wheels and the heading wedge only earn their space above this. */
 const MIN_DETAIL_ROBOT_PX = 28;
+
+/** The bridge's localized verdict is authoritative for the uncertainty ring.
+ * covariance_trace remains telemetry for display and export, not a second
+ * localization decision with different statistics. */
+export function poseNeedsUncertaintyRing(pose: Pick<PoseData, "localized" | "covariance_trace"> | null): boolean {
+  return pose?.localized === false;
+}
 
 /**
  * The robot's true footprint, drawn to scale in world metres.
@@ -255,7 +262,7 @@ function drawScene(
   // fixed-size locator arrow.
   if (pose) {
     const [rx, ry] = worldToScreen(view, pose.x, pose.y);
-    if (pose.localized === false || (pose.covariance_trace ?? 0) > 0.25) {
+    if (poseNeedsUncertaintyRing(pose)) {
       // Uncertainty ring: at least the robot's own swing circle, so it never
       // reads as tighter than the space the robot needs to turn around in.
       ctx.beginPath();
