@@ -65,6 +65,11 @@ class MockRobot:
         self.sequence = 0
         self.map_version = 1
         self.session_generation = 1
+        # The simulator starts at an exact, known world pose. This synthetic
+        # seed is not hardware acceptance and survives transport reconnects.
+        self.odom_epoch_valid = True
+        self.localization_recovery_required = False
+        self.localization_seed_stamp_ns = time.time_ns()
         self.mode = "patrol"  # patrol | to_dock | charging | commanded | idle | undocking
         # Physically on the charger's contacts. Stays true after the charge is
         # released — releasing the charger is not the same as leaving the dock.
@@ -256,6 +261,9 @@ class MockRobot:
             await ws.send(self.frame("telemetry.battery", self.battery.payload()))
             await ws.send(self.frame("telemetry.base_state", base_state_payload(
                 session_generation=self.session_generation,
+                odom_epoch_valid=self.odom_epoch_valid,
+                localization_recovery_required=self.localization_recovery_required,
+                localization_seed_stamp_ns=self.localization_seed_stamp_ns,
                 charging=self.battery.charging,
                 docked=self.on_dock,
                 estop=estop, bumper_front=front, bumper_rear=rear,
@@ -293,6 +301,13 @@ class MockRobot:
             log.info("command received: %s (%s)", command, command_id)
 
             if command == "navigate_to_pose":
+                if (not self.odom_epoch_valid or self.localization_recovery_required
+                        or self.localization_seed_stamp_ns <= 0):
+                    await ws.send(self.frame("command.ack", {
+                        "command_id": command_id, "accepted": False,
+                        "reason": "The robot is recovering its location.",
+                    }))
+                    continue
                 await self._preempt(ws, "A newer destination replaced this one.")
                 goal = data["goal"]
                 self.command = {"command_id": command_id, "kind": "navigate"}
@@ -314,6 +329,8 @@ class MockRobot:
                                           "detail": "The robot has stopped."}))
             elif command == "set_initial_pose":
                 goal = data["goal"]
+                self.localization_seed_stamp_ns = time.time_ns()
+                self.localization_recovery_required = not self.odom_epoch_valid
                 self.robot.x, self.robot.y = goal["x"], goal["y"]
                 if goal.get("yaw") is not None:
                     self.robot.yaw = goal["yaw"]
