@@ -115,3 +115,27 @@ def test_unknown_command_rejected():
         assert acks and acks[0]["data"]["accepted"] is False
 
     asyncio.run(run())
+
+
+def test_recovery_refuses_override_until_operator_pose_is_accepted():
+    robot = make_robot()
+    robot.localization_recovery_required = True
+    old_seed = robot.localization_seed_stamp_ns
+    goal = {"x": robot.robot.x, "y": robot.robot.y, "yaw": 0}
+    blocked = request("navigate_to_pose", "blocked", goal)
+    blocked["data"]["allow_unlocalized"] = True
+    ws = FakeWs([blocked, request("set_initial_pose", "seed", goal),
+                 request("navigate_to_pose", "recovered", goal)])
+    asyncio.run(robot._receive_loop(ws))
+    assert [f["data"]["accepted"] for f in ws.of_type("command.ack")] == [False, True, True]
+    assert robot.localization_seed_stamp_ns >= old_seed
+    assert not robot.localization_recovery_required
+
+
+def test_legacy_base_payload_is_fail_closed_until_simulator_supplies_readiness():
+    from mock_robot.diagnostics import base_state_payload
+    payload = base_state_payload(session_generation=1, charging=False, docked=False,
+                                 estop=False, bumper_front=False, bumper_rear=False)
+    assert not payload["odom_epoch_valid"]
+    assert payload["localization_recovery_required"]
+    assert payload["localization_seed_stamp_ns"] == 0

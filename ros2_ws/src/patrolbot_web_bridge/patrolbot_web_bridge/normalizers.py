@@ -254,6 +254,14 @@ def normalize_base_state(state: Any) -> dict:
             float(getattr(state, "redock_inhibit_remaining", 0.0)), 1),
         "undock_profile_commissioned": bool(
             getattr(state, "undock_profile_commissioned", False)),
+        # Missing epoch fields fail closed downstream.
+        "odom_epoch_valid": bool(getattr(state, "odom_epoch_valid", False)),
+        "localization_recovery_required": bool(
+            getattr(state, "localization_recovery_required", True)),
+        "localization_recovery_stage": str(
+            getattr(state, "localization_recovery_stage", "")),
+        "localization_seed_stamp_ns": int(
+            getattr(state, "localization_seed_stamp_ns", 0)),
     }
 
 

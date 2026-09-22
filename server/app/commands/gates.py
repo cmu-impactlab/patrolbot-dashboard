@@ -91,6 +91,11 @@ class StateFacts:
     # then failed on the robot with "another navigation or behavior action is
     # active" (2026-07-28 12:27).
     navigating: bool = False
+    # Missing epoch fields from legacy telemetry are unsafe for navigation.
+    odom_epoch_valid: bool = False
+    localization_recovery_required: bool = True
+    localization_recovery_stage: str = ""
+    localization_seed_stamp_ns: int = 0
 
     @property
     def charging(self) -> bool:
@@ -157,6 +162,17 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
         facts.undock_active = bool(getattr(base_state, "undock_active", False))
         facts.undock_profile_commissioned = getattr(
             base_state, "undock_profile_commissioned", None)
+        facts.odom_epoch_valid = bool(
+            getattr(base_state, "odom_epoch_valid", False))
+        facts.localization_recovery_required = bool(
+            getattr(base_state, "localization_recovery_required", True))
+        facts.localization_recovery_stage = str(
+            getattr(base_state, "localization_recovery_stage", ""))
+        try:
+            facts.localization_seed_stamp_ns = int(
+                getattr(base_state, "localization_seed_stamp_ns", 0))
+        except (TypeError, ValueError, OverflowError):
+            facts.localization_seed_stamp_ns = 0
     if pose is not None:
         facts.localized = bool(getattr(pose, "localized", False))
         facts.stationary = (abs(pose.linear_velocity) <= STATIONARY_LINEAR_MS
@@ -235,6 +251,10 @@ def navigate_reason(facts: StateFacts) -> str | None:
                 "sending it anywhere.")
     if not facts.motors_enabled:
         return "The robot's motors are off. Enable them on the robot first."
+    if (not facts.odom_epoch_valid or facts.localization_recovery_required
+            or facts.localization_seed_stamp_ns <= 0):
+        return ("The robot is recovering its location — wait for recovery "
+                "before sending it anywhere.")
     # `localized` lives in the pose slice, so a stale pose only says where the
     # robot used to believe it was — not a basis for sending it somewhere.
     if not facts.pose_fresh:

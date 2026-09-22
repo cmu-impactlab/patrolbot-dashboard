@@ -6,6 +6,8 @@ server-side fallbacks used in snapshots and events.
 """
 from __future__ import annotations
 
+import math
+
 from ..protocol.envelope import utc_now
 from ..protocol.messages import (
     BaseStateData,
@@ -160,7 +162,7 @@ def derive_status(
 def stale_age(age_s: float | None, limit_s: float) -> bool:
     """No data, or data too old to describe the robot now. None — never
     received — reads exactly like a stale one."""
-    return age_s is None or age_s > limit_s
+    return age_s is None or not math.isfinite(age_s) or not 0 <= age_s <= limit_s
 
 
 def _level_rank(level: str) -> int:
@@ -318,6 +320,16 @@ def derive_health(
         add("localization", "Robot location", "offline",
             "The robot has stopped reporting its position.",
             "Its last known position is too old to rely on.")
+    elif base_state is None or stale(base_state_age_s, MAX_BASE_STATE_AGE_S):
+        add("localization", "Robot location", "warning",
+            "The robot's localization readiness is not current.",
+            "Wait for fresh robot updates before sending a destination.")
+    elif (not base_state.odom_epoch_valid
+          or base_state.localization_recovery_required
+          or base_state.localization_seed_stamp_ns <= 0):
+        add("localization", "Robot location", "warning",
+            "The robot is recovering its location.",
+            "Wait for localization to recover before sending a destination.")
     elif not pose.localized:
         add("localization", "Robot location", "warning", "The robot is not confident about its current location.",
             "Use “Set Robot Location” before sending a new destination.")

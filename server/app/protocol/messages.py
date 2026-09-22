@@ -120,6 +120,12 @@ class BaseStateData(BaseModel):
     redock_inhibited: bool | None = None
     redock_inhibit_remaining: float | None = None
     undock_profile_commissioned: bool | None = None
+    # Missing epoch fields remain parseable for legacy recordings but are
+    # unsafe for navigation and localization health.
+    odom_epoch_valid: bool = False
+    localization_recovery_required: bool = True
+    localization_recovery_stage: str = ""
+    localization_seed_stamp_ns: int = Field(default=0, ge=0)
 
 
 class DiagnosticItem(BaseModel):
