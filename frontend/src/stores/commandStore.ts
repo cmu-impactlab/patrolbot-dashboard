@@ -1,3 +1,4 @@
+import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import { useTelemetryStore } from "./telemetryStore";
 import type {
@@ -98,7 +99,6 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   resume: () => {
     const goal = get().stoppedGoal;
     if (!goal) return;
-    set({ stoppedGoal: null });
     get().send("navigate_to_pose", goal);
   },
 
@@ -117,6 +117,16 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   },
 
   send: (command, goal, takeover = false) => {
+    if (command === "navigate_to_pose") {
+      const telemetry = useTelemetryStore.getState();
+      const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt);
+      if (reason) {
+        set({ pickMode: "none", lastResult: {
+          commandId: crypto.randomUUID(), command, outcome: "rejected", at: Date.now(), detail: reason,
+        } });
+        return;
+      }
+    }
     // A fresh destination invalidates any pending Resume offer.
     if (command === "navigate_to_pose" && get().stoppedGoal && goal !== undefined) {
       set({ stoppedGoal: null });
