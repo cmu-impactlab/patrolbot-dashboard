@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from patrolbot_web_bridge.commands import (
     CommandExecutor,
     cancel_verdict,
+    localization_epoch_ready,
     map_goal_status,
     precheck,
     yaw_to_quaternion,
@@ -29,7 +30,10 @@ def test_goal_status_mapping():
 
 GOOD_BASE = {"estop_pressed": False, "motors_enabled": True,
              "hardware_state_valid": True, "link_connected": True,
-             "telemetry_age": 0.1, "fault_flags": 0}
+             "telemetry_age": 0.1, "fault_flags": 0,
+             "odom_epoch_valid": True,
+             "localization_recovery_required": False,
+             "localization_seed_stamp_ns": 100}
 
 
 def nav(base_state=GOOD_BASE, localized=True, base_state_age=0.2):
@@ -62,6 +66,45 @@ def test_precheck_refuses_navigate_without_localization():
     assert reason is not None and "where it is" in reason
     # Default is fail-closed — a caller that cannot answer does not get a pass.
     assert precheck("navigate_to_pose", {"x": 1, "y": 2}, GOOD_BASE) is not None
+
+
+def test_precheck_epoch_and_recovery_gates_run_before_override():
+    goal = {"x": 1, "y": 2}
+    for spoiled in (
+        dict(GOOD_BASE, odom_epoch_valid=False),
+        dict(GOOD_BASE, localization_recovery_required=True,
+             localization_recovery_stage="WAIT_FOR_AMCL"),
+        dict(GOOD_BASE, localization_seed_stamp_ns=0),
+    ):
+        reason = precheck("navigate_to_pose", goal, spoiled, localized=False,
+                          base_state_age=0.1, allow_unlocalized=True,
+                          odom_age=0.1, operator_authorized=True)
+        assert reason is not None
+        assert "localization" in reason.lower() or "odometry" in reason.lower()
+
+
+def test_localization_epoch_requires_fresh_post_seed_amcl_stamp():
+    base = dict(GOOD_BASE)
+    assert localization_epoch_ready(base, 101, 0.1)
+    for stamp in (100, 99, 0):
+        assert not localization_epoch_ready(base, stamp, 0.1)
+    assert not localization_epoch_ready(dict(base, localization_seed_stamp_ns=0),
+                                        101, 0.1)
+    assert not localization_epoch_ready(dict(base, odom_epoch_valid=False),
+                                        101, 0.1)
+    assert not localization_epoch_ready(
+        dict(base, localization_recovery_required=True), 101, 0.1)
+    assert not localization_epoch_ready(base, 101, None)
+
+
+def test_set_initial_pose_keeps_existing_independent_guards():
+    # A pose seed is the recovery mechanism and remains allowed even when the
+    # current epoch is invalid or recovery is requested.
+    stale = dict(GOOD_BASE, odom_epoch_valid=False,
+                 localization_recovery_required=True,
+                 localization_seed_stamp_ns=0)
+    assert precheck("set_initial_pose", {"x": 1, "y": 2}, stale,
+                    localized=False, base_state_age=99.0) is None
 
 
 def test_precheck_refuses_navigate_on_stale_or_faulted_base():
@@ -428,6 +471,9 @@ def _navigable_base_state() -> dict:
         "estop_pressed": False,
         "motors_enabled": True,
         "charge_state": "discharging",
+        "odom_epoch_valid": True,
+        "localization_recovery_required": False,
+        "localization_seed_stamp_ns": 100,
     }
 
 

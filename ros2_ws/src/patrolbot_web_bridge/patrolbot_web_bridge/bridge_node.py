@@ -32,7 +32,8 @@ from rclpy.qos import (
 from sensor_msgs.msg import BatteryState, LaserScan
 
 from . import normalizers, resources
-from .commands import CHARGING_STATES, DISABLED_REASON, CommandExecutor
+from .commands import (CHARGING_STATES, DISABLED_REASON, CommandExecutor,
+                        localization_epoch_ready)
 from .throttle import Debounce, Throttle
 from .ws_client import WsClient
 
@@ -322,9 +323,20 @@ class WebBridgeNode(Node):
         undock. Keep the two policies explicit rather than changing either
         threshold to hide a contract mismatch.
         """
-        if self._latest_amcl is None:
+        if self._latest_amcl is None or self._latest_base_state is None:
             return False
-        age = self.get_clock().now().nanoseconds / 1e9 - self._latest_amcl_at
+        now_ns = self.get_clock().now().nanoseconds
+        now = now_ns / 1e9
+        base_age = now - self._latest_base_state_at
+        try:
+            stamp = self._latest_amcl.header.stamp
+            amcl_stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+        if not localization_epoch_ready(self._latest_base_state,
+                                        amcl_stamp_ns, base_age):
+            return False
+        age = now - self._latest_amcl_at
         if age > float(self.cfg["localization_max_age_s"]):
             return False
         return normalizers.amcl_localization_usable(
