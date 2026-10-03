@@ -35,6 +35,7 @@ from . import normalizers, resources
 from .commands import (CHARGING_STATES, DISABLED_REASON, CommandExecutor,
                         localization_epoch_ready)
 from .throttle import Debounce, Throttle
+from .system_reset import SystemResetClient
 from .ws_client import WsClient
 
 try:
@@ -155,6 +156,7 @@ class WebBridgeNode(Node):
                            on_map_wanted=self._resend_map,
                            on_command=self._command_queue.append)
 
+        self._system_reset = None
         self._commands: CommandExecutor | None = None
         self._announced_capabilities: list[str] | None = None
         self._last_dock_pose_attempt = 0.0
@@ -165,6 +167,10 @@ class WebBridgeNode(Node):
                 "reverse_speed": get["undock_reverse_speed"],
                 "validation_mode": get["undock_validation_mode"],
             })
+            reset_socket = os.environ.get("PATROLBOT_RESET_SOCKET", "")
+            if reset_socket:
+                self._system_reset = SystemResetClient(reset_socket, self.ws)
+                self._system_reset.start()
             # Re-advertise as dock-manager servers come and go: capabilities
             # are what the dashboard gates its controls on, and the manager may
             # start after this node does.
@@ -375,6 +381,17 @@ class WebBridgeNode(Node):
                     "accepted": False, "reason": DISABLED_REASON,
                 })
                 continue
+            if data.get("command") == "software_reset":
+                if self._system_reset is None:
+                    self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
+                        "accepted": False, "reason": "Software reset is not commissioned."})
+                else:
+                    self._system_reset.request(data)
+                continue
+            if self._system_reset is not None and self._system_reset.busy and data.get("command") != "stop":
+                self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
+                    "accepted": False, "reason": "Software reset is pending or its outcome is unknown."})
+                continue
             current_yaw = None
             if self._latest_amcl is not None:
                 q = self._latest_amcl.pose.pose.orientation
@@ -405,6 +422,8 @@ class WebBridgeNode(Node):
         # undocking" until the container is restarted.
         self._commands.check_undock_health()
         available = self._commands.available_capabilities()
+        if self._system_reset is not None and self._system_reset.available:
+            available.append("software_reset")
         # Log through the ROS logger, not the stdlib one: nothing configures a
         # stdlib handler in the container, so log.info there goes nowhere and
         # this transition is exactly what an operator needs to see.
@@ -430,6 +449,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if node._system_reset is not None:
+            node._system_reset.stop()
         node.ws.stop()
         node.destroy_node()
         if rclpy.ok():
