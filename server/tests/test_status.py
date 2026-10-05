@@ -119,6 +119,36 @@ def test_ready_default():
     assert result.status == "ready"
 
 
+def test_localization_recovery_never_reports_ready():
+    for updates in (
+        {"odom_epoch_valid": False},
+        {"localization_recovery_required": True},
+        {"localization_seed_stamp_ns": 0},
+    ):
+        result = derive_status(
+            base_state_age_s=0.5, connection="online", base_state=base_state(**updates),
+            diagnostics=None, pose=pose(localized=True), path=None,
+        )
+        assert result.status == "needs_attention"
+        assert "recovering its location" in result.detail
+
+
+def test_docked_and_charging_status_keep_precedence_during_localization_recovery():
+    recovering = {"localization_recovery_required": True}
+    charging = derive_status(
+        base_state_age_s=0.5, connection="online",
+        base_state=base_state(charge_state="charging", **recovering),
+        diagnostics=None, pose=None, path=None,
+    )
+    docked = derive_status(
+        base_state_age_s=0.5, connection="online",
+        base_state=base_state(charge_state="docked", **recovering),
+        diagnostics=None, pose=None, path=None,
+    )
+    assert charging.status == "charging"
+    assert docked.status == "docked"
+
+
 def test_health_offline_overall():
     health = derive_health(connection="offline", base_state=None, battery=None,
                            diagnostics=None, pose=None, resources=None, lidar_age_s=None)
