@@ -5,12 +5,14 @@ async function menu(page: import("@playwright/test").Page) {
   const trigger = page.getByRole("button", { name: "Menu", exact: true });
   if (await trigger.isVisible() && await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
 }
+// Keep every width/role/preset/theme assertion, but give each width its own
+// test budget: the complete 11-width matrix cannot fit one 45-second test on WebKit.
 for (const role of ["observer", "operator", "administrator"]) {
-  test(`all presets and themes reflow for ${role}`, async ({ page }) => {
+  for (const width of [320, 390, 480, 767, 768, 784, 1024, 1199, 1200, 1280, 1440]) {
+  test(`all presets and themes reflow for ${role} at ${width}px`, async ({ page }) => {
     const fixture = await dashboardFixture(page, role);
     await page.goto("/");
     await expect(page.locator('[data-tour="widget-liveMap"]')).toBeVisible();
-    for (const width of [320, 390, 480, 767, 768, 784, 1024, 1199, 1200, 1280, 1440]) {
       await page.setViewportSize({ width, height: width < 768 ? 740 : 800 });
       await menu(page);
       for (const preset of ["Operator", "Research", "Diagnostics"]) {
@@ -23,9 +25,9 @@ for (const role of ["observer", "operator", "administrator"]) {
           expect(overflow).toBe(false);
         }
       }
-    }
     expect(fixture.commands).toHaveLength(0);
   });
+  }
 }
 
 test("save failure keeps changes and retry persists phone edits without desktop drift", async ({ page }) => {
