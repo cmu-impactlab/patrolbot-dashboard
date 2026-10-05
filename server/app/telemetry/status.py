@@ -142,6 +142,14 @@ def derive_status(
         status = "charging"
     elif base_state is not None and on_dock:
         status = "docked"
+    elif (base_state is not None
+          and (not base_state.odom_epoch_valid
+               or base_state.localization_recovery_required
+               or base_state.localization_seed_stamp_ns <= 0)):
+        status = "needs_attention"
+        detail = ("The robot is recovering its location. Wait for localization "
+                  "to recover before sending a destination.")
+        custom_detail = True
     elif base_state is not None and not base_state.motors_enabled:
         status = "paused"
     elif stalled:
