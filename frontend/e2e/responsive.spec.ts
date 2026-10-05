@@ -8,17 +8,17 @@ async function menu(page: import("@playwright/test").Page) {
   await expect(trigger).toBeAttached();
   if (await trigger.isVisible() && await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
 }
-// Keep every width/role/preset/theme assertion, but give each width its own
-// test budget: the complete 11-width matrix cannot fit one 45-second test on WebKit.
+// Each role/width/preset is independent. WebKit's real click/frame waits on
+// high-DPI wide viewports make six theme toggles too much for one test budget.
 for (const role of ["observer", "operator", "administrator"]) {
   for (const width of [320, 390, 480, 767, 768, 784, 1024, 1199, 1200, 1280, 1440]) {
-  test(`all presets and themes reflow for ${role} at ${width}px`, async ({ page }) => {
-    const fixture = await dashboardFixture(page, role);
-    await page.goto("/");
-    await expect(page.locator('[data-tour="widget-liveMap"]')).toBeVisible();
-      await page.setViewportSize({ width, height: width < 768 ? 740 : 800 });
-      await menu(page);
-      for (const preset of ["Operator", "Research", "Diagnostics"]) {
+    for (const preset of ["Operator", "Research", "Diagnostics"]) {
+      test(`${preset} reflows in both themes for ${role} at ${width}px`, async ({ page }) => {
+        const fixture = await dashboardFixture(page, role);
+        await page.setViewportSize({ width, height: width < 768 ? 740 : 800 });
+        await page.goto("/");
+        await expect(page.locator('[data-tour="widget-liveMap"]')).toBeVisible();
+        await menu(page);
         await page.locator('[data-tour="layouts"]').click();
         await page.getByRole("menuitem", { name: preset, exact: true }).click();
         for (let theme = 0; theme < 2; theme++) {
@@ -27,9 +27,9 @@ for (const role of ["observer", "operator", "administrator"]) {
           const overflow = await page.locator(".widget").evaluateAll(elements => elements.some(el => el.getBoundingClientRect().right > document.documentElement.clientWidth + 1 || el.getBoundingClientRect().left < -1));
           expect(overflow).toBe(false);
         }
-      }
-    expect(fixture.commands).toHaveLength(0);
-  });
+        expect(fixture.commands).toHaveLength(0);
+      });
+    }
   }
 }
 
