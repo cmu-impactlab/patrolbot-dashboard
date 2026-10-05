@@ -2,7 +2,10 @@ import { test, expect } from "@playwright/test";
 import { dashboardFixture } from "./fixtures";
 
 async function menu(page: import("@playwright/test").Page) {
-  const trigger = page.getByRole("button", { name: "Menu", exact: true });
+  // App hydration can finish after page.goto's load event. Wait for the
+  // always-mounted toggle before deciding whether the compact menu is needed.
+  const trigger = page.getByRole("button", { name: "Menu", exact: true, includeHidden: true });
+  await expect(trigger).toBeAttached();
   if (await trigger.isVisible() && await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
 }
 // Keep every width/role/preset/theme assertion, but give each width its own
