@@ -16,6 +16,7 @@ from ..protocol.messages import (
     BatteryData,
     ConnectionData,
     DiagnosticsData,
+    DiagnosticItem,
     EventData,
     LidarData,
     MapData,
@@ -28,7 +29,9 @@ from ..protocol.messages import (
 )
 from ..settings import Settings
 from .battery_estimator import BatteryEstimate, BatteryRuntimeEstimator
-from .status import derive_health, derive_status
+from .status import MAX_DIAGNOSTICS_AGE_S, derive_health, derive_status
+
+DIAGNOSTIC_SOURCE_RETENTION_S = 5 * MAX_DIAGNOSTICS_AGE_S
 
 
 @dataclass
@@ -100,6 +103,10 @@ class RobotState:
     # before any robot connects) self-contained.
     event_ids: EventIdAllocator = field(default_factory=EventIdAllocator)
     _diag_levels: dict[str, str] = field(default_factory=dict)
+    # /diagnostics is an array, but ROS publishers commonly report only their
+    # own component in each array. Keep each named source until it recovers or
+    # ages out so a healthy publisher cannot clear a different component's fault.
+    _diagnostic_sources: dict[str, tuple[DiagnosticItem, float]] = field(default_factory=dict)
     _prev_estop: bool = False
     _prev_bumper: bool = False
     _prev_battery_low: bool = False
@@ -229,6 +236,8 @@ class RobotState:
 
     def record_diagnostics(self, data: DiagnosticsData) -> list[EventData]:
         events: list[EventData] = []
+        now = time.monotonic()
+        self._refresh_diagnostics(now)
         for item in data.items:
             previous = self._diag_levels.get(item.name)
             if item.level in ("WARN", "ERROR", "STALE") and previous != item.level:
@@ -237,8 +246,28 @@ class RobotState:
             elif item.level == "OK" and previous in ("WARN", "ERROR", "STALE"):
                 events.append(self.add_event("info", "System recovered", f"{item.name} is OK again."))
             self._diag_levels[item.name] = item.level
-        self.diagnostics.set(data)
+            self._diagnostic_sources[item.name] = (item, now)
+        self._refresh_diagnostics(now)
+        self.diagnostics.received_mono = now
         return events
+
+    def _refresh_diagnostics(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        items: list[DiagnosticItem] = []
+        for name, (item, received) in list(self._diagnostic_sources.items()):
+            age = max(0.0, now - received)
+            if age > DIAGNOSTIC_SOURCE_RETENTION_S:
+                del self._diagnostic_sources[name]
+                self._diag_levels.pop(name, None)
+                continue
+            if age > MAX_DIAGNOSTICS_AGE_S and item.level != "STALE":
+                item = item.model_copy(update={
+                    "level": "STALE",
+                    "message": f"No recent report from {name}.",
+                })
+            items.append(item)
+        items.sort(key=lambda item: (item.name.casefold(), item.name))
+        self.diagnostics.data = DiagnosticsData(items=items) if items else None
 
     def record_resources(self, data: ResourcesData) -> list[EventData]:
         self.resources.set(data)
@@ -253,6 +282,10 @@ class RobotState:
     def set_connection(self, state: str) -> list[EventData]:
         events: list[EventData] = []
         if state != self.connection:
+            if state == "online" and self.connection in ("offline", "stale"):
+                self._diagnostic_sources.clear()
+                self._diag_levels.clear()
+                self.diagnostics = Slice()
             if state == "offline":
                 events.append(self.add_event(
                     "critical", "Robot disconnected",
@@ -272,6 +305,7 @@ class RobotState:
 
     def recompute(self) -> tuple[RobotStatusData | None, SystemHealthData | None]:
         """Returns (status, health) — each None when unchanged since last call."""
+        self._refresh_diagnostics()
         status = derive_status(
             connection=self.connection,
             base_state=self.base_state.data,

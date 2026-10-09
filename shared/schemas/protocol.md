@@ -140,3 +140,29 @@ map context. Map switching invalidates selections and cross-floor overlays.
 Operator browser disconnect, server timeout or shutdown cancels its active map
 transaction; cancellation retains the robot-side hold. Browser gateways never
 accept this internal message as authorization.
+
+### Guarded software reset
+
+`command.request.command = "software_reset"` is an opt-in capability. It uses
+an ordinary UUID `command_id`, the authenticated server's `operator_authorized`
+stamp, the operator lease and command audit. It accepts no reset scope, shell
+command, host, goal or service arguments. The browser requires confirmation.
+Server gates require fresh, valid docked stationary telemetry, motors disabled
+and no active navigation/undock. Host-side repeated captures enforce these
+conditions independently immediately before restarting either machine.
+
+An accepted acknowledgement means the host durably recorded the request, not
+that reset finished. `command.progress.stage = "restarting"` indicates pending
+work; `reset_outcome_unknown` indicates the request may have reached the host.
+The bridge queries the durable supervisor after reconnect and reports success
+only after its post-reset health, changed-origin and fresh-pose barrier checks.
+`command.result.outcome = "timeout"` means uncertain; it must not release the
+reset command barrier or trigger an automatic resend. Only a verified terminal
+success/failure resolves that barrier. A supervisor restart during a reset also
+becomes uncertain. The bridge enforces its durable host barrier even if the
+browser or dashboard server restarts.
+
+Reset restarts SBC hardware-server software and the existing Pi core/web-bridge
+containers; it does not reboot either OS, change images/configuration, publish
+a pose or enable motors. A fresh operator pose is required afterward. Disabled
+or uncommissioned installations do not advertise `software_reset`.

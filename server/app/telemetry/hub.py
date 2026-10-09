@@ -347,7 +347,9 @@ class TelemetryHub:
             events = session.state.set_connection(new_state)
             self.publish("state.connection", session.robot_id, session.state.connection_data())
             await self._emit_events(session, events)
-            self._emit_derived(session)
+        # Health includes per-slice receipt ages, so it must be reconsidered
+        # while the connection remains online as well as on transitions.
+        self._emit_derived(session)
 
     async def _persist_last_pose(self, session: RobotSession) -> None:
         """Save the robot's last-known pose so the next session can offer to

@@ -1,4 +1,6 @@
 import { sameMap } from "../lib/mapContext";
+
+import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import type {
   AnyFrame,
@@ -71,7 +73,7 @@ export interface TelemetryState {
   seenEventIds: number[];
   /** Robot's last-known pose persisted server-side when it last went offline. */
   lastKnownPose: GoalData | null;
-  /** Whether a 2D location has been set this session (gates navigation). */
+  /** Local pose gate: manual confirmation or fresh robot-accepted seed. */
   poseSetThisSession: boolean;
   /** Capabilities the connected robot declared; gates the undock control. */
   capabilities: string[];
@@ -173,7 +175,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             wsConnected: false,
             connection: { state: "offline", last_seen: get().connection.last_seen },
             status: initialStatus,
-            // A dropped socket ends the session; the pose must be set again.
+            // Forget browser permission until fresh robot recovery state arrives.
             poseSetThisSession: false,
             // Whatever reconnects may be a different robot — the snapshot
             // that follows re-declares what it can do.
@@ -231,12 +233,12 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           events: data.events,
           lastKnownPose: data.last_known_pose ?? null,
           capabilities: data.capabilities ?? [],
-          // A snapshot starts a fresh session — drop lines drawn for the
-          // previous robot/connection instead of mixing them in, and require
-          // the 2D location to be set again before navigating.
+          // Reconnect to the robot estimate without publishing a pose. Only
+          // fresh, accepted recovery state can satisfy the local pose gate.
           trajectory: [],
           lidar: null,
-          poseSetThisSession: false,
+          poseSetThisSession: data.connection.state === "online" &&
+            localizationRecoveryReason(data.base_state ?? null, receivedAt("base_state")) === null,
         });
         break;
       }
@@ -303,7 +305,10 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         });
         break;
       case "telemetry.base_state":
-        set({ ...bump, baseState: frame.data, baseStateAt: performance.now() });
+        set({ ...bump, baseState: frame.data, baseStateAt: performance.now(),
+          // Full robot reset remains false until a new seed is accepted.
+          poseSetThisSession: get().connection.state === "online" &&
+            localizationRecoveryReason(frame.data, performance.now()) === null });
         break;
       case "telemetry.diagnostics":
         set({ ...bump, diagnostics: frame.data });

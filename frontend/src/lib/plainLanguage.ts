@@ -45,6 +45,7 @@ export const COMMAND_COPY: Record<CommandType, string> = {
   stop: "Stop",
   charge_release: "Release charging",
   motor_enable: "Turn motors on",
+  software_reset: "Restart robot software",
   undock: "Undock",
 };
 

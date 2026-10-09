@@ -4,11 +4,23 @@ test("touch location, destination, Stop, Resume and Cancel reach the mock throug
   await expect.poll(async () => (await (await request.get("/api/health")).json()).robot_connected).toBe(true);
   await request.put("/api/help-guide/status");
   const commands: string[] = [];
-  page.on("websocket", socket => socket.on("framesent", event => {
-    const frame = JSON.parse(String(event.payload));
-    if (frame.type === "command.request") commands.push(frame.data.command);
-  }));
+  let baseReceived = false;
+  page.on("websocket", socket => {
+    socket.on("framesent", event => {
+      const frame = JSON.parse(String(event.payload));
+      if (frame.type === "command.request") commands.push(frame.data.command);
+    });
+    socket.on("framereceived", event => {
+      const frame = JSON.parse(String(event.payload));
+      if (frame.type === "telemetry.base_state" ||
+          (frame.type === "server.snapshot" && frame.data.base_state)) baseReceived = true;
+    });
+  });
   await page.goto("/");
+  // The first base session intentionally cancels an in-flight selection.
+  // Wait for it before testing confirmation; the visible canvas below also
+  // establishes that the separately fetched map has loaded.
+  await expect.poll(() => baseReceived).toBe(true);
   await page.getByRole("button", {name: "Set Robot Location", exact: true}).click();
   const map = page.getByLabel("Live robot map");
   await map.tap({position: {x: 100, y: 250}});
@@ -40,8 +52,12 @@ test("recording controls produce a real ZIP download and open an isolated replay
   await expect(widget.getByRole("button",{name:"Stop",exact:true})).toBeVisible();
   await expect.poll(async () => {
     const recordings = await (await request.get("/api/recordings")).json();
-    return recordings.find((row: {status:string}) => row.status === "recording")?.sample_count ?? 0;
-  },{timeout:15000}).toBeGreaterThan(0);
+    const recording = recordings.find((row: {id:number; status:string}) => row.status === "recording");
+    if (!recording) return false;
+    const data = await (await request.get(`/api/recordings/${recording.id}?channels=pose`)).json();
+    // The recording-start event counts as a sample but cannot render a route.
+    return data.samples.some((sample: {kind:string}) => sample.kind === "pose");
+  },{timeout:15000}).toBe(true);
   await widget.getByRole("button",{name:"Stop",exact:true}).click();
   await widget.getByTitle("Download data (.zip of CSVs)").click();
   const downloading = page.waitForEvent("download");

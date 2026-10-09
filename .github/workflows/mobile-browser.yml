@@ -7,6 +7,10 @@ on:
 
 jobs:
   browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -25,16 +29,19 @@ jobs:
         working-directory: frontend
       - run: npm run check:e2e
         working-directory: frontend
-      - run: npm run test:e2e
+      - run: npm run test:e2e -- --shard=${{ matrix.shard }}/6 --reporter=line
         working-directory: frontend
-      - run: python -m venv server/.venv
-      - run: server/.venv/bin/pip install ./server ./mock-robot
-      - run: npm run test:mock-browser
+      - if: matrix.shard == 1
+        run: python -m venv server/.venv
+      - if: matrix.shard == 1
+        run: server/.venv/bin/pip install ./server ./mock-robot
+      - if: matrix.shard == 1
+        run: npm run test:mock-browser
         working-directory: frontend
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: failure() || cancelled()
         with:
-          name: mobile-browser-traces
+          name: mobile-browser-traces-${{ matrix.shard }}
           path: |
             frontend/test-results/
             frontend/test-results-mock/

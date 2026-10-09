@@ -46,6 +46,7 @@ export function useTelemetrySocket(): void {
         useCommandStore.getState().resetOverrides();
       },
       onClose: () => {
+        useCommandStore.getState().connectionLost();
         useCommandStore.getState().setPickMode("none");
         useTelemetryStore.getState().setWsConnected(false);
       },

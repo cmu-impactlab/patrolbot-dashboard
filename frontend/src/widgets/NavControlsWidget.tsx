@@ -8,7 +8,7 @@ import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import {
-  factsFrom, motorEnableReason, showsUndock, undockReason,
+  factsFrom, motorEnableReason, showsUndock, softwareResetReason, undockReason,
 } from "../lib/dockGates";
 import { useIsFresh } from "../lib/freshness";
 
@@ -35,6 +35,7 @@ export function NavControlsWidget() {
   const mayCommand = canCommand(useAuthStore(state => state.user));
   const wsConnected = useTelemetryStore(state => state.wsConnected);
   const [motorEnableConfirmOpen, setMotorEnableConfirmOpen] = useState(false);
+  const [softwareResetConfirmOpen, setSoftwareResetConfirmOpen] = useState(false);
   const connection = useTelemetryStore((state) => state.connection);
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
   const baseState = useTelemetryStore((state) => state.baseState);
@@ -90,6 +91,11 @@ export function NavControlsWidget() {
   const motorEnableUiReason = motorEnableBlockedReason ?? (active
     ? "Wait for the current command to finish before enabling the motors."
     : null);
+  const softwareResetBlockedReason = softwareResetReason(facts);
+  const softwareResetUiReason = softwareResetBlockedReason ?? (active
+    ? "Wait for the current command to finish before resetting software."
+    : null);
+  const softwareResetAvailable = capabilities.includes("software_reset");
 
   return (
     <div>
@@ -121,6 +127,11 @@ export function NavControlsWidget() {
             ? "Sending command…"
             : active.stage ?? "The robot accepted the command."}
           {active.distanceRemaining != null && ` — ${active.distanceRemaining.toFixed(1)} m left`}
+        </div>
+      )}
+      {active?.command === "software_reset" && !online && (
+        <div className="nav-active-banner" role="status">
+          {active.stage ?? "Connection lost — reset outcome is unknown. Waiting for the supervisor result; do not retry."}
         </div>
       )}
       {online && !active && lastResult && (
@@ -181,6 +192,26 @@ export function NavControlsWidget() {
             </p>
           )}
         </div>
+        {softwareResetAvailable && (
+          <div className="nav-advanced-motor">
+            <button
+              className="btn danger"
+              disabled={!mayCommand || softwareResetUiReason !== null}
+              onClick={() => setSoftwareResetConfirmOpen(true)}
+              title={softwareResetUiReason ?? "Restart robot software while safely docked"}
+            >
+              <Power size={15} />
+              {active?.command === "software_reset" ? "Reset pending…" : "Restart robot software"}
+            </button>
+            <p className="nav-advanced-note">
+              Restarts robot software only; it does not reboot either computer. The dashboard will disconnect.
+              Wait for the supervisor result, then confirm a new robot pose before sending any destination.
+            </p>
+            {softwareResetUiReason && (
+              <p className="nav-advanced-note nav-motor-reason">Software reset — {softwareResetUiReason}</p>
+            )}
+          </div>
+        )}
       </details>
       <Dialog.Root open={motorEnableConfirmOpen} onOpenChange={setMotorEnableConfirmOpen}>
         <Dialog.Portal>
@@ -213,6 +244,46 @@ export function NavControlsWidget() {
                 title={motorEnableUiReason ?? "Confirm motor enable"}
               >
                 <Power size={15} /> Confirm motor enable
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={softwareResetConfirmOpen} onOpenChange={setSoftwareResetConfirmOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content" style={{ maxWidth: 440 }}>
+            <Dialog.Title asChild><h2>Restart robot software?</h2></Dialog.Title>
+            <Dialog.Description className="subtext">
+              This restarts robot software only, not either computer. The dashboard will disconnect. The reset may
+              take the robot's position estimate offline; wait for the supervisor's result and confirm a fresh
+              pose before sending a destination. If the connection drops before a result arrives, the outcome is
+              unknown and the command will not be resent automatically.
+            </Dialog.Description>
+            {softwareResetUiReason && (
+              <p className="nav-advanced-note nav-motor-reason">Software reset — {softwareResetUiReason}</p>
+            )}
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="btn">Cancel</button></Dialog.Close>
+              <button
+                className="btn danger"
+                disabled={!mayCommand || softwareResetUiReason !== null}
+                onClick={() => {
+                  const live = useTelemetryStore.getState();
+                  const command = useCommandStore.getState().active;
+                  const now = performance.now();
+                  const fresh = (at: number | null) => at !== null && Number.isFinite(at) && now >= at && now - at <= 3000;
+                  const liveFacts = factsFrom(live.connection.state,
+                    fresh(live.baseStateAt) ? live.baseState : null,
+                    fresh(live.poseReceivedAt) ? live.pose : null, live.capabilities,
+                    command?.command === "navigate_to_pose");
+                  if (!canCommand(useAuthStore.getState().user) || !live.wsConnected || command ||
+                      softwareResetReason(liveFacts) !== null) return;
+                  setSoftwareResetConfirmOpen(false);
+                  send("software_reset");
+                }}
+              >
+                <Power size={15} /> Confirm software reset
               </button>
             </div>
           </Dialog.Content>

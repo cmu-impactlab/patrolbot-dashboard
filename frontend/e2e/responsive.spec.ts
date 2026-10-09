@@ -2,18 +2,23 @@ import { test, expect } from "@playwright/test";
 import { dashboardFixture } from "./fixtures";
 
 async function menu(page: import("@playwright/test").Page) {
-  const trigger = page.getByRole("button", { name: "Menu", exact: true });
+  // App hydration can finish after page.goto's load event. Wait for the
+  // always-mounted toggle before deciding whether the compact menu is needed.
+  const trigger = page.getByRole("button", { name: "Menu", exact: true, includeHidden: true });
+  await expect(trigger).toBeAttached();
   if (await trigger.isVisible() && await trigger.getAttribute("aria-expanded") === "false") await trigger.click();
 }
+// Each role/width/preset is independent. WebKit's real click/frame waits on
+// high-DPI wide viewports make six theme toggles too much for one test budget.
 for (const role of ["observer", "operator", "administrator"]) {
-  test(`all presets and themes reflow for ${role}`, async ({ page }) => {
-    const fixture = await dashboardFixture(page, role);
-    await page.goto("/");
-    await expect(page.locator('[data-tour="widget-liveMap"]')).toBeVisible();
-    for (const width of [320, 390, 480, 767, 768, 784, 1024, 1199, 1200, 1280, 1440]) {
-      await page.setViewportSize({ width, height: width < 768 ? 740 : 800 });
-      await menu(page);
-      for (const preset of ["Operator", "Research", "Diagnostics"]) {
+  for (const width of [320, 390, 480, 767, 768, 784, 1024, 1199, 1200, 1280, 1440]) {
+    for (const preset of ["Operator", "Research", "Diagnostics"]) {
+      test(`${preset} reflows in both themes for ${role} at ${width}px`, async ({ page }) => {
+        const fixture = await dashboardFixture(page, role);
+        await page.setViewportSize({ width, height: width < 768 ? 740 : 800 });
+        await page.goto("/");
+        await expect(page.locator('[data-tour="widget-liveMap"]')).toBeVisible();
+        await menu(page);
         await page.locator('[data-tour="layouts"]').click();
         await page.getByRole("menuitem", { name: preset, exact: true }).click();
         for (let theme = 0; theme < 2; theme++) {
@@ -22,10 +27,10 @@ for (const role of ["observer", "operator", "administrator"]) {
           const overflow = await page.locator(".widget").evaluateAll(elements => elements.some(el => el.getBoundingClientRect().right > document.documentElement.clientWidth + 1 || el.getBoundingClientRect().left < -1));
           expect(overflow).toBe(false);
         }
-      }
+        expect(fixture.commands).toHaveLength(0);
+      });
     }
-    expect(fixture.commands).toHaveLength(0);
-  });
+  }
 }
 
 test("save failure keeps changes and retry persists phone edits without desktop drift", async ({ page }) => {

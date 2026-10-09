@@ -36,7 +36,7 @@ export interface CommandResultInfo {
 /** Commands that hand the robot the ability to move, or take it away. A
  *  pending destination must not survive one — requiring a new, explicit
  *  operator action afterwards is the whole point. */
-const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock"];
+const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock", "software_reset"];
 
 interface CommandState {
   active: ActiveCommand | null;
@@ -56,6 +56,7 @@ interface CommandState {
   setPickMode: (mode: PickMode) => void;
   setAllowUnlocalized: (allow: boolean) => void;
   resetOverrides: () => void;
+  connectionLost: () => void;
   send: (command: CommandType, goal?: GoalData, takeover?: boolean) => void;
   stop: () => void;
   resume: () => void;
@@ -90,6 +91,14 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   // override armed against the old session must not carry over to it. Called
   // from the socket layer on every (re)connect.
   resetOverrides: () => set({ allowUnlocalized: false }),
+
+  connectionLost: () => {
+    const active = get().active;
+    if (active?.command === "software_reset") {
+      set({ active: { ...active, phase: "running",
+        stage: "Connection lost — reset outcome is unknown. Waiting for the supervisor result; do not retry." } });
+    }
+  },
 
   stop: () => {
     // Remember the destination in effect right now so Resume can restore it.
@@ -131,6 +140,10 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({ pickMode: "none", lastResult: { commandId: crypto.randomUUID(), command,
         outcome: "rejected", at: Date.now(), detail: "Map context is missing or differs from the robot. Select a new position." } });
       return;
+    }
+    if (command === "software_reset") {
+      useTelemetryStore.setState({ poseSetThisSession: false });
+      set({ allowUnlocalized: false, pickMode: "none" });
     }
     if (command === "navigate_to_pose") {
       const telemetry = useTelemetryStore.getState();
@@ -226,7 +239,16 @@ export const useCommandStore = create<CommandState>((set, get) => ({
 
   handleResult: (data) => {
     const active = get().active;
-    if (active?.commandId !== data.command_id) return;
+    if (active?.commandId !== data.command_id) {
+      const previous = get().lastResult;
+      // A durable supervisor can resolve a reset after the dashboard has
+      // already surfaced an uncertain timeout. Accept that replay by ID.
+      if (previous?.commandId === data.command_id) {
+        set({ lastResult: { ...previous, outcome: data.outcome,
+          detail: data.detail ?? null, at: Date.now() } });
+      }
+      return;
+    }
     // A successful "set location" satisfies the navigation gate for this session.
     if (active.command === "set_initial_pose" && data.outcome === "succeeded") {
       useTelemetryStore.getState().markPoseSet();

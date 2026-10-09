@@ -184,7 +184,7 @@ CommandType = Literal[
     # the command anyway meant the dashboard offered a control the real
     # executor would reject as unknown, and only the mock made it look
     # implemented. Reinstate it when a real dock-in path is commissioned.
-    "charge_release", "motor_enable", "undock",
+    "charge_release", "motor_enable", "undock", "software_reset",
 ]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 

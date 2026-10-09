@@ -342,6 +342,29 @@ def undock_reason(facts: StateFacts) -> str | None:
     return _stationary_reason(facts)
 
 
+def software_reset_reason(facts: StateFacts) -> str | None:
+    """Restart robot software only while it is safely parked on its dock.
+
+    Localization is intentionally not checked: reset is a recovery path for
+    an unhealthy localization stack. Fresh pose and stationary odometry are
+    still required so missing telemetry cannot look safe.
+    """
+    reason = _hardware_reason(facts)
+    if reason is not None:
+        return reason
+    if "software_reset" not in facts.capabilities:
+        return "Software reset is not available on this robot."
+    if facts.dock_state_valid is not True:
+        return "The robot's dock observer is not reporting valid data. Check the robot before resetting software."
+    if (facts.dock_state or "").strip().upper() != "DOCKED_CONFIRMED":
+        return "Software reset is available only while the robot is confirmed on its dock."
+    if facts.motors_enabled:
+        return "The motors are on. Turn them off on the robot before resetting software."
+    if facts.navigating or facts.undock_active:
+        return "A navigation or undock operation is active. Stop it before resetting software."
+    return _stationary_reason(facts)
+
+
 # There is no dock gate because there is no dock command: the robot has no
 # automatic dock-in path (see protocol/messages.py). Driving onto the charger
 # is done by hand, and `navigate_to_pose` refuses to drive off it.
@@ -351,6 +374,7 @@ GATES = {
     "charge_release": charge_release_reason,
     "motor_enable": motor_enable_reason,
     "undock": undock_reason,
+    "software_reset": software_reset_reason,
 }
 
 

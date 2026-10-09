@@ -277,3 +277,34 @@ it("offers destinations after recovery with an operator-confirmed pose", () => {
 });
 
 });
+
+
+describe("software reset", () => {
+  beforeEach(() => useCommandStore.setState({ active: null, lastResult: null, stoppedGoal: null }));
+  afterEach(cleanup);
+  function setup() {
+    setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, [...CAPS, "software_reset"]);
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />); openAdvanced();
+    return sent;
+  }
+  it("requires confirmation and cancellation sends nothing", () => {
+    const sent=setup();
+    fireEvent.click(screen.getByRole("button", {name:"Restart robot software"}));
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", {name:"Cancel"}));
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", {name:"Restart robot software"}));
+    fireEvent.click(screen.getByRole("button", {name:"Confirm software reset"}));
+    expect(sent).toEqual(["software_reset"]);
+  });
+  it("refuses confirmation after connection loss", () => {
+    const sent=setup();
+    fireEvent.click(screen.getByRole("button", {name:"Restart robot software"}));
+    setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, [...CAPS,"software_reset"]);
+    useTelemetryStore.setState({wsConnected:false,connection:{state:"offline",last_seen:null}});
+    fireEvent.click(screen.getByRole("button", {name:"Confirm software reset"}));
+    expect(sent).toEqual([]);
+  });
+});

@@ -183,10 +183,33 @@ export function undockReason(facts: StateFacts): string | null {
   return stationaryReason(facts);
 }
 
+/** Software-only recovery; localization is intentionally irrelevant. */
+export function softwareResetReason(facts: StateFacts): string | null {
+  const reason = hardwareReason(facts);
+  if (reason !== null) return reason;
+  if (!facts.capabilities.includes("software_reset")) {
+    return "Software reset is not available on this robot.";
+  }
+  if (facts.dockStateValid !== true) {
+    return "The robot's dock observer is not reporting valid data. Check the robot before resetting software.";
+  }
+  if ((facts.dockState ?? "").trim().toUpperCase() !== "DOCKED_CONFIRMED") {
+    return "Software reset is available only while the robot is confirmed on its dock.";
+  }
+  if (facts.motorsEnabled) {
+    return "The motors are on. Turn them off on the robot before resetting software.";
+  }
+  if (facts.navigating || facts.undockActive) {
+    return "A navigation or undock operation is active. Stop it before resetting software.";
+  }
+  return facts.stationary ? null : "The dashboard has not had a recent position update or the robot is still moving — wait for fresh stationary data before resetting software.";
+}
+
 const GATES: Partial<Record<CommandType, (facts: StateFacts) => string | null>> = {
   charge_release: chargeReleaseReason,
   motor_enable: motorEnableReason,
   undock: undockReason,
+  software_reset: softwareResetReason,
 };
 
 export function rejectionReason(command: CommandType, facts: StateFacts): string | null {
