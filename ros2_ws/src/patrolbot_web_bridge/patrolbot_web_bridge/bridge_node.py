@@ -232,27 +232,41 @@ class WebBridgeNode(Node):
             self._latest_amcl, self._latest_odom,
             covariance_warn=float(self.cfg["covariance_warn_threshold"]),
         )
-        if payload:
+        if payload and self._on_active_map(self._latest_amcl):
             # One definition of "localized", so the dashboard's navigation gate
             # and this node's own precheck cannot disagree. normalize_pose
             # judges the covariance alone; a confident fix that AMCL stopped
             # publishing stays confident forever, and only the age check here
             # notices.
+            payload.update(self._map_context())
             payload["localized"] = self._localization_is_usable()
             self.ws.send("telemetry.pose", payload)
 
+    def _map_context(self):
+        base = self._latest_base_state or {}
+        return {k: base.get(k) for k in ('map_id', 'map_revision')}
+
+    def _on_active_map(self, msg):
+        base = self._latest_base_state or {}
+        if msg is None or not base.get('map_id') or not base.get('map_revision'):
+            return False
+        stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        return stamp >= base.get('map_activated_stamp_ns', 0) > 0
+
     def _on_scan(self, msg: LaserScan) -> None:
-        if self._scan_throttle.ready():
+        if self._scan_throttle.ready() and self._on_active_map(msg):
             self.ws.send("telemetry.lidar",
-                         normalizers.normalize_scan(
+                         dict(normalizers.normalize_scan(
                              msg, int(self.cfg["scan_max_points"]),
                              angle_offset=float(self.cfg["scan_angle_offset"]),
-                             mirror=bool(self.cfg["scan_mirror"])))
+                             mirror=bool(self.cfg["scan_mirror"])), **self._map_context()))
 
     def _on_plan(self, msg: Path) -> None:
-        if not self._path_throttle.ready():
+        if not self._path_throttle.ready() or not self._on_active_map(msg):
             return
         payload = normalizers.normalize_path(msg, int(self.cfg["path_max_points"]))
+        payload.update(self._map_context())
+        if payload.get('goal'): payload['goal'].update(self._map_context())
         if payload["points"] != self._last_path_points:
             self._last_path_points = payload["points"]
             self.ws.send("telemetry.path", payload)
@@ -273,6 +287,12 @@ class WebBridgeNode(Node):
 
     def _on_base_state(self, msg) -> None:
         payload = normalizers.normalize_base_state(msg)
+        payload.update(map_id=getattr(msg, 'map_id', '') or None,
+                       map_revision=getattr(msg, 'map_revision', '') or None,
+                       map_activated_stamp_ns=getattr(msg, 'map_activated_stamp_ns', 0))
+        if any(payload.get(k) != (self._latest_base_state or {}).get(k) for k in ('map_id', 'map_revision')):
+            self._latest_amcl = None
+            self._last_path_points = None
         # Settle before anything reads it: _latest_base_state feeds the local
         # command prechecks, the payload feeds the server's gates and the UI,
         # and _maybe_seed_dock_pose re-seeds localization off it.

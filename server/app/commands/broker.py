@@ -56,6 +56,7 @@ class ActiveCommand:
     command_id: str
     command: str
     robot_id: str
+    initiator: Any = None
     acked: bool = False
     timers: list[asyncio.Task] = field(default_factory=list)
 
@@ -133,7 +134,13 @@ class CommandBroker:
                 await self._reject_audited(client, robot_id, command_id, command,
                                            "This command needs a destination.")
                 return
-            reason = self._validate_goal(robot_id, payload.goal)
+            maps = getattr(self.hub, "maps", {})
+            target = maps.get(payload.goal.map_id)
+            if target is None or target.map_revision != payload.goal.map_revision:
+                await self._reject_audited(client, robot_id, command_id, command,
+                                           "Map context is required and must match the catalog. Refresh and select a new position.")
+                return
+            reason = self._validate_goal(robot_id, payload.goal, target)
             if reason is not None:
                 await self._reject_audited(client, robot_id, command_id, command, reason)
                 return
@@ -145,6 +152,17 @@ class CommandBroker:
                                        "try again once it is online.")
             return
 
+        if command in GOAL_REQUIRED:
+            if "map_context_v1" not in session.state.capabilities:
+                await self._reject_audited(client, robot_id, command_id, command,
+                                           "The robot does not support map-aware localization. Update its bridge first.")
+                return
+            active_map = session.state.base_state.data
+            if command == "navigate_to_pose" and (active_map is None or
+                    active_map.map_id != target.map_id or active_map.map_revision != target.map_revision):
+                await self._reject_audited(client, robot_id, command_id, command,
+                                           "Destination map differs from the robot active map.")
+                return
         # 5. Hardware-state gate for the motion, charging and undock commands.
         #    The UI mirrors the charging/undock rules to grey those controls
         #    out, and applies its own weaker check to navigation — but a hidden
@@ -165,7 +183,7 @@ class CommandBroker:
             )
 
         entry = ActiveCommand(command_id=command_id, command=payload.command,
-                              robot_id=envelope.robot_id)
+                              robot_id=envelope.robot_id, initiator=client)
         self.active[command_id] = entry
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
@@ -210,7 +228,7 @@ class CommandBroker:
 
     # -- internals ------------------------------------------------------------
 
-    def _validate_goal(self, robot_id: str, goal: Any) -> str | None:
+    def _validate_goal(self, robot_id: str, goal: Any, target: Any = None) -> str | None:
         """Reject non-finite or out-of-bounds coordinates before they reach
         Nav2. Bounds come from the robot's occupancy map when it has streamed
         one; otherwise a coarse sanity limit applies."""
@@ -220,12 +238,14 @@ class CommandBroker:
             return "The destination heading is invalid."
 
         session = self.hub.robots.get(robot_id)
-        map_data = session.state.map.data if session is not None else None
+        map_data = target or (session.state.map.data if session is not None else None)
         if map_data is not None:
-            min_x, min_y = map_data.origin.x, map_data.origin.y
-            max_x = min_x + map_data.width * map_data.resolution
-            max_y = min_y + map_data.height * map_data.resolution
-            if not (min_x <= goal.x <= max_x and min_y <= goal.y <= max_y):
+            dx, dy = goal.x - map_data.origin.x, goal.y - map_data.origin.y
+            yaw = map_data.origin.yaw
+            mx = math.cos(yaw) * dx + math.sin(yaw) * dy
+            my = -math.sin(yaw) * dx + math.cos(yaw) * dy
+            if not (0 <= mx < map_data.width * map_data.resolution and
+                    0 <= my < map_data.height * map_data.resolution):
                 return "That destination is outside the known map."
         else:
             limit = self.hub.settings.max_map_coordinate_m
@@ -304,6 +324,7 @@ class CommandBroker:
         """Synthesize a result for a command the robot never resolved."""
         if entry.command_id not in self.active:
             return
+        await self._cancel_map(entry)
         self.hub.publish("command.result", entry.robot_id, CommandResultData(
             command_id=entry.command_id, outcome=outcome, detail=detail))
         await self._finish(entry, outcome, detail)
@@ -323,8 +344,23 @@ class CommandBroker:
             )
         log.info("command %s closed: %s", entry.command_id, outcome)
 
+    async def _cancel_map(self, entry: ActiveCommand) -> None:
+        if entry.command != "set_initial_pose":
+            return
+        session = self.hub.robots.get(entry.robot_id)
+        if session is not None and session.websocket is not None:
+            with contextlib.suppress(Exception):
+                await session.websocket.send_text(encode("command.cancel", entry.robot_id,
+                    self.hub._next_seq(), {"command_id": entry.command_id}))
+
+    async def cancel_for_client(self, client: Any) -> None:
+        for entry in list(self.active.values()):
+            if entry.initiator is client:
+                await self._cancel_map(entry)
+
     async def shutdown(self) -> None:
         for entry in list(self.active.values()):
+            await self._cancel_map(entry)
             entry.cancel_timers()
             for timer in entry.timers:
                 with contextlib.suppress(asyncio.CancelledError):

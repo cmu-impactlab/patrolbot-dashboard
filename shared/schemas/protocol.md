@@ -124,3 +124,19 @@ Server-side broker rules:
 - Occupancy grid is RLE-encoded `[value, count]` pairs over row-major int8
   cells (`-1` unknown, `0` free, `100` occupied), row 0 = map origin row,
   ROS convention (+y up — renderers must flip).
+
+## Map context (map_context_v1)
+
+Spatial payloads and command goals carry `map_id` and `map_revision`. Missing
+context remains readable for legacy recordings but is explicitly rejected for
+spatial commands. `/api/maps` lists local catalog metadata; `/api/maps/{map_id}`
+returns occupancy data. Browsing never commands the robot. `set_initial_pose`
+uses LocalizeOnMap; map activation and localization completion are separate.
+BaseState map context is confirmed robot state; it becomes stale on disconnect.
+Navigation, restoration and retries must retain and revalidate their original
+map context. Map switching invalidates selections and cross-floor overlays.
+
+`command.cancel` is a server-to-robot frame carrying the original `command_id`.
+Operator browser disconnect, server timeout or shutdown cancels its active map
+transaction; cancellation retains the robot-side hold. Browser gateways never
+accept this internal message as authorization.

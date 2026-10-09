@@ -1,3 +1,4 @@
+import { sameMap } from "../lib/mapContext";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Crosshair, MapPin } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -19,6 +20,7 @@ export function RestorePosePrompt({ enabled = true }: { enabled?: boolean }) {
   const send = useCommandStore((state) => state.send);
   const setPickMode = useCommandStore((state) => state.setPickMode);
 
+  const activeMap = useTelemetryStore(state => state.baseState);
   const online = connection.state === "online";
   const [dismissed, setDismissed] = useState(false);
 
@@ -28,10 +30,10 @@ export function RestorePosePrompt({ enabled = true }: { enabled?: boolean }) {
     if (!online) setDismissed(false);
   }, [online]);
 
-  const open = mayCommand && enabled && online && !poseSetThisSession && lastKnownPose != null && !dismissed;
+  const open = mayCommand && enabled && online && !poseSetThisSession && sameMap(lastKnownPose, activeMap) && !dismissed;
 
   const restore = () => {
-    if (lastKnownPose) send("set_initial_pose", lastKnownPose);
+    if (lastKnownPose && sameMap(lastKnownPose, useTelemetryStore.getState().baseState)) send("set_initial_pose", lastKnownPose);
     setDismissed(true);
   };
   const setNew = () => {

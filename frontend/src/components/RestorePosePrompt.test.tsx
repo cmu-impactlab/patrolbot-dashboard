@@ -6,16 +6,16 @@ import { RestorePosePrompt } from "./RestorePosePrompt";
 
 beforeEach(() => {
   useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
-  useTelemetryStore.setState({
+  useTelemetryStore.setState({ baseState: { ...useTelemetryStore.getState().baseState!, map_id: "cmuq-floor2", map_revision: "test-revision",  },
     connection: { state: "online", last_seen: new Date().toISOString() },
-    lastKnownPose: { x: 1, y: 2, yaw: 0 },
+    lastKnownPose: { map_id: "cmuq-floor2", map_revision: "test-revision",  x: 1, y: 2, yaw: 0 },
     poseSetThisSession: false,
   });
 });
 
 afterEach(() => {
   cleanup();
-  useTelemetryStore.setState({
+  useTelemetryStore.setState({ baseState: { ...useTelemetryStore.getState().baseState!, map_id: "cmuq-floor2", map_revision: "test-revision",  },
     connection: { state: "offline", last_seen: null },
     lastKnownPose: null,
     poseSetThisSession: false,

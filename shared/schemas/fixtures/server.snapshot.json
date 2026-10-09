@@ -5,12 +5,24 @@
   "sequence": 1,
   "timestamp": "2026-07-17T10:31:20.000Z",
   "data": {
-    "connection": { "state": "online", "last_seen": "2026-07-17T10:31:19.900Z" },
-    "robot_status": { "status": "ready", "detail": "Robot is ready for a new task." },
+    "connection": {
+      "state": "online",
+      "last_seen": "2026-07-17T10:31:19.900Z"
+    },
+    "robot_status": {
+      "status": "ready",
+      "detail": "Robot is ready for a new task."
+    },
     "system_health": {
       "overall": "healthy",
       "subsystems": [
-        { "id": "drive_base", "label": "Drive base", "level": "healthy", "message": "Motor controller responding normally.", "updated_at": "2026-07-17T10:31:19.000Z" }
+        {
+          "id": "drive_base",
+          "label": "Drive base",
+          "level": "healthy",
+          "message": "Motor controller responding normally.",
+          "updated_at": "2026-07-17T10:31:19.000Z"
+        }
       ]
     },
     "map_version": 3,

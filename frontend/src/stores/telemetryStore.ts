@@ -1,3 +1,4 @@
+import { sameMap } from "../lib/mapContext";
 import { create } from "zustand";
 import type {
   AnyFrame,
@@ -275,7 +276,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           ...bump,
           pose: frame.data,
           poseReceivedAt: performance.now(),
-          trajectory: appendTrajectory(get().trajectory, frame.data),
+          trajectory: appendTrajectory(sameMap(get().pose, frame.data) ? get().trajectory : [], frame.data),
         });
         break;
       case "telemetry.lidar":

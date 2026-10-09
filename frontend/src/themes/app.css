@@ -1203,7 +1203,8 @@ a { color: inherit; }
 .dropdown-item { overflow-wrap: anywhere; }
 .login-screen { min-height: 100dvh; height: auto; padding: 16px; }
 .login-card { width: 100%; padding: 28px 20px; }
-.map-interaction { position: absolute; top: 8px; left: 8px; z-index: 7; max-width: calc(100% - 72px); }
+.map-interaction { pointer-events: none; position: absolute; top: 8px; left: 8px; z-index: 7; max-width: calc(100% - 72px); }
+.map-interaction button { pointer-events: auto; }
 .map-confirm { position: absolute; bottom: 8px; left: 8px; right: 64px; z-index: 7; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px; max-height: 65%; overflow: auto; }
 .map-confirm label { display: block; }
 .map-confirm .actions { display: flex; flex-wrap: wrap; gap: 8px; }

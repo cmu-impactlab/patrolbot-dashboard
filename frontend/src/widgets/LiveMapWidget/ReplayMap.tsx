@@ -1,3 +1,4 @@
+import { sameMap } from "../../lib/mapContext";
 import { Crosshair, Maximize, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useMapQuery } from "../../api/queries";
@@ -40,7 +41,7 @@ function drawReplayScene(
                 map.height * map.resolution * view.zoom);
 
   const replay = useReplayStore.getState();
-  const { poses } = replay;
+  const poses = replay.poses;
   if (poses.length === 0) return;
   const t = replay.now();
 
@@ -49,7 +50,8 @@ function drawReplayScene(
     ctx.beginPath();
     for (let i = 0; i < poses.length; i++) {
       const [sx, sy] = worldToScreen(view, poses[i].x, poses[i].y);
-      if (i === 0) ctx.moveTo(sx, sy);
+      if (!sameMap(poses[i], map)) continue;
+      if (i === 0 || !sameMap(poses[i - 1], map)) ctx.moveTo(sx, sy);
       else ctx.lineTo(sx, sy);
     }
     ctx.strokeStyle = cssVar("--muted");
@@ -64,11 +66,13 @@ function drawReplayScene(
   let drawn = 0;
   for (let i = 0; i < poses.length && poses[i].tMs <= t; i++) {
     const [sx, sy] = worldToScreen(view, poses[i].x, poses[i].y);
-    if (drawn === 0) ctx.moveTo(sx, sy);
+    if (!sameMap(poses[i], map)) continue;
+    if (i === 0 || !sameMap(poses[i - 1], map)) ctx.moveTo(sx, sy);
     else ctx.lineTo(sx, sy);
     drawn++;
   }
-  const here = replay.poseAt(t);
+  const candidate = replay.poseAt(t);
+  const here = sameMap(candidate, map) ? candidate : null;
   if (here && drawn > 0) {
     const [sx, sy] = worldToScreen(view, here.x, here.y);
     ctx.lineTo(sx, sy);
@@ -82,7 +86,9 @@ function drawReplayScene(
   }
 
   // Start marker, so a loop is readable even when the route doubles back.
-  const [startX, startY] = worldToScreen(view, poses[0].x, poses[0].y);
+  const first = poses.find(pose => sameMap(pose, map));
+  if (!first) return;
+  const [startX, startY] = worldToScreen(view, first.x, first.y);
   ctx.beginPath();
   ctx.arc(startX, startY, 4.5, 0, Math.PI * 2);
   ctx.fillStyle = cssVar("--surface");
@@ -130,7 +136,21 @@ function drawReplayScene(
 }
 
 export function ReplayMap({ theme }: { theme: string }) {
-  const mapQuery = useMapQuery(0);
+  const tMs = useReplayStore(state => state.tMs);
+  const poseAt = useReplayStore(state => state.poseAt);
+  const [playingMap, setPlayingMap] = useState(() => poseAt(tMs)?.map_id);
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const replay = useReplayStore.getState();
+      setPlayingMap(replay.poseAt(replay.now())?.map_id);
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [tMs, poseAt]);
+  const context = { map_id: playingMap };
+  const mapQuery = useMapQuery(0, context?.map_id ?? undefined);
   const poses = useReplayStore((state) => state.poses);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View | null>(null);
@@ -150,8 +170,9 @@ export function ReplayMap({ theme }: { theme: string }) {
     const canvas = canvasRef.current;
     if (!canvas || !map) return;
     setFollow(false);
-    viewRef.current = poses.length > 0
-      ? fitPoints(poses.map((pose) => [pose.x, pose.y]), canvas.clientWidth, canvas.clientHeight)
+    const matching = poses.filter(pose => sameMap(pose, map));
+    viewRef.current = matching.length > 0
+      ? fitPoints(matching.map((pose) => [pose.x, pose.y]), canvas.clientWidth, canvas.clientHeight)
       : fitView(map, canvas.clientWidth, canvas.clientHeight);
   };
 
@@ -161,7 +182,7 @@ export function ReplayMap({ theme }: { theme: string }) {
     signatureRef.current = "";
     gesture.current.cancel();
     setPanning(false);
-  }, [poses]);
+  }, [poses, map?.map_id, map?.map_revision]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -182,12 +203,12 @@ export function ReplayMap({ theme }: { theme: string }) {
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const bitmapKey = `${map.map_version}:${theme}`;
+      const bitmapKey = `${map.map_id}:${map.map_revision}:${theme}`;
       if (!bitmapRef.current || bitmapRef.current.key !== bitmapKey) {
         bitmapRef.current = { key: bitmapKey, bitmap: buildMapBitmap(map) };
       }
       if (!viewRef.current) {
-        const replayPoses = useReplayStore.getState().poses;
+        const replayPoses = useReplayStore.getState().poses.filter(pose => sameMap(pose, map));
         viewRef.current = replayPoses.length > 0
           ? fitPoints(replayPoses.map((pose) => [pose.x, pose.y]), width, height)
           : fitView(map, width, height);
@@ -196,7 +217,8 @@ export function ReplayMap({ theme }: { theme: string }) {
       const replay = useReplayStore.getState();
       const t = replay.now();
       if (follow) {
-        const here = replay.poseAt(t);
+        const candidate = replay.poseAt(t);
+        const here = sameMap(candidate, map) ? candidate : null;
         if (here) viewRef.current = followView(viewRef.current, width, height, here.x, here.y);
       }
 

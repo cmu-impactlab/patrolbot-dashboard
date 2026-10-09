@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -c constraints.txt .
 COPY --from=frontend /build/dist ./static
 COPY shared/ /shared/
 COPY server/maps /maps
+RUN python -c "from app.telemetry.map_catalog import MapCatalog; MapCatalog('/maps/catalog')"
 ENV PATROLBOT_STATIC_MAP_YAML=/maps/cmuq-floor2/second_map.yaml
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -12,6 +12,8 @@
     "linear_velocity": 0.24,
     "angular_velocity": 0.02,
     "covariance_trace": 0.08,
-    "localized": true
+    "localized": true,
+    "map_id": "cmuq-floor2",
+    "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"
   }
 }

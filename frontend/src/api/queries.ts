@@ -75,12 +75,12 @@ export function useDeleteLayout() {
   });
 }
 
-export function useMapQuery(mapVersion: number) {
+export function useMapQuery(mapVersion: number, mapId?: string) {
   return useQuery({
     // Version 0 still fetches: the server falls back to its local static map
     // when no robot has streamed one (the real robot never transmits its map).
-    queryKey: ["map", mapVersion],
-    queryFn: () => json<MapData>("/api/map"),
+    queryKey: ["map", mapId, mapVersion],
+    queryFn: () => json<MapData>(mapId ? `/api/maps/${encodeURIComponent(mapId)}` : "/api/map"),
     staleTime: Infinity,
     retry: 2,
   });
@@ -137,4 +137,8 @@ export function useBatteryHistory(minutes = 120) {
     queryFn: () => json<BatteryHistoryRow[]>(`/api/history/battery?minutes=${minutes}`),
     refetchInterval: 30_000,
   });
+}
+
+export function useMapsQuery() {
+  return useQuery({ queryKey: ["maps"], queryFn: () => json<Omit<MapData, "rle">[]>("/api/maps"), staleTime: Infinity });
 }

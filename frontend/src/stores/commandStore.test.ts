@@ -1,6 +1,6 @@
 import { useTelemetryStore } from "./telemetryStore";
 import type { BaseStateData } from "../types/protocol";
-const readyBase: BaseStateData = {
+const readyBase: BaseStateData = { map_id: "cmuq-floor2", map_revision: "test-revision",
   session_generation: 1, link_connected: true, telemetry_age: 0,
   hardware_state_valid: true, charge_state: "idle", motors_enabled: true,
   estop_pressed: false, fault_flags: 0, stall_value: 0,
@@ -20,7 +20,7 @@ describe("commandStore.cancel", () => {
   it("discards a paused destination without sending anything", () => {
     const sender = vi.fn(() => true);
     registerCommandSender(sender);
-    useCommandStore.setState({ stoppedGoal: { x: 1, y: 2, yaw: 0 }, active: null });
+    useCommandStore.setState({ stoppedGoal: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 }, active: null });
 
     useCommandStore.getState().cancel();
 
@@ -59,7 +59,7 @@ describe("commandStore.takeOver", () => {
     });
 
     // First attempt (no takeover) — remembered as the last attempt.
-    useCommandStore.getState().send("navigate_to_pose", { x: 3, y: 4, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 3, y: 4, yaw: 0 });
     const first = JSON.parse(sent[0]);
     expect(first.data.takeover).toBe(false);
 
@@ -67,7 +67,7 @@ describe("commandStore.takeOver", () => {
     useCommandStore.getState().takeOver();
     const second = JSON.parse(sent[1]);
     expect(second.data.command).toBe("navigate_to_pose");
-    expect(second.data.goal).toEqual({ x: 3, y: 4, yaw: 0 });
+    expect(second.data.goal).toEqual({ map_id: "cmuq-floor2", map_revision: "test-revision", x: 3, y: 4, yaw: 0 });
     expect(second.data.takeover).toBe(true);
   });
 
@@ -92,7 +92,7 @@ describe("commandStore reconnect safety", () => {
   it("does not auto-resume a stopped goal when the socket reconnects", () => {
     const sender = vi.fn(() => true);
     // A destination is paused (Stop was pressed) and Resume is on offer.
-    useCommandStore.setState({ stoppedGoal: { x: 1, y: 2, yaw: 0 } });
+    useCommandStore.setState({ stoppedGoal: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 } });
 
     // A socket reconnect re-registers the sender (see useTelemetrySocket).
     registerCommandSender(sender);
@@ -117,7 +117,7 @@ describe("commandStore.allowUnlocalized", () => {
     const sent: string[] = [];
     registerCommandSender((frame) => { sent.push(frame); return true; });
 
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 });
 
     expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(false);
   });
@@ -127,13 +127,13 @@ describe("commandStore.allowUnlocalized", () => {
     registerCommandSender((frame) => { sent.push(frame); return true; });
     useCommandStore.getState().setAllowUnlocalized(true);
 
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 });
     expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(true);
     expect(useCommandStore.getState().allowUnlocalized).toBe(false);
 
     // Suppressing a safety gate must be re-armed deliberately every time; a
     // second destination cannot inherit the first one's override.
-    useCommandStore.getState().send("navigate_to_pose", { x: 5, y: 6, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 5, y: 6, yaw: 0 });
     expect(JSON.parse(sent[1]).data.allow_unlocalized).toBe(false);
   });
 
@@ -163,7 +163,7 @@ describe("commandStore override safety", () => {
     registerCommandSender(() => false); // socket refused the frame
     useCommandStore.getState().setAllowUnlocalized(true);
 
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 });
 
     // Nothing reached the robot, so the operator should not have to re-arm.
     expect(useCommandStore.getState().allowUnlocalized).toBe(true);
@@ -180,7 +180,7 @@ describe("commandStore override safety", () => {
     registerCommandSender((frame) => { sent.push(frame); return true; });
     useCommandStore.getState().setAllowUnlocalized(true);
 
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2, yaw: 0 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 });
     expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(true);
 
     // Taking control back re-sends the same destination; suppressing a safety
@@ -199,28 +199,60 @@ describe("localization recovery", () => {
     const sender = vi.fn(() => true);
     registerCommandSender(sender);
     useCommandStore.setState({ allowUnlocalized: true, active: null });
-    useTelemetryStore.setState({ baseState: { ...readyBase, ...fields } });
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2 });
+    useTelemetryStore.setState({ baseState: { map_id: "cmuq-floor2", map_revision: "test-revision",  ...readyBase, ...fields } });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
     expect(sender).not.toHaveBeenCalled();
     expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
   });
   it("keeps pose initialization available and accepts navigation after recovery", () => {
     const sender = vi.fn(() => true);
     registerCommandSender(sender);
-    useTelemetryStore.setState({ baseState: { ...readyBase, localization_recovery_required: true } });
-    useCommandStore.getState().send("set_initial_pose", { x: 1, y: 2, yaw: 0 });
+    useTelemetryStore.setState({ baseState: { map_id: "cmuq-floor2", map_revision: "test-revision",  ...readyBase, localization_recovery_required: true } });
+    useCommandStore.getState().send("set_initial_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2, yaw: 0 });
     expect(sender).toHaveBeenCalledTimes(1);
     useTelemetryStore.setState({ baseState: readyBase });
-    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2 });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
     expect(sender).toHaveBeenCalledTimes(2);
   });
   it("rechecks freshness when resuming a destination", () => {
     const sender = vi.fn(() => true);
     registerCommandSender(sender);
-    useCommandStore.setState({ stoppedGoal: { x: 1, y: 2 }, active: null });
+    useCommandStore.setState({ stoppedGoal: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 }, active: null });
     useTelemetryStore.setState({ baseStateAt: performance.now() - 3001 });
     useCommandStore.getState().resume();
     expect(sender).not.toHaveBeenCalled();
-    expect(useCommandStore.getState().stoppedGoal).toEqual({ x: 1, y: 2 });
+    expect(useCommandStore.getState().stoppedGoal).toEqual({ map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
   });
+});
+
+it("refuses a saved destination after the active floor changes", () => {
+  const sender = vi.fn(() => true);
+  registerCommandSender(sender);
+  useCommandStore.setState({ active: null, stoppedGoal: {
+    map_id: "cmuq-floor1", map_revision: "first", x: 1, y: 2,
+  } });
+  useCommandStore.getState().resume();
+  expect(sender).not.toHaveBeenCalled();
+  expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
+});
+
+it("refuses takeover of a pose attempt after the robot changes floors", () => {
+  const sender = vi.fn(() => true);
+  registerCommandSender(sender);
+  useCommandStore.setState({ active: null, lastAttempt: {
+    command: "set_initial_pose", activeMap: readyBase,
+    goal: { map_id: "cmuq-floor1", map_revision: "first", x: 1, y: 2 },
+  } });
+  useTelemetryStore.setState({ baseState: { ...readyBase, map_id: "cmuq-floor1", map_revision: "first" } });
+  useCommandStore.getState().takeOver();
+  expect(sender).not.toHaveBeenCalled();
+  expect(useCommandStore.getState().lastAttempt).toBeNull();
+});
+
+it("refuses legacy spatial commands without map context", () => {
+  const sender = vi.fn(() => true);
+  registerCommandSender(sender);
+  useCommandStore.getState().send("set_initial_pose", { x: 1, y: 2 });
+  expect(sender).not.toHaveBeenCalled();
+  expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
 });

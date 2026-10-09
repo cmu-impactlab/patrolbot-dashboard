@@ -250,6 +250,8 @@ class WsClient:
                 frame = json.loads(message)
             except json.JSONDecodeError:
                 continue
+            if frame.get("type") == "command.cancel" and self.on_command is not None:
+                self.on_command({"command": "cancel_map", "command_id": frame.get("data", {}).get("command_id")})
             if frame.get("type") == "command.request" and self.on_command is not None:
                 # Callback runs on the WS thread — it must only enqueue.
                 self.on_command(frame.get("data", {}))

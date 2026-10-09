@@ -25,7 +25,10 @@ async def snapshot(request: Request) -> dict:
 async def get_map(request: Request) -> dict:
     hub = request.app.state.hub
     session = hub.primary()
-    map_data = session.state.map.data if session else None
+    active = session.state.base_state.data if session else None
+    map_data = request.app.state.maps.get(active.map_id) if active and active.map_id else None
+    if map_data is None:
+        map_data = session.state.map.data if session else None
     if map_data is None:
         # The real robot never streams its map; fall back to the local copy.
         map_data = getattr(request.app.state, "static_map", None)
@@ -41,3 +44,17 @@ async def events(
 ) -> list[dict]:
     db = request.app.state.db
     return await db.get_events(limit=limit)
+
+
+@router.get("/api/maps")
+async def get_maps(request: Request) -> list[dict]:
+    return [value.model_dump(mode="json", exclude={"rle"})
+            for value in request.app.state.maps.values()]
+
+
+@router.get("/api/maps/{map_id}")
+async def get_map_by_id(map_id: str, request: Request) -> dict:
+    value = request.app.state.maps.get(map_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="Unknown map")
+    return value.model_dump(mode="json")

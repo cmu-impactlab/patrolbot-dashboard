@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from mock_robot.client import MockRobot
+from mock_robot.map_context import MAP_REVISIONS
 
 
 class FakeWs:
@@ -27,9 +28,9 @@ class FakeWs:
 
 
 def request(command: str, command_id: str = "cmd-1", goal: dict | None = None) -> dict:
-    data = {"command_id": command_id, "command": command}
+    data = {"command_id": command_id, "command": command, "operator_authorized": True}
     if goal is not None:
-        data["goal"] = goal
+        data["goal"] = {"map_id": "cmuq-floor2", "map_revision": MAP_REVISIONS["cmuq-floor2"], **goal}
     return {"version": 1, "type": "command.request", "robot_id": "patrolbot-01",
             "sequence": 1, "timestamp": "2026-07-17T00:00:00Z", "data": data}
 

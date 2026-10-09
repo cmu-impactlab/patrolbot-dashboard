@@ -525,11 +525,12 @@ def test_authorized_override_logs_once_and_reaches_navigation():
     executor = CommandExecutor.__new__(CommandExecutor)
     executor._node = SimpleNamespace(get_logger=lambda: logger)
     executor._ws = _Ws()
+    executor._map_active = None
     executor._navigate = (
         lambda command_id, goal, current_yaw:
         navigations.append((command_id, goal, current_yaw)))
 
-    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    goal = {"map_id": "cmuq-floor2", "map_revision": "test", "x": 1.0, "y": 2.0, "yaw": 0.0}
     executor.handle(
         {
             "command_id": "override-goal",
@@ -538,7 +539,7 @@ def test_authorized_override_logs_once_and_reaches_navigation():
             "allow_unlocalized": True,
             "operator_authorized": True,
         },
-        _navigable_base_state(),
+        dict(_navigable_base_state(), map_id="cmuq-floor2", map_revision="test"),
         current_yaw=0.25,
         localized=False,
         base_state_age=0.1,
@@ -550,3 +551,43 @@ def test_authorized_override_logs_once_and_reaches_navigation():
         "unusable map-frame fix (command override-goal)"
     ]
     assert navigations == [("override-goal", goal, 0.25)]
+
+
+
+def test_late_map_callbacks_cannot_complete_a_new_request():
+    executor = CommandExecutor.__new__(CommandExecutor)
+    previous = {"command_id": "previous"}
+    current = {"command_id": "current"}
+    executor._map_active = current
+    executor._ws = _Ws()
+    # A stale callback must not even inspect its old future.
+    executor._map_response(None, previous)
+    executor._map_result(None, previous)
+    assert executor._map_active is current
+
+
+def test_map_result_identity_must_match_original_command():
+    from unittest.mock import Mock
+    executor = CommandExecutor.__new__(CommandExecutor)
+    active = {"command_id": "current"}
+    executor._map_active = active
+    executor._result = Mock()
+    future = SimpleNamespace(result=lambda: SimpleNamespace(result=SimpleNamespace(
+        request_id="old", localized=True, code=0, message="success")))
+    executor._map_result(future, active)
+    assert executor._result.call_args.args[1] == "failed"
+    assert executor._map_active is None
+
+
+
+def test_stop_during_map_transaction_acknowledges_cancellation_and_hold():
+    from unittest.mock import Mock
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor._map_active = {"command_id": "map"}
+    executor._check_map_connection = Mock()
+    executor._ack = Mock()
+    executor._result = Mock()
+    executor.handle({"command_id": "stop", "command": "stop"}, None, None)
+    executor._check_map_connection.assert_called_once_with(cancel=True)
+    executor._ack.assert_called_once_with("stop", True)
+    assert executor._result.call_args.args[1] == "succeeded"

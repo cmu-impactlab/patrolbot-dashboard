@@ -307,6 +307,7 @@ class TelemetryHub:
         # Free the command lease if this client held it, so another operator
         # can take control without a takeover.
         self.commands.lease.release_client(client)
+        asyncio.create_task(self.commands.cancel_for_client(client))
 
     # -- fan-out ---------------------------------------------------------------
 
@@ -359,6 +360,7 @@ class TelemetryHub:
         with contextlib.suppress(Exception):
             await self.db.save_last_pose(session.robot_id, {
                 "x": pose.x, "y": pose.y, "yaw": pose.yaw,
+                "map_id": pose.map_id, "map_revision": pose.map_revision,
             })
 
     async def _monitor_loop(self) -> None:

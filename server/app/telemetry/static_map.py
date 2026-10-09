@@ -12,6 +12,7 @@ is trivial, and PGM is a two-line header plus raw bytes.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import logging
 import re
 from pathlib import Path
@@ -97,3 +98,18 @@ def load_static_map(yaml_path: str, name: str) -> MapData:
         origin=MapOrigin(x=meta["origin"][0], y=meta["origin"][1], yaw=meta["origin"][2]),
         rle=rle,
     )
+
+
+def load_catalog(directory: str) -> dict[str, MapData]:
+    from .map_catalog import MapCatalog
+    catalog = MapCatalog(directory)
+    return {key: _load_revision(entry['path'], entry['label'], entry['revision']).model_copy(
+        update={'map_id': key, 'map_revision': entry['revision']})
+        for key, entry in catalog.maps.items()}
+
+
+@lru_cache(maxsize=8)
+def _load_revision(path: str, label: str, revision: str) -> MapData:
+    # Caller has just validated file content against this revision. Never cache
+    # a mutable path alone: a revised catalog must reload its raster.
+    return load_static_map(path, label)

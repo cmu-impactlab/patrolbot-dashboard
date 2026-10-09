@@ -26,6 +26,8 @@
     "rear_sonar_usable": true,
     "redock_inhibited": true,
     "redock_inhibit_remaining": 18.4,
-    "undock_profile_commissioned": true
+    "undock_profile_commissioned": true,
+    "map_id": "cmuq-floor2",
+    "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"
   }
 }
