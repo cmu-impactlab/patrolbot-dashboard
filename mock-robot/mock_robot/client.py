@@ -25,7 +25,9 @@ from .world import DOCK, MAP_ORIGIN, RESOLUTION, Robot, World
 log = logging.getLogger("mock_robot")
 
 PROTOCOL_VERSION = 1
-CAPABILITIES = ["pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map",
+from .map_context import MAP_REVISIONS
+
+CAPABILITIES = ["map_context_v1", "pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map",
                 # The dashboard only offers these to a robot that claims them;
                 # the mock claims what the real robot claims, so a flow that
                 # works here is a flow that exists there. `dock` is absent for
@@ -64,6 +66,7 @@ class MockRobot:
         self.start_mono = time.monotonic()
         self.sequence = 0
         self.map_version = 1
+        self.map_id = "cmuq-floor2"
         self.session_generation = 1
         # The simulator starts at an exact, known world pose. This synthetic
         # seed is not hardware acceptance and survives transport reconnects.
@@ -82,6 +85,9 @@ class MockRobot:
         return time.monotonic() - self.start_mono
 
     def frame(self, type_: str, data: dict) -> str:
+        if type_ in ("telemetry.pose", "telemetry.path", "telemetry.lidar", "telemetry.base_state"):
+            data = dict(data, map_id=self.map_id, map_revision=MAP_REVISIONS[self.map_id])
+            if data.get("goal"): data["goal"].update(map_id=self.map_id, map_revision=MAP_REVISIONS[self.map_id])
         self.sequence += 1
         return json.dumps({
             "version": PROTOCOL_VERSION, "type": type_, "robot_id": self.robot_id,
@@ -187,8 +193,7 @@ class MockRobot:
             ack = json.loads(await ws.recv())
             if ack.get("type") != "server.hello_ack":
                 raise RuntimeError(f"unexpected reply to hello: {ack.get('type')}")
-            if ack["data"].get("want_map", True):
-                await ws.send(self.frame("telemetry.map", self.map_payload()))
+            # Canonical floor maps are served locally by the dashboard.
             log.info("connected to %s", self.server_url)
 
             self.command = None  # a command does not survive a reconnect
@@ -282,8 +287,7 @@ class MockRobot:
             await self._command_progress(ws)
             if self._map_dirty:
                 self._map_dirty = False
-                await ws.send(self.frame("telemetry.map", self.map_payload()))
-                log.info("map changed -> version %d", self.map_version)
+                log.info("simulated obstacles changed; canonical floor map is unchanged")
 
     # -- command handling ------------------------------------------------------
 
@@ -300,6 +304,15 @@ class MockRobot:
             command_id, command = data.get("command_id"), data.get("command")
             log.info("command received: %s (%s)", command, command_id)
 
+            if command in ("navigate_to_pose", "set_initial_pose"):
+                target = data.get("goal") or {}
+                valid = (target.get("map_id") in MAP_REVISIONS and
+                         target.get("map_revision") == MAP_REVISIONS.get(target.get("map_id")))
+                if command == "navigate_to_pose": valid = valid and target.get("map_id") == self.map_id
+                if not valid or not data.get("operator_authorized"):
+                    await ws.send(self.frame("command.ack", {"command_id": command_id,
+                        "accepted": False, "reason": "Map context or operator authorization invalid."}))
+                    continue
             if command == "navigate_to_pose":
                 if (not self.odom_epoch_valid or self.localization_recovery_required
                         or self.localization_seed_stamp_ns <= 0):
@@ -328,7 +341,14 @@ class MockRobot:
                                          {"command_id": command_id, "outcome": "succeeded",
                                           "detail": "The robot has stopped."}))
             elif command == "set_initial_pose":
+                if self.command is not None or self.mode == "undocking":
+                    await ws.send(self.frame("command.ack", {"command_id": command_id,
+                        "accepted": False, "reason": "Another operation owns the simulated robot."}))
+                    continue
                 goal = data["goal"]
+                self.mode = "idle"
+                self.robot.set_goal(None)
+                self.map_id = goal["map_id"]
                 self.localization_seed_stamp_ns = time.time_ns()
                 self.localization_recovery_required = not self.odom_epoch_valid
                 self.robot.x, self.robot.y = goal["x"], goal["y"]

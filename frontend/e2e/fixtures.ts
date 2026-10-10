@@ -3,6 +3,7 @@ import presets from "./presets.json" with { type: "json" };
 import type { LayoutDoc } from "../src/stores/layoutStore";
 
 export const READY_BASE_STATE = {
+  map_id: "cmuq-floor2", map_revision: "test-revision",
   session_generation: 1, link_connected: true, telemetry_age: 0.1, hardware_state_valid: true,
   charge_state: "not_charging", motors_enabled: true, estop_pressed: false,
   fault_flags: 0, stall_value: 0, bumpers_front: false, bumpers_rear: false, bumpers_valid: true,
@@ -37,9 +38,13 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
       if (route.request().method() === "PUT") { current = route.request().postDataJSON(); saves.push(current); }
       return route.fulfill({ json: {} });
     }
-    if (url.pathname === "/api/map") {
+    if (url.pathname === "/api/maps") return route.fulfill({ json: [
+      { map_id: "cmuq-floor1", map_revision: "test-first", name: "Floor 1" },
+      { map_id: "cmuq-floor2", map_revision: "test-revision", name: "Floor 2" },
+    ] });
+    if (url.pathname === "/api/map" || url.pathname.startsWith("/api/maps/")) {
       const width = largeMap ? 3192 : 120, height = largeMap ? 2205 : 120;
-      return route.fulfill({ json: { map_version: 1, name: "Test floor", width, height, resolution: 0.05, origin: { x: -3, y: -3, yaw: 0 }, rle: [[0, width * height]] } });
+      return route.fulfill({ json: { map_id: url.pathname.endsWith("cmuq-floor1") ? "cmuq-floor1" : "cmuq-floor2", map_revision: url.pathname.endsWith("cmuq-floor1") ? "test-first" : "test-revision", map_version: 1, name: "Test floor", width, height, resolution: 0.05, origin: { x: -3, y: -3, yaw: 0 }, rle: [[0, width * height]] } });
     }
     if (url.pathname === "/api/help-guide/status") return route.fulfill({ json: { should_prompt: false, current_version: 1, seen_version: 1 } });
     if (url.pathname.endsWith("export.zip")) return route.fulfill({ contentType: "application/zip", headers: { "Content-Disposition": 'attachment; filename="recording.zip"' }, body: "fixture export" });
@@ -55,7 +60,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
     socket = ws;
     send("server.snapshot", { connection: { state: "online" }, robot_status: { status: "ready", detail: "Ready" },
       system_health: { overall: "healthy", subsystems: [{ id: "computer", label: "Computer", level: "healthy", message: "Long network diagnostic ".repeat(15), updated_at: new Date().toISOString() }] },
-      map_version: 1, pose: { x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
+      map_version: 1, pose: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
       battery: { voltage: 25, percentage: 85, charging: false },
       resources: { cpu_percent: 20, memory_percent: 40, disk_percent: 30, wifi_signal_dbm: -52 },
       base_state: baseState,

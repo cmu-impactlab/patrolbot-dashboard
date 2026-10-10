@@ -60,6 +60,13 @@ test("touch preview confirms once; cancellation and multi-touch do not send", as
   const canvas = page.getByLabel("Live robot map");
   await expect(page.getByRole("dialog")).toBeVisible();
   const pointer = async (type: string, pointerId = 1) => {
+    // dispatchEvent skips browser actionability waits. The dialog can appear
+    // before the map's first animation frame initializes its coordinate view.
+    await expect.poll(() => canvas.evaluate(el => {
+      const map = el as HTMLCanvasElement;
+      return map.getContext("2d")!.getImageData(
+        Math.floor(map.width / 2), Math.floor(map.height / 2), 1, 1).data[3];
+    })).toBe(255);
     if (type === "pointerdown") await canvas.evaluate(el => { el.setPointerCapture = () => {}; });
     await canvas.dispatchEvent(type, { pointerId, pointerType: "touch", clientX: 140, clientY: 260, bubbles: true });
   };
@@ -249,8 +256,19 @@ test("native Chromium touch scroll and pinch never issue commands", async ({ pag
   await cdp.send("Input.dispatchTouchEvent",{type:"touchEnd",touchPoints:[]});
   await expect.poll(scroll).toBeGreaterThan(beforeScroll);
   await page.getByRole("button",{name:"Interact with map",exact:true}).click();
-  const nextBox = (await canvas.boundingBox())!;
-  const centerX = nextBox.x + 150, centerY = Math.min(600, nextBox.y + 220);
+  await expect(canvas).toHaveCSS("touch-action", "none");
+  // The preceding native swipe can still be scrolling when the button click
+  // completes. Stop that scroll and target the visible canvas, not coordinates
+  // sampled while it is moving underneath the gesture.
+  await canvas.evaluate(el => el.scrollIntoView({ block: "center", behavior: "instant" }));
+  const target = await canvas.evaluate(el => {
+    const box = el.getBoundingClientRect();
+    return { x: box.x + box.width / 2,
+      y: (Math.max(0, box.top) + Math.min(innerHeight, box.bottom)) / 2 };
+  });
+  const centerX = target.x, centerY = target.y;
+  await expect.poll(() => canvas.evaluate((el, p) =>
+    [-70, 0, 70].every(dx => document.elementFromPoint(p.x + dx, p.y) === el), target)).toBe(true);
   const beforePinch = await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL());
   await cdp.send("Input.dispatchTouchEvent",{type:"touchStart",touchPoints:[{x:centerX-20,y:centerY,id:1},{x:centerX+20,y:centerY,id:2}]});
   await cdp.send("Input.dispatchTouchEvent",{type:"touchMove",touchPoints:[{x:centerX-70,y:centerY,id:1},{x:centerX+70,y:centerY,id:2}]});

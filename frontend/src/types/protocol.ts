@@ -32,7 +32,7 @@ export interface HeartbeatData {
   uptime_s: number;
 }
 
-export interface PoseData {
+export interface PoseData extends MapContext {
   frame_id?: string;
   x: number;
   y: number;
@@ -43,19 +43,19 @@ export interface PoseData {
   localized?: boolean;
 }
 
-export interface LidarData {
+export interface LidarData extends MapContext {
   angle_min: number;
   angle_increment: number;
   ranges: (number | null)[];
 }
 
-export interface GoalData {
+export interface GoalData extends MapContext {
   x: number;
   y: number;
   yaw?: number | null;
 }
 
-export interface PathData {
+export interface PathData extends MapContext {
   frame_id?: string;
   points: [number, number][];
   goal?: GoalData | null;
@@ -75,7 +75,8 @@ export interface BatteryData {
   estimate?: BatteryEstimate | null;
 }
 
-export interface BaseStateData {
+export interface BaseStateData extends MapContext {
+  map_activated_stamp_ns?: number;
   odom_epoch_valid?: boolean;
   localization_recovery_required?: boolean;
   localization_recovery_stage?: string;
@@ -135,7 +136,7 @@ export interface MapOrigin {
   yaw: number;
 }
 
-export interface MapData {
+export interface MapData extends MapContext {
   map_version: number;
   name: string;
   resolution: number;
@@ -278,3 +279,10 @@ export function decodeRle(rle: [number, number][]): Int8Array {
   }
   return cells;
 }
+
+export interface MapContext {
+  map_id?: string | null;
+  map_revision?: string | null;
+}
+
+export interface CommandCancelData { command_id: string }

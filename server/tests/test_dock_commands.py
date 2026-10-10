@@ -15,7 +15,7 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("undock", "charge_release", "motor_enable")
+ALL_CAPS = ("undock", "charge_release", "motor_enable", "map_context_v1")
 
 
 def facts(**overrides) -> gates.StateFacts:
@@ -259,7 +259,7 @@ def hello_frame(capabilities=ALL_CAPS) -> str:
 
 
 def base_state_frame(sequence: int, **overrides) -> str:
-    data = {"session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -272,7 +272,7 @@ def base_state_frame(sequence: int, **overrides) -> str:
 
 def pose_frame(sequence: int, moving: bool = False, localized: bool = True) -> str:
     return encode("telemetry.pose", "patrolbot-01", sequence, {
-        "x": 1.0, "y": 1.0, "yaw": 0.0,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": 0.0,
         "linear_velocity": 0.4 if moving else 0.0,
         "angular_velocity": 0.0, "localized": localized,
     })
@@ -320,7 +320,7 @@ def test_navigate_rejected_when_the_robot_is_not_localized(client):
         robot.send_text(pose_frame(2, localized=False))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            _, frame = command_frame("navigate_to_pose", goal={"x": 1.0, "y": 2.0})
+            _, frame = command_frame("navigate_to_pose", goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0})
             ui.send_text(frame)
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
@@ -630,10 +630,34 @@ def test_websocket_navigation_override_cannot_bypass_recovery(client, state):
         robot.send_text(pose_frame(2, localized=True))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            _, frame = command_frame("navigate_to_pose", goal={"x": 1.0, "y": 2.0})
+            _, frame = command_frame("navigate_to_pose", goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0})
             request = json.loads(frame)
             request["data"]["allow_unlocalized"] = True
             ui.send_text(json.dumps(request))
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
             assert "recovering its location" in ack["data"]["reason"]
+
+
+@pytest.mark.parametrize('command', ['set_initial_pose', 'navigate_to_pose'])
+@pytest.mark.parametrize('case, fragment', [
+    ('legacy_client', 'Map context is required'),
+    ('legacy_bridge', 'does not support map-aware'),
+    ('wrong_revision', 'must match the catalog'),
+])
+def test_spatial_commands_require_coordinated_map_interface(client, command, case, fragment):
+    with client.websocket_connect('/ws/robot?token=test-token') as robot:
+        robot.send_text(hello_frame(capabilities=() if case == 'legacy_bridge' else ALL_CAPS))
+        robot.receive_text()
+        goal = {'x': 1., 'y': 1., 'yaw': 0.}
+        if case != 'legacy_client':
+            goal.update(map_id='cmuq-floor2', map_revision=(
+                'wrong' if case == 'wrong_revision' else
+                'sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1'))
+        with client.websocket_connect('/ws/ui') as ui:
+            ui.receive_text()
+            _, frame = command_frame(command, goal)
+            ui.send_text(frame)
+            ack = recv_until(ui, 'command.ack')['data']
+            assert not ack['accepted']
+            assert fragment in ack['reason']

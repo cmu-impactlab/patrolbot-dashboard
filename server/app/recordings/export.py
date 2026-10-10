@@ -51,7 +51,7 @@ LEAD_COLUMNS = ("recording_id", "ts", "elapsed_s")
 
 COLUMNS: dict[str, tuple[str, ...]] = {
     "pose.csv": LEAD_COLUMNS + (
-        "frame_id", "x", "y", "yaw", "yaw_deg",
+        "map_id", "map_revision", "frame_id", "x", "y", "yaw", "yaw_deg",
         "linear_velocity", "angular_velocity", "covariance_trace", "localized",
     ),
     "battery.csv": LEAD_COLUMNS + (
@@ -59,7 +59,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "estimate_state", "estimate_minutes_remaining", "estimate_confidence",
     ),
     "events.csv": LEAD_COLUMNS + ("event_id", "severity", "title", "message"),
-    "base_state.csv": LEAD_COLUMNS + (
+    "base_state.csv": LEAD_COLUMNS + ("map_id", "map_revision",
         "session_generation", "link_connected", "telemetry_age",
         "hardware_state_valid", "charge_state", "motors_enabled", "estop_pressed",
         "fault_flags", "stall_value", "bumpers_front", "bumpers_rear",
@@ -67,16 +67,16 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "diagnostics.csv": LEAD_COLUMNS + (
         "sample_index", "item_index", "name", "level", "message", "values_json",
     ),
-    "path.csv": LEAD_COLUMNS + (
+    "path.csv": LEAD_COLUMNS + ("map_id", "map_revision",
         "sample_index", "frame_id", "point_count", "path_length_m",
         "goal_x", "goal_y", "goal_yaw",
     ),
-    "path_points.csv": LEAD_COLUMNS + ("sample_index", "point_index", "x", "y"),
-    "lidar.csv": LEAD_COLUMNS + (
+    "path_points.csv": LEAD_COLUMNS + ("map_id", "map_revision", "sample_index", "point_index", "x", "y"),
+    "lidar.csv": LEAD_COLUMNS + ("map_id", "map_revision",
         "sample_index", "angle_min", "angle_increment", "beam_count",
         "valid_count", "range_min", "range_max",
     ),
-    "lidar_ranges.csv": LEAD_COLUMNS + ("sample_index", "beam_index", "angle_rad", "range_m"),
+    "lidar_ranges.csv": LEAD_COLUMNS + ("map_id", "map_revision", "sample_index", "beam_index", "angle_rad", "range_m"),
 }
 
 # One line per file, used to build the README's contents listing.
@@ -334,6 +334,7 @@ def _write_pose(tables: dict[str, _Table], lead: list[str], index: int, data: di
     yaw = data.get("yaw")
     yaw_deg = math.degrees(yaw) if isinstance(yaw, (int, float)) and not isinstance(yaw, bool) else None
     tables["pose.csv"].write(lead, [
+        _text(data.get("map_id")), _text(data.get("map_revision")),
         _text(data.get("frame_id", "map")),
         _num(data.get("x")), _num(data.get("y")), _num(yaw),
         _round(yaw_deg, 2),
@@ -360,7 +361,7 @@ def _write_event(tables: dict[str, _Table], lead: list[str], index: int, data: d
 
 
 def _write_base_state(tables: dict[str, _Table], lead: list[str], index: int, data: dict) -> None:
-    tables["base_state.csv"].write(lead, [
+    tables["base_state.csv"].write(lead, [_text(data.get("map_id")), _text(data.get("map_revision")),
         _num(data.get("session_generation")), _bool(data.get("link_connected")),
         _num(data.get("telemetry_age")), _bool(data.get("hardware_state_valid")),
         _text(data.get("charge_state")), _bool(data.get("motors_enabled")),
@@ -385,13 +386,13 @@ def _write_diagnostics(tables: dict[str, _Table], lead: list[str], index: int, d
 def _write_path(tables: dict[str, _Table], lead: list[str], index: int, data: dict) -> None:
     points = [p for p in (data.get("points") or []) if isinstance(p, (list, tuple)) and len(p) >= 2]
     goal = data.get("goal") or {}
-    tables["path.csv"].write(lead, [
+    tables["path.csv"].write(lead, [_text(data.get("map_id")), _text(data.get("map_revision")),
         str(index), _text(data.get("frame_id", "map")), str(len(points)),
         _round(_path_length(points), 3),
         _num(goal.get("x")), _num(goal.get("y")), _num(goal.get("yaw")),
     ])
     for point_index, (x, y) in enumerate((p[0], p[1]) for p in points):
-        tables["path_points.csv"].write(lead, [str(index), str(point_index), _num(x), _num(y)])
+        tables["path_points.csv"].write(lead, [_text(data.get("map_id")), _text(data.get("map_revision")), str(index), str(point_index), _num(x), _num(y)])
 
 
 def _write_lidar(tables: dict[str, _Table], lead: list[str], index: int, data: dict) -> None:
@@ -399,7 +400,7 @@ def _write_lidar(tables: dict[str, _Table], lead: list[str], index: int, data: d
     angle_min = data.get("angle_min")
     increment = data.get("angle_increment")
     valid = [r for r in ranges if isinstance(r, (int, float))]
-    tables["lidar.csv"].write(lead, [
+    tables["lidar.csv"].write(lead, [_text(data.get("map_id")), _text(data.get("map_revision")),
         str(index), _num(angle_min), _num(increment), str(len(ranges)), str(len(valid)),
         _round(min(valid), 3) if valid else "", _round(max(valid), 3) if valid else "",
     ])
@@ -408,7 +409,7 @@ def _write_lidar(tables: dict[str, _Table], lead: list[str], index: int, data: d
     have_angles = isinstance(angle_min, (int, float)) and isinstance(increment, (int, float))
     for beam_index, value in enumerate(ranges):
         angle = _round(angle_min + beam_index * increment, 6) if have_angles else ""
-        tables["lidar_ranges.csv"].write(lead, [str(index), str(beam_index), angle, _num(value)])
+        tables["lidar_ranges.csv"].write(lead, [_text(data.get("map_id")), _text(data.get("map_revision")), str(index), str(beam_index), angle, _num(value)])
 
 
 _WRITERS: dict[str, Callable[[dict[str, _Table], list[str], int, dict], None]] = {

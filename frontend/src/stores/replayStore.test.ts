@@ -20,14 +20,14 @@ const SAMPLES: RecordingSample[] = [
   // Deliberately out of order and starting with a non-pose channel: the
   // clock origin must come from the earliest sample of any kind.
   sample("2026-07-28T09:00:04.000Z", "pose",
-         { x: 4, y: 0, yaw: 0, linear_velocity: 0.5 }),
+         { map_id: "cmuq-floor2", map_revision: "test-revision", x: 4, y: 0, yaw: 0, linear_velocity: 0.5 }),
   sample("2026-07-28T09:00:00.000Z", "event",
          { severity: "warning", title: "Bumper", message: "Front bumper pressed" }),
   sample("2026-07-28T09:00:02.000Z", "pose",
-         { x: 0, y: 0, yaw: 0, linear_velocity: 0.5 }),
+         { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, linear_velocity: 0.5 }),
   sample("2026-07-28T09:00:03.000Z", "battery", { voltage: 25.1, percentage: 80 }),
   sample("2026-07-28T09:00:06.000Z", "pose",
-         { x: 4, y: 3, yaw: Math.PI / 2, linear_velocity: 0.5 }),
+         { map_id: "cmuq-floor2", map_revision: "test-revision", x: 4, y: 3, yaw: Math.PI / 2, linear_velocity: 0.5 }),
   sample("2026-07-28T09:00:05.000Z", "battery", { voltage: 25.0, percentage: 79 }),
 ];
 
@@ -74,8 +74,8 @@ describe("replay store", () => {
 
   it("changing speed does not jump the playhead", () => {
     useReplayStore.getState().load(ROW, SAMPLES);
-    useReplayStore.getState().seek(2500);
     useReplayStore.getState().pause();
+    useReplayStore.getState().seek(2500);
     useReplayStore.getState().setSpeed(4);
     expect(useReplayStore.getState().now()).toBeCloseTo(2500, 0);
     expect(useReplayStore.getState().speed).toBe(4);
@@ -113,4 +113,23 @@ describe("replay store", () => {
     expect(state.poses).toEqual([]);
     expect(state.durationMs).toBe(0);
   });
+});
+
+it("never interpolates or counts distance across a floor transition", () => {
+  useReplayStore.getState().load(ROW, [
+    sample("2026-07-28T09:00:00.000Z", "pose", { map_id: "cmuq-floor2", map_revision: "second", x: 1, y: 1 }),
+    sample("2026-07-28T09:00:02.000Z", "pose", { map_id: "cmuq-floor1", map_revision: "first", x: 100, y: 100 }),
+  ]);
+  expect(useReplayStore.getState().poseAt(1000)?.x).toBe(1);
+  expect(useReplayStore.getState().poseAt(2000)?.map_id).toBe("cmuq-floor1");
+  expect(useReplayStore.getState().routeLength()).toBe(0);
+});
+
+it("keeps legacy recording poses unmapped", () => {
+  useReplayStore.getState().load(ROW, [
+    sample("2026-07-28T09:00:00.000Z", "pose", { x: 1, y: 1 }),
+    sample("2026-07-28T09:00:02.000Z", "pose", { x: 100, y: 100 }),
+  ]);
+  expect(useReplayStore.getState().poseAt(1000)?.map_id).toBeNull();
+  expect(useReplayStore.getState().routeLength()).toBe(0);
 });

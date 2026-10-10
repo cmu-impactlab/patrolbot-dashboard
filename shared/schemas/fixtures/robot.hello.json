@@ -6,7 +6,17 @@
   "timestamp": "2026-07-17T10:00:00.000Z",
   "data": {
     "protocol_version": 1,
-    "capabilities": ["pose", "lidar", "path", "battery", "base_state", "diagnostics", "resources", "map"],
+    "capabilities": [
+      "pose",
+      "lidar",
+      "path",
+      "battery",
+      "base_state",
+      "diagnostics",
+      "resources",
+      "map",
+      "map_context_v1"
+    ],
     "map_version": 3,
     "software_version": "0.1.0"
   }

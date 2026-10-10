@@ -33,7 +33,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.db = db
         app.state.hub = hub
-        app.state.static_map = None
+        from pathlib import Path
+        from .telemetry.static_map import load_catalog
+        app.state.maps = load_catalog(str((Path('/maps') if Path('/maps/catalog').is_dir() else Path(__file__).resolve().parents[1] / 'maps') / 'catalog'))
+        hub.maps = app.state.maps
+        app.state.static_map = app.state.maps['cmuq-floor2']
         if settings.static_map_yaml:
             from .telemetry.static_map import load_static_map
 

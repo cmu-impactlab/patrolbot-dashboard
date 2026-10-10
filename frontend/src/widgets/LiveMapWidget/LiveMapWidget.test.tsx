@@ -6,10 +6,10 @@ import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useUiStore } from "../../stores/uiStore";
 
-vi.mock("../../api/queries", () => ({ useMapQuery: () => ({ data: {
-  map_version: 1, name: "Test", width: 100, height: 100, resolution: 0.05,
+vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string) => ({ data: {
+  map_id: id, map_revision: id === "cmuq-floor1" ? "test-first" : "test-revision", map_version: 1, name: "Test", width: 100, height: 100, resolution: 0.05,
   origin: { x: 0, y: 0, yaw: 0 }, rle: [[0, 10000]],
-} }) }));
+} }), useMapsQuery: () => ({ data: [{ map_id: "cmuq-floor1", map_revision: "test-first", name: "Floor 1" }, { map_id: "cmuq-floor2", map_revision: "test-revision", name: "Floor 2" }] }) }));
 vi.mock("./bitmap", () => ({ buildMapBitmap: () => document.createElement("canvas") }));
 let paint: FrameRequestCallback;
 const sender = vi.fn((_frame: string) => true);
@@ -131,4 +131,35 @@ describe("live map command boundary", () => {
     expect(JSON.parse(sender.mock.calls[0][0]).data.goal.yaw).toBeCloseTo(Math.PI / 2);
   });
 
+});
+
+
+describe("floor browsing", () => {
+  it("browses without commanding and cancels a pending selection", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    expect(screen.getByLabelText("Confirm map selection")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Floor 1" }));
+    expect(sender).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Confirm map selection")).toBeNull();
+    expect(useCommandStore.getState().pickMode).toBe("none");
+    expect(screen.getByRole("button", { name: "Floor 1" }).getAttribute("aria-pressed")).toBe("true");
+  });
+  it("keeps the active floor independent from viewing and labels disconnects stale", () => {
+    useTelemetryStore.setState({ baseState: { ...useTelemetryStore.getState().baseState!, map_id: "cmuq-floor2", map_revision: "test-revision" } });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Floor 1" }));
+    expect(screen.getByRole("button", { name: "Floor 2 ● Active" }).getAttribute("aria-pressed")).toBe("false");
+    act(() => useTelemetryStore.setState({ wsConnected: false }));
+    expect(screen.getByRole("button", { name: "Floor 2 ● Last known (stale)" })).toBeTruthy();
+    expect(sender).not.toHaveBeenCalled();
+  });
+  it("targets the viewed floor when setting a new location", () => {
+    const canvas = mount();
+    fireEvent.click(screen.getByRole("button", { name: "Floor 1" }));
+    act(() => useCommandStore.getState().setPickMode("initialpose"));
+    act(() => paint(0)); down(canvas, 1, "mouse"); up(canvas, 1, "mouse");
+    const goal = JSON.parse(sender.mock.calls[0][0]).data.goal;
+    expect(goal.map_id).toBe("cmuq-floor1");
+    expect(goal.map_revision).toBe("test-first");
+  });
 });

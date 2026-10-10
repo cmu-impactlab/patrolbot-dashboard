@@ -53,7 +53,7 @@ def test_disconnect_persists_pose_and_snapshot_offers_it(client):
         snapshot = json.loads(ui.receive_text())
         assert snapshot["type"] == "server.snapshot"
         last = snapshot["data"]["last_known_pose"]
-        assert last == {"x": 3.25, "y": -1.5, "yaw": 0.75}
+        assert last == {"x": 3.25, "y": -1.5, "yaw": 0.75, "map_id": None, "map_revision": None}
 
 
 def test_snapshot_without_saved_pose_is_null(client):

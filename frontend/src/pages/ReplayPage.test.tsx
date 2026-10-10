@@ -20,19 +20,19 @@ const DETAIL = {
   sample_count: 6,
   samples: [
     { ts: "2026-07-28T16:32:50.000Z", kind: "pose",
-      data: { x: 0, y: 0, yaw: 0, linear_velocity: 0.4 } },
+      data: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, linear_velocity: 0.4 } },
     { ts: "2026-07-28T16:32:52.000Z", kind: "event",
       data: { severity: "warning", title: "Bumper pressed", message: "Front bumper" } },
     { ts: "2026-07-28T16:32:54.000Z", kind: "battery",
       data: { voltage: 25.0, percentage: 77 } },
     { ts: "2026-07-28T16:33:00.000Z", kind: "pose",
-      data: { x: 3, y: 4, yaw: 1.5708, linear_velocity: 0.2 } },
+      data: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 3, y: 4, yaw: 1.5708, linear_velocity: 0.2 } },
   ],
 };
 
 const MAP = {
   map_version: 1, name: "cmuq-floor2", resolution: 0.05,
-  width: 40, height: 40, origin: { x: -1, y: -1, yaw: 0 }, rle: [[0, 1600]],
+  width: 40, height: 40, origin: { map_id: "cmuq-floor2", map_revision: "test-revision", x: -1, y: -1, yaw: 0 }, rle: [[0, 1600]],
 };
 
 function mockApi(detail: unknown = DETAIL) {
@@ -84,7 +84,7 @@ describe("replay page", () => {
   it("reports the state at the playhead, not the robot's current state", async () => {
     // A live robot somewhere else entirely must not leak into the replay.
     useTelemetryStore.setState({
-      pose: { x: 99, y: 99, yaw: 0, linear_velocity: 9, angular_velocity: 0, localized: true },
+      pose: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 99, y: 99, yaw: 0, linear_velocity: 9, angular_velocity: 0, localized: true },
     });
     renderPage();
     await screen.findByRole("heading", { name: "Corridor sweep" });

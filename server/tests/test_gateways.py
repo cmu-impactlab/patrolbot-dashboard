@@ -18,7 +18,7 @@ def client(tmp_path):
 
 def hello_frame(map_version: int = 0) -> str:
     return encode("robot.hello", "patrolbot-01", 0, {
-        "protocol_version": 1, "capabilities": ["pose"], "map_version": map_version,
+        "protocol_version": 1, "capabilities": ["pose", "map_context_v1"], "map_version": map_version,
         "software_version": "test",
     })
 
@@ -51,7 +51,7 @@ def test_robot_hello_ack_and_ui_snapshot(client):
             assert snapshot["data"]["connection"]["state"] == "online"
 
             robot.send_text(encode("telemetry.pose", "patrolbot-01", 1, {
-                "x": 1.0, "y": 2.0, "yaw": 0.5, "linear_velocity": 0.1, "angular_velocity": 0.0,
+                "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0, "yaw": 0.5, "linear_velocity": 0.1, "angular_velocity": 0.0,
             }))
             pose = recv_until(ui, "telemetry.pose")
             assert pose["data"]["x"] == 1.0
@@ -108,7 +108,7 @@ def test_estop_produces_event_and_status(client):
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             robot.send_text(encode("telemetry.base_state", "patrolbot-01", 3, {
-                "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+                "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
                 "hardware_state_valid": True, "charge_state": "not_charging",
                 "motors_enabled": True, "estop_pressed": True, "fault_flags": 0,
                 "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -127,7 +127,7 @@ def test_map_flow_and_rest(client):
         robot.receive_text()
         robot.send_text(encode("telemetry.map", "patrolbot-01", 4, {
             "map_version": 1, "name": "Test Map", "resolution": 0.05, "width": 2, "height": 2,
-            "origin": {"x": 0.0, "y": 0.0, "yaw": 0.0}, "rle": [[0, 4]],
+            "origin": {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 0.0, "y": 0.0, "yaw": 0.0}, "rle": [[0, 4]],
         }))
         # Map should now be available over REST.
         for _ in range(100):

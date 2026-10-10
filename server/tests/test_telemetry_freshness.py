@@ -112,7 +112,7 @@ def hello_frame() -> str:
 
 
 def base_state_frame(sequence: int, **overrides) -> str:
-    data = {"session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -123,7 +123,7 @@ def base_state_frame(sequence: int, **overrides) -> str:
 
 def pose_frame(sequence: int) -> str:
     return encode("telemetry.pose", "patrolbot-01", sequence, {
-        "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
         "angular_velocity": 0.0, "localized": True,
     })
 

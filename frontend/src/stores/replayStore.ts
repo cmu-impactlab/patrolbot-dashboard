@@ -1,3 +1,5 @@
+import type { MapContext } from "../types/protocol";
+import { sameMap } from "../lib/mapContext";
 import { create } from "zustand";
 
 export interface RecordingRow {
@@ -20,7 +22,7 @@ export interface RecordingSample {
 
 /** All replay series share one clock: milliseconds since the recording's
  *  earliest sample, whatever channel that came from. */
-export interface ReplayPose {
+export interface ReplayPose extends MapContext {
   tMs: number;
   x: number;
   y: number;
@@ -106,6 +108,8 @@ export const useReplayStore = create<ReplayState>((set, get) => ({
       if (sample.kind === "pose") {
         poses.push({
           tMs,
+          map_id: typeof sample.data.map_id === "string" ? sample.data.map_id : null,
+          map_revision: typeof sample.data.map_revision === "string" ? sample.data.map_revision : null,
           x: num(sample.data.x),
           y: num(sample.data.y),
           yaw: num(sample.data.yaw),
@@ -184,12 +188,14 @@ export const useReplayStore = create<ReplayState>((set, get) => ({
       if (poses[i].tMs >= tMs) {
         const a = poses[i - 1];
         const b = poses[i];
+        if (!sameMap(a, b)) return tMs < b.tMs ? a : b;
         const f = b.tMs === a.tMs ? 0 : (tMs - a.tMs) / (b.tMs - a.tMs);
         // Interpolate yaw along the shortest arc.
         let dyaw = b.yaw - a.yaw;
         if (dyaw > Math.PI) dyaw -= 2 * Math.PI;
         if (dyaw < -Math.PI) dyaw += 2 * Math.PI;
         return {
+          map_id: a.map_id, map_revision: a.map_revision,
           tMs,
           x: a.x + (b.x - a.x) * f,
           y: a.y + (b.y - a.y) * f,
@@ -205,6 +211,7 @@ export const useReplayStore = create<ReplayState>((set, get) => ({
     const { poses } = get();
     let total = 0;
     for (let i = 1; i < poses.length; i++) {
+      if (!sameMap(poses[i], poses[i-1])) continue;
       total += Math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y);
     }
     return total;

@@ -1,4 +1,4 @@
-image: first_map.pgm
+image: cmuq_1st_floor.pgm
 resolution: 0.050
 origin: [0.0, 0.0, 0.0]
 occupied_thresh: 0.1

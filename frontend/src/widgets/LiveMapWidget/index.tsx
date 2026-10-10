@@ -1,7 +1,8 @@
+import { sameMap } from "../../lib/mapContext";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, Crosshair, Layers, Maximize, Minus, Plus } from "lucide-react";
+import { Check, Crosshair, Layers, LockKeyhole, Maximize, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { useMapQuery } from "../../api/queries";
+import { useMapQuery, useMapsQuery } from "../../api/queries";
 import { useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useIsFresh } from "../../lib/freshness";
@@ -193,7 +194,7 @@ function drawScene(
   );
 
   // Traveled trajectory
-  if (layers.trajectory && state.trajectory.length > 1) {
+  if (layers.trajectory && sameMap(state.pose, map) && state.trajectory.length > 1) {
     ctx.beginPath();
     for (let i = 0; i < state.trajectory.length; i++) {
       const [sx, sy] = worldToScreen(view, state.trajectory[i][0], state.trajectory[i][1]);
@@ -208,7 +209,7 @@ function drawScene(
   }
 
   // Planned path
-  const path = state.path;
+  const path = sameMap(state.path, map) ? state.path : null;
   if (layers.plannedPath && path && path.points.length > 1) {
     ctx.beginPath();
     for (let i = 0; i < path.points.length; i++) {
@@ -238,10 +239,10 @@ function drawScene(
   // Recording replay is deliberately absent here: it opens in its own tab
   // (pages/ReplayPage) so a past route can never be read as the robot's
   // current position. See widgets/LiveMapWidget/ReplayMap.
-  const pose = state.pose;
+  const pose = sameMap(state.pose, map) ? state.pose : null;
 
   // LiDAR points (polar -> world using the latest pose)
-  if (layers.lidar && pose && state.lidar) {
+  if (layers.lidar && pose && state.lidar && sameMap(state.lidar, map)) {
     const { angle_min, angle_increment, ranges } = state.lidar;
     ctx.fillStyle = cssVar("--danger");
     for (let i = 0; i < ranges.length; i++) {
@@ -294,7 +295,10 @@ function drawScene(
 
 export function LiveMapWidget() {
   const mapVersion = useTelemetryStore((state) => state.mapVersion);
-  const mapQuery = useMapQuery(mapVersion);
+  const [viewedMap, setViewedMap] = useState("cmuq-floor2");
+  const catalog = useMapsQuery();
+  const activeMap = useTelemetryStore(state => state.baseState);
+  const mapQuery = useMapQuery(mapVersion, viewedMap);
   const followRobot = useUiStore((state) => state.followRobot);
   const setFollowRobot = useUiStore((state) => state.setFollowRobot);
   const theme = useUiStore((state) => state.theme);
@@ -343,7 +347,7 @@ export function LiveMapWidget() {
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const bitmapKey = `${map.map_version}:${theme}`;
+      const bitmapKey = `${map.map_id}:${map.map_revision}:${map.map_version}:${theme}`;
       if (!bitmapRef.current || bitmapRef.current.key !== bitmapKey) {
         bitmapRef.current = { key: bitmapKey, bitmap: buildMapBitmap(map) };
       }
@@ -352,7 +356,7 @@ export function LiveMapWidget() {
       }
       const ui = useUiStore.getState();
       const telemetry = useTelemetryStore.getState();
-      if (ui.followRobot && telemetry.pose) {
+      if (ui.followRobot && telemetry.pose && sameMap(telemetry.pose, map)) {
         viewRef.current = followView(
           viewRef.current, width, height, telemetry.pose.x, telemetry.pose.y);
       }
@@ -402,7 +406,7 @@ export function LiveMapWidget() {
     document.addEventListener("visibilitychange", hide);
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
-  useEffect(() => { viewRef.current = null; signatureRef.current = ""; }, [mapVersion, robotId]);
+  useEffect(() => { viewRef.current = null; signatureRef.current = ""; }, [mapVersion, robotId, viewedMap]);
 
   const point = (event: React.PointerEvent) => {
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -443,6 +447,7 @@ export function LiveMapWidget() {
     }
   };
   const submit = (selection: NonNullable<typeof pending>) => {
+    if (!sameMap(selection.goal, map)) { setError("The viewed map changed. Select a new position."); return; }
     const reason = mapCommandReason(selection.mode);
     if (reason) { setError(reason); return; }
     clear(); // Consume before sending: repeated taps cannot resubmit.
@@ -455,7 +460,7 @@ export function LiveMapWidget() {
     if (!selectable || !pick || !viewRef.current) return;
     const [x, y] = screenToWorld(viewRef.current, pick.ax, pick.ay);
     const dragged = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay) > 8;
-    const selection = { mode: pick.mode, goal: { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100,
+    const selection = { mode: pick.mode, goal: { map_id: map?.map_id, map_revision: map?.map_revision, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100,
       yaw: dragged ? Math.round(Math.atan2(-(pick.ey - pick.ay), pick.ex - pick.ax) * 1000) / 1000 : null } };
     pickHoverRef.current = null;
     if (event.pointerType === "mouse") { pickArrowRef.current = null; submit(selection); }
@@ -506,7 +511,22 @@ export function LiveMapWidget() {
         onLostPointerCapture={cancelPointer}
         onPointerLeave={() => { pickHoverRef.current = null; }}
       />
-      <div className="map-interaction"><button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
+      <div className="map-interaction"><div role="group" aria-label="Viewed floor" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+        {(catalog.data ?? []).map(floor => <button key={floor.map_id} className="btn"
+          aria-pressed={viewedMap === floor.map_id}
+          style={{ outline: viewedMap === floor.map_id ? "2px solid var(--info)" : undefined,
+            color: sameMap(activeMap, floor) ? "var(--cmu-red)" : undefined }}
+          onClick={() => { clear(); useCommandStore.getState().setPickMode("none");
+            viewRef.current = null; bitmapRef.current = null; signatureRef.current = "";
+            setFollowRobot(false); setViewedMap(floor.map_id!); }}>
+          {floor.name}{sameMap(activeMap, floor) ? (online ? " ● Active" : " ● Last known (stale)") : ""}
+        </button>)}
+        <button className="btn" disabled aria-pressed="false"
+          title="Floor 3 is locked because its map is not available yet."
+          style={{ opacity: 0.5, cursor: "not-allowed" }}>
+          <LockKeyhole size={14} aria-hidden="true" /> Floor 3 — Map unavailable
+        </button>
+      </div><button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
         {pickMode !== "none" && !pending && <p className="map-pick-help">Touch: tap, adjust heading, then confirm. Mouse: release to send.</p>}
       </div>
       {pending && <div className="map-confirm" role="region" aria-label="Confirm map selection">
@@ -591,22 +611,6 @@ export function MapSettings() {
               {LAYER_LABELS[key]}
             </DropdownMenu.Item>
           ))}
-          <DropdownMenu.Separator className="dropdown-separator" />
-          <DropdownMenu.Label className="dropdown-label">Floor</DropdownMenu.Label>
-          <DropdownMenu.Item className="dropdown-item" disabled
-                             style={{ opacity: 0.5, cursor: "not-allowed" }}>
-            <span style={{ width: 14 }} />
-            1st floor — not ready
-          </DropdownMenu.Item>
-          <DropdownMenu.Item className="dropdown-item checked" onSelect={(e) => e.preventDefault()}>
-            <Check size={14} />
-            2nd floor
-          </DropdownMenu.Item>
-          <DropdownMenu.Item className="dropdown-item" disabled
-                             style={{ opacity: 0.5, cursor: "not-allowed" }}>
-            <span style={{ width: 14 }} />
-            3rd floor — not ready
-          </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

@@ -32,7 +32,12 @@ class HeartbeatData(BaseModel):
     uptime_s: float
 
 
-class PoseData(BaseModel):
+class MapContext(BaseModel):
+    map_id: str | None = None
+    map_revision: str | None = None
+
+
+class PoseData(MapContext):
     # Reject NaN/Inf outright: a non-finite pose would poison the map render
     # and any downstream geometry.
     model_config = ConfigDict(allow_inf_nan=False)
@@ -48,19 +53,19 @@ class PoseData(BaseModel):
     localized: bool = False
 
 
-class LidarData(BaseModel):
+class LidarData(MapContext):
     angle_min: float
     angle_increment: float
     ranges: list[float | None]
 
 
-class GoalData(BaseModel):
+class GoalData(MapContext):
     x: float
     y: float
     yaw: float | None = None
 
 
-class PathData(BaseModel):
+class PathData(MapContext):
     frame_id: str = "map"
     points: list[tuple[float, float]]
     goal: GoalData | None = None
@@ -88,7 +93,8 @@ class BatteryData(BaseModel):
     estimate: BatteryEstimate | None = None
 
 
-class BaseStateData(BaseModel):
+class BaseStateData(MapContext):
+    map_activated_stamp_ns: int = Field(default=0, ge=0)
     session_generation: int
     link_connected: bool
     # Seconds; a negative age is not a fresher reading, it is a broken clock.
@@ -153,7 +159,7 @@ class MapOrigin(BaseModel):
     yaw: float
 
 
-class MapData(BaseModel):
+class MapData(MapContext):
     map_version: int
     name: str
     resolution: float
@@ -200,6 +206,11 @@ class CommandRequestData(BaseModel):
     # and ignored on the way in — a browser cannot authorize itself. The robot
     # requires it for guarded motion (the dock manager's Undock goal).
     operator_authorized: bool = False
+
+
+class CommandCancelData(BaseModel):
+    # Server-only cancellation of the original map transaction, never a new goal.
+    command_id: str
 
 
 class CommandAckData(BaseModel):
@@ -314,6 +325,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "state.capabilities": CapabilitiesData,
     "event.append": EventData,
     "command.request": CommandRequestData,
+    "command.cancel": CommandCancelData,
     "command.ack": CommandAckData,
     "command.progress": CommandProgressData,
     "command.result": CommandResultData,

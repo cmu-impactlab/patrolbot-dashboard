@@ -7,6 +7,12 @@
   "data": {
     "command_id": "3f2b8a1c-9d4e-4f6a-b7c8-1a2b3c4d5e6f",
     "command": "navigate_to_pose",
-    "goal": {"x": 4.25, "y": -1.5, "yaw": 1.571}
+    "goal": {
+      "x": 4.25,
+      "y": -1.5,
+      "yaw": 1.571,
+      "map_id": "cmuq-floor2",
+      "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"
+    }
   }
 }

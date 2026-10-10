@@ -1,3 +1,4 @@
+import { sameMap } from "../lib/mapContext";
 import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import { useTelemetryStore } from "./telemetryStore";
@@ -8,6 +9,7 @@ import type {
   CommandResultData,
   CommandType,
   GoalData,
+  MapContext,
 } from "../types/protocol";
 
 /** Map-click modes armed from the Navigation widget. */
@@ -19,6 +21,7 @@ export interface ActiveCommand {
   phase: "sending" | "running";
   stage: string | null;
   distanceRemaining: number | null;
+  goal?: GoalData;
 }
 
 export interface CommandResultInfo {
@@ -45,7 +48,7 @@ interface CommandState {
   stoppedGoal: GoalData | null;
   /** The most recent command intent, remembered so "Take over" can re-send it
    *  with the takeover flag after a single-operator-lease rejection. */
-  lastAttempt: { command: CommandType; goal?: GoalData } | null;
+  lastAttempt: { command: CommandType; goal?: GoalData; activeMap?: MapContext } | null;
   /** Operator override, armed under Advanced: send the next destination even
    *  though the robot reports it does not know where it is. Cleared as soon as
    *  it is used, so it can never be left switched on. */
@@ -100,7 +103,13 @@ export const useCommandStore = create<CommandState>((set, get) => ({
 
   stop: () => {
     // Remember the destination in effect right now so Resume can restore it.
-    const goal = useTelemetryStore.getState().path?.goal ?? null;
+    const active = get().active;
+    const telemetry = useTelemetryStore.getState();
+    // Path telemetry can lag the acknowledged command. Keep the destination
+    // actually sent, even when Stop arrives before the first path update.
+    const candidate = active?.command === "navigate_to_pose"
+      ? active.goal ?? telemetry.path?.goal : telemetry.path?.goal;
+    const goal = candidate && sameMap(candidate, telemetry.baseState) ? candidate : null;
     set({ stoppedGoal: goal ?? get().stoppedGoal });
     get().send("stop");
   },
@@ -122,10 +131,23 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   takeOver: () => {
     const attempt = get().lastAttempt;
     if (!attempt) return;
+    if (attempt.goal && !sameMap(attempt.activeMap, useTelemetryStore.getState().baseState)) {
+      set({ lastAttempt: null, pickMode: "none", lastResult: { commandId: null,
+        command: attempt.command, outcome: "rejected", at: Date.now(),
+        detail: "The robot map changed. Select a new position before taking over." } });
+      return;
+    }
     get().send(attempt.command, attempt.goal, true);
   },
 
   send: (command, goal, takeover = false) => {
+    if ((command === "navigate_to_pose" || command === "set_initial_pose") &&
+        (!goal?.map_id || !goal.map_revision ||
+         (command === "navigate_to_pose" && !sameMap(goal, useTelemetryStore.getState().baseState)))) {
+      set({ pickMode: "none", lastResult: { commandId: crypto.randomUUID(), command,
+        outcome: "rejected", at: Date.now(), detail: "Map context is missing or differs from the robot. Select a new position." } });
+      return;
+    }
     if (command === "software_reset") {
       useTelemetryStore.setState({ poseSetThisSession: false });
       set({ allowUnlocalized: false, pickMode: "none" });
@@ -151,7 +173,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({ stoppedGoal: null });
     }
     // Remember the intent so a lease rejection can be retried as a takeover.
-    set({ lastAttempt: { command, goal } });
+    set({ lastAttempt: { command, goal, activeMap: useTelemetryStore.getState().baseState ?? undefined } });
     // Read the override once and disarm it. A takeover re-send of the same
     // destination therefore has to be armed again deliberately, which is the
     // point: the operator re-confirms driving on a fix the robot distrusts.
@@ -184,7 +206,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     set({
       pickMode: "none",
       allowUnlocalized: allowUnlocalized ? false : get().allowUnlocalized,
-      active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null },
+      active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null, goal },
     });
   },
 

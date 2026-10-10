@@ -6,8 +6,18 @@
   "timestamp": "2026-07-17T10:31:20.400Z",
   "data": {
     "capabilities": [
-      "pose", "lidar", "path", "battery", "base_state", "diagnostics",
-      "resources", "map", "charge_release", "motor_enable", "undock"
+      "pose",
+      "lidar",
+      "path",
+      "battery",
+      "base_state",
+      "diagnostics",
+      "resources",
+      "map",
+      "charge_release",
+      "motor_enable",
+      "undock",
+      "map_context_v1"
     ]
   }
 }

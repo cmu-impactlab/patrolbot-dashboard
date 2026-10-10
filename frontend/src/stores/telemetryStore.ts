@@ -1,3 +1,5 @@
+import { sameMap } from "../lib/mapContext";
+
 import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import type {
@@ -276,7 +278,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           ...bump,
           pose: frame.data,
           poseReceivedAt: performance.now(),
-          trajectory: appendTrajectory(get().trajectory, frame.data),
+          trajectory: appendTrajectory(sameMap(get().pose, frame.data) ? get().trajectory : [], frame.data),
         });
         break;
       case "telemetry.lidar":

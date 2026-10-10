@@ -180,7 +180,7 @@ def test_selected_channel_with_no_samples_still_gets_a_header():
     payload, _ = build_zip(RECORDING, [], ["pose"])
     zf, prefix = open_bundle(payload)
     text = zf.read(prefix + "pose.csv").decode()
-    assert text.startswith("recording_id,ts,elapsed_s,frame_id,x,y,yaw")
+    assert text.startswith("recording_id,ts,elapsed_s,map_id,map_revision,frame_id,x,y,yaw")
     assert rows(zf, prefix, "pose.csv") == []
 
 

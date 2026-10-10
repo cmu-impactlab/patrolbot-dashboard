@@ -30,7 +30,7 @@ def client_factory(tmp_path):
 
 def hello_frame() -> str:
     return encode("robot.hello", "patrolbot-01", 0, {
-        "protocol_version": 1, "capabilities": ["pose"], "map_version": 0,
+        "protocol_version": 1, "capabilities": ["pose", "map_context_v1"], "map_version": 0,
         "software_version": "test",
     })
 
@@ -43,7 +43,7 @@ def make_drivable(robot) -> None:
     localized pose have actually arrived — see app/commands/gates.py.
     """
     robot.send_text(encode("telemetry.base_state", "patrolbot-01", 1, {
-        "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
         "hardware_state_valid": True, "charge_state": "idle",
         "motors_enabled": True, "estop_pressed": False, "fault_flags": 0,
         "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -51,13 +51,13 @@ def make_drivable(robot) -> None:
         "localization_seed_stamp_ns": 1,
     }))
     robot.send_text(encode("telemetry.pose", "patrolbot-01", 2, {
-        "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
         "angular_velocity": 0.0, "localized": True,
     }))
 
 
 def request_frame(command: str = "navigate_to_pose", command_id: str | None = None,
-                  goal: dict | None = {"x": 1.0, "y": 2.0, "yaw": None}) -> tuple[str, str]:
+                  goal: dict | None = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0, "yaw": None}) -> tuple[str, str]:
     command_id = command_id or str(uuid.uuid4())
     data = {"command_id": command_id, "command": command}
     if goal is not None:
@@ -217,7 +217,7 @@ def _cookie(role: str, uid: int, username: str, secret: str = "s3cret") -> dict:
     return {"cookie": f"{COOKIE_NAME}={token}"}
 
 
-def _cmd_frame(command: str = "navigate_to_pose", goal=({"x": 1.0, "y": 2.0, "yaw": None}),
+def _cmd_frame(command: str = "navigate_to_pose", goal=({"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0, "yaw": None}),
                command_id: str | None = None, takeover: bool = False):
     command_id = command_id or str(uuid.uuid4())
     data = {"command_id": command_id, "command": command, "takeover": takeover}
@@ -455,7 +455,7 @@ def test_nan_goal_rejected(client):
         robot.receive_text()
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            _, frame = request_frame(goal={"x": float("nan"), "y": 1.0, "yaw": None})
+            _, frame = request_frame(goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": float("nan"), "y": 1.0, "yaw": None})
             ui.send_text(frame)
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
@@ -469,11 +469,11 @@ def test_out_of_bounds_goal_rejected(client):
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             # No occupancy map streamed -> coarse sanity limit (1000 m) applies.
-            _, frame = request_frame(goal={"x": 50000.0, "y": 1.0, "yaw": None})
+            _, frame = request_frame(goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 50000.0, "y": 1.0, "yaw": None})
             ui.send_text(frame)
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
-            assert "too far" in ack["data"]["reason"].lower()
+            assert "outside the known map" in ack["data"]["reason"].lower()
 
 
 def _pose_frame(robot_id: str, seq: int, x: float) -> str:
@@ -504,7 +504,7 @@ def test_robot_reconnect_does_not_replay_command(client):
         make_drivable(robot)
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            old_id, frame = request_frame(goal={"x": 5.0, "y": 6.0, "yaw": None})
+            old_id, frame = request_frame(goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 5.0, "y": 6.0, "yaw": None})
             ui.send_text(frame)
             assert json.loads(robot.receive_text())["data"]["command_id"] == old_id
             robot.send_text(encode("command.ack", "patrolbot-01", 3,
@@ -517,7 +517,7 @@ def test_robot_reconnect_does_not_replay_command(client):
         make_drivable(robot2)
         with client.websocket_connect("/ws/ui") as ui2:
             ui2.receive_text()
-            new_id, frame2 = request_frame(goal={"x": 1.0, "y": 1.0, "yaw": None})
+            new_id, frame2 = request_frame(goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": None})
             ui2.send_text(frame2)
             forwarded = json.loads(robot2.receive_text())
             # The first frame the reconnected robot receives is the NEW command,
@@ -527,7 +527,7 @@ def test_robot_reconnect_does_not_replay_command(client):
 
 def _base_state_frame(seq: int, generation: int) -> str:
     return encode("telemetry.base_state", "patrolbot-01", seq, {
-        "session_generation": generation, "link_connected": True, "telemetry_age": 0.1,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": generation, "link_connected": True, "telemetry_age": 0.1,
         "hardware_state_valid": True, "charge_state": "idle", "motors_enabled": True,
         "estop_pressed": False, "fault_flags": 0, "stall_value": 0,
         "bumpers_front": False, "bumpers_rear": False,

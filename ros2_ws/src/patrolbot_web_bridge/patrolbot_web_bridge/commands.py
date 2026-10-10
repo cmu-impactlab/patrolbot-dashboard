@@ -358,8 +358,11 @@ class CommandExecutor:
         self._NavigateToPose = NavigateToPose
         self._PoseWithCovarianceStamped = PoseWithCovarianceStamped
         self._nav_client = ActionClient(node, NavigateToPose, "navigate_to_pose")
-        self._initialpose_pub = node.create_publisher(
-            PoseWithCovarianceStamped, "initialpose", 10)
+        from patrolbot_interfaces.action import LocalizeOnMap
+        self._LocalizeOnMap = LocalizeOnMap
+        self._map_client = ActionClient(node, LocalizeOnMap, "/patrolbot/localize_on_map")
+        self._map_active = None
+        node.create_timer(.1, self._check_map_connection)
         self._active: dict | None = None  # {command_id, goal_handle}
         self._last_progress_mono = 0.0
         node.get_logger().warning(
@@ -484,6 +487,8 @@ class CommandExecutor:
         command at all — the robot has no dock-in path to advertise.
         """
         capabilities: list[str] = []
+        if self._map_client.server_is_ready():
+            capabilities.append("map_context_v1")
         if self._undock_client is not None and self._undock_client.server_is_ready():
             capabilities.append("undock")
         if self._release_client is not None and self._release_client.service_is_ready():
@@ -510,7 +515,27 @@ class CommandExecutor:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
+        if command == "cancel_map":
+            if self._map_active and self._map_active["command_id"] == command_id:
+                self._check_map_connection(cancel=True)
+            return
 
+        if command in ("navigate_to_pose", "set_initial_pose"):
+            if not goal or not goal.get("map_id") or not goal.get("map_revision"):
+                self._ack(command_id, False, "Explicit map identity and revision required.")
+                return
+            if command == "navigate_to_pose" and any(goal.get(k) != (base_state or {}).get(k) for k in ("map_id", "map_revision")):
+                self._ack(command_id, False, "Destination map differs from the active map.")
+                return
+        if self._map_active is not None:
+            if command == "stop":
+                self._check_map_connection(cancel=True)
+                self._ack(command_id, True)
+                self._result(command_id, "succeeded",
+                             "Map cancellation requested; motion remains held.")
+                return
+            self._ack(command_id, False, "Map localization owns the robot; wait for its result.")
+            return
         allow_unlocalized = bool(data.get("allow_unlocalized", False))
         operator_authorized = bool(data.get("operator_authorized", False))
         reason = precheck(command, goal, base_state, localized, base_state_age,
@@ -532,7 +557,7 @@ class CommandExecutor:
         elif command == "stop":
             self._stop(command_id)
         elif command == "set_initial_pose":
-            self._set_initial_pose(command_id, goal)
+            self._set_initial_pose(command_id, goal, operator_authorized)
         elif command == "undock":
             # operator_authorized is set by the dashboard server from the
             # verified session role — never by the browser (see
@@ -864,7 +889,7 @@ class CommandExecutor:
 
     # -- set_initial_pose ------------------------------------------------------
 
-    def _set_initial_pose(self, command_id: str, goal: dict) -> None:
+    def _set_initial_pose(self, command_id: str, goal: dict, operator_authorized: bool = False) -> None:
         msg = self._PoseWithCovarianceStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self._node.get_clock().now().to_msg()
@@ -880,6 +905,54 @@ class CommandExecutor:
         msg.pose.covariance[0] = 0.25
         msg.pose.covariance[7] = 0.25
         msg.pose.covariance[35] = 0.0685
-        self._initialpose_pub.publish(msg)
-        self._ack(command_id, True)
-        self._result(command_id, "succeeded", "Robot location updated.")
+        if not operator_authorized or self._active is not None or not self._map_client.server_is_ready():
+            self._ack(command_id, False, "Map localization requires authorization, an idle robot and its action server.")
+            return
+        request = self._LocalizeOnMap.Goal()
+        request.request_id = command_id
+        request.map_id = goal["map_id"]
+        request.map_revision = goal["map_revision"]
+        request.pose = msg.pose
+        request.operator_authorized = operator_authorized
+        self._map_active = {"command_id": command_id, "handle": None, "cancel": False}
+        future = self._map_client.send_goal_async(request, feedback_callback=self._map_feedback)
+        active = self._map_active
+        future.add_done_callback(lambda future: self._map_response(future, active))
+
+    def _map_feedback(self, message):
+        active = self._map_active
+        if active and message.feedback.request_id == active["command_id"]:
+            self._ws.send("command.progress", {"command_id": active["command_id"], "stage": message.feedback.stage})
+
+    def _map_response(self, future, active):
+        if active is not self._map_active: return
+        try:
+            handle = future.result()
+            if not handle.accepted:
+                self._ack(active["command_id"], False, "Robot refused map localization preconditions.")
+                self._map_active = None
+                return
+            active["handle"] = handle
+            self._ack(active["command_id"], True)
+            handle.get_result_async().add_done_callback(lambda future: self._map_result(future, active))
+            if active["cancel"]: handle.cancel_goal_async()
+        except Exception as exc:
+            self._result(active["command_id"], "failed", str(exc))
+            self._map_active = None
+
+    def _map_result(self, future, active):
+        if active is not self._map_active: return
+        try:
+            result = future.result().result
+            if result.request_id != active["command_id"]:
+                raise ValueError("Map localization result belongs to a different request")
+            self._result(active["command_id"], "succeeded" if result.localized and result.code == 0 else "failed", result.message)
+        except Exception as exc:
+            self._result(active["command_id"], "failed", str(exc))
+        self._map_active = None
+
+    def _check_map_connection(self, cancel=False):
+        active = self._map_active
+        if active and (cancel or not self._ws.connected.is_set()) and not active["cancel"]:
+            active["cancel"] = True
+            if active["handle"]: active["handle"].cancel_goal_async()

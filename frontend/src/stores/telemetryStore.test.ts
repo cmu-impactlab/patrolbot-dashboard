@@ -9,7 +9,7 @@ function poseFrame(x: number, y: number, sequence = 1): Envelope<"telemetry.pose
     robot_id: "patrolbot-01",
     sequence,
     timestamp: "2026-07-17T10:00:00.000Z",
-    data: { x, y, yaw: 0, linear_velocity: 0.4, angular_velocity: 0 },
+    data: { map_id: "cmuq-floor2", map_revision: "test-revision", x, y, yaw: 0, linear_velocity: 0.4, angular_velocity: 0 },
   };
 }
 
