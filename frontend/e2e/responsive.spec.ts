@@ -60,6 +60,13 @@ test("touch preview confirms once; cancellation and multi-touch do not send", as
   const canvas = page.getByLabel("Live robot map");
   await expect(page.getByRole("dialog")).toBeVisible();
   const pointer = async (type: string, pointerId = 1) => {
+    // dispatchEvent skips browser actionability waits. The dialog can appear
+    // before the map's first animation frame initializes its coordinate view.
+    await expect.poll(() => canvas.evaluate(el => {
+      const map = el as HTMLCanvasElement;
+      return map.getContext("2d")!.getImageData(
+        Math.floor(map.width / 2), Math.floor(map.height / 2), 1, 1).data[3];
+    })).toBe(255);
     if (type === "pointerdown") await canvas.evaluate(el => { el.setPointerCapture = () => {}; });
     await canvas.dispatchEvent(type, { pointerId, pointerType: "touch", clientX: 140, clientY: 260, bubbles: true });
   };
