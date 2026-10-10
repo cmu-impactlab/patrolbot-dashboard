@@ -21,6 +21,7 @@ export interface ActiveCommand {
   phase: "sending" | "running";
   stage: string | null;
   distanceRemaining: number | null;
+  goal?: GoalData;
 }
 
 export interface CommandResultInfo {
@@ -102,7 +103,13 @@ export const useCommandStore = create<CommandState>((set, get) => ({
 
   stop: () => {
     // Remember the destination in effect right now so Resume can restore it.
-    const goal = useTelemetryStore.getState().path?.goal ?? null;
+    const active = get().active;
+    const telemetry = useTelemetryStore.getState();
+    // Path telemetry can lag the acknowledged command. Keep the destination
+    // actually sent, even when Stop arrives before the first path update.
+    const candidate = active?.command === "navigate_to_pose"
+      ? active.goal ?? telemetry.path?.goal : telemetry.path?.goal;
+    const goal = candidate && sameMap(candidate, telemetry.baseState) ? candidate : null;
     set({ stoppedGoal: goal ?? get().stoppedGoal });
     get().send("stop");
   },
@@ -199,7 +206,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     set({
       pickMode: "none",
       allowUnlocalized: allowUnlocalized ? false : get().allowUnlocalized,
-      active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null },
+      active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null, goal },
     });
   },
 

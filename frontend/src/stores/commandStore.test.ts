@@ -256,3 +256,16 @@ it("refuses legacy spatial commands without map context", () => {
   expect(sender).not.toHaveBeenCalled();
   expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
 });
+
+
+it("keeps the submitted destination when Stop precedes path telemetry", () => {
+  const sender = vi.fn((_frame: string) => true);
+  registerCommandSender(sender);
+  useTelemetryStore.setState({ path: null });
+  useCommandStore.setState({ active: null, stoppedGoal: null });
+  const goal = { map_id: "cmuq-floor2", map_revision: "test-revision", x: 3, y: 4 };
+  useCommandStore.getState().send("navigate_to_pose", goal);
+  useCommandStore.getState().stop();
+  expect(useCommandStore.getState().stoppedGoal).toEqual(goal);
+  expect(JSON.parse(sender.mock.calls[1][0]).data.command).toBe("stop");
+});
