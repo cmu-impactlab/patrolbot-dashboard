@@ -39,7 +39,10 @@ def diagnostics_payload(elapsed: float, battery_level: float, bumper_active: boo
 def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
                        estop: bool, bumper_front: bool, bumper_rear: bool,
                        motors_enabled: bool = True,
-                       undock_active: bool = False) -> dict:
+                       undock_active: bool = False,
+                       odom_epoch_valid: bool = False,
+                       localization_recovery_required: bool = True,
+                       localization_seed_stamp_ns: int = 0) -> dict:
     if charging:
         charge_state = "charging"
     elif docked:
@@ -53,6 +56,14 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
     )
     return {
         "session_generation": session_generation,
+        "odom_epoch_valid": odom_epoch_valid,
+        "localization_recovery_required": localization_recovery_required,
+        "localization_recovery_stage": (
+            "wait-origin" if not odom_epoch_valid
+            else "wait-operator-seed" if localization_recovery_required or localization_seed_stamp_ns <= 0
+            else "ready"
+        ),
+        "localization_seed_stamp_ns": localization_seed_stamp_ns,
         "link_connected": True,
         "telemetry_age": 0.08,
         "hardware_state_valid": True,

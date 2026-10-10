@@ -13,6 +13,8 @@ def base_state(**overrides) -> BaseStateData:
         hardware_state_valid=True, charge_state="not_charging", motors_enabled=True,
         estop_pressed=False, fault_flags=0, stall_value=0,
         bumpers_front=False, bumpers_rear=False,
+        odom_epoch_valid=True, localization_recovery_required=False,
+        localization_seed_stamp_ns=1,
     )
     defaults.update(overrides)
     return BaseStateData(**defaults)

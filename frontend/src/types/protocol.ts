@@ -76,6 +76,10 @@ export interface BatteryData {
 }
 
 export interface BaseStateData {
+  odom_epoch_valid?: boolean;
+  localization_recovery_required?: boolean;
+  localization_recovery_stage?: string;
+  localization_seed_stamp_ns?: number;
   session_generation: number;
   link_connected: boolean;
   telemetry_age: number;

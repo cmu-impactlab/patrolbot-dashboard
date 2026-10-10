@@ -58,6 +58,20 @@ def test_battery_accepts_null_optionals():
     assert payload.current is None and payload.percentage is None
 
 
+def test_legacy_base_state_parses_epoch_fields_fail_closed():
+    _, payload = decode(encode("telemetry.base_state", "patrolbot-01", 1, {
+        "session_generation": 1, "link_connected": True,
+        "telemetry_age": 0.1, "hardware_state_valid": True,
+        "charge_state": "idle", "motors_enabled": True,
+        "estop_pressed": False, "fault_flags": 0, "stall_value": 0,
+        "bumpers_front": False, "bumpers_rear": False,
+    }))
+    assert payload.odom_epoch_valid is False
+    assert payload.localization_recovery_required is True
+    assert payload.localization_recovery_stage == ""
+    assert payload.localization_seed_stamp_ns == 0
+
+
 def test_wrong_version_rejected():
     frame = json.dumps({"version": 2, "type": "telemetry.heartbeat", "robot_id": "r", "sequence": 1,
                         "timestamp": "2026-07-17T00:00:00Z", "data": {"uptime_s": 1.0}})

@@ -254,3 +254,26 @@ describe("NavControlsWidget advanced motor enable", () => {
     expect(motorEnableButton().disabled).toBe(true);
   });
 });
+
+
+describe("localization recovery controls", () => {
+  afterEach(cleanup);
+it("blocks destinations during recovery but leaves operator pose initialization available", () => {
+  setState(baseState({ odom_epoch_valid: true, localization_recovery_required: true,
+    localization_seed_stamp_ns: 1 }));
+  useCommandStore.setState({ active: null, pickMode: "none", allowUnlocalized: true });
+  render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Set Robot Location" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByText(/recovering its location/)).toBeTruthy();
+});
+
+it("offers destinations after recovery with an operator-confirmed pose", () => {
+  setState(baseState({ odom_epoch_valid: true, localization_recovery_required: false,
+    localization_seed_stamp_ns: 1 }));
+  useCommandStore.setState({ active: null, pickMode: "none", allowUnlocalized: false });
+  render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+});

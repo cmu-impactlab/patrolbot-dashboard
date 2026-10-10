@@ -25,6 +25,8 @@ def facts(**overrides) -> gates.StateFacts:
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
                 bumpers_front=False, bumpers_rear=False, bumpers_valid=True, localized=True,
+                odom_epoch_valid=True, localization_recovery_required=False,
+                localization_seed_stamp_ns=1,
                 stationary=True, capabilities=ALL_CAPS)
     return gates.StateFacts(**{**base, **overrides})
 
@@ -261,7 +263,9 @@ def base_state_frame(sequence: int, **overrides) -> str:
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
-            "bumpers_valid": True}
+            "bumpers_valid": True, "odom_epoch_valid": True,
+            "localization_recovery_required": False,
+            "localization_seed_stamp_ns": 1}
     data.update(overrides)
     return encode("telemetry.base_state", "patrolbot-01", sequence, data)
 
@@ -557,6 +561,26 @@ def test_the_localization_override_lets_a_goal_through():
     assert gates.navigate_reason(overridden) is None
 
 
+def test_localization_epoch_and_recovery_cannot_be_overridden():
+    for overrides in (
+        {"odom_epoch_valid": False},
+        {"localization_recovery_required": True,
+         "localization_recovery_stage": "WAIT_FOR_AMCL"},
+        {"localization_seed_stamp_ns": 0},
+    ):
+        blocked = _nav_facts(localized=False, allow_unlocalized=True, **overrides)
+        reason = gates.navigate_reason(blocked)
+        assert reason is not None
+        assert "recovering its location" in reason.lower()
+
+
+def test_set_initial_pose_remains_ungated_by_epoch_recovery():
+    blocked = _nav_facts(odom_epoch_valid=False,
+                         localization_recovery_required=True,
+                         localization_seed_stamp_ns=0)
+    assert gates.rejection_reason("set_initial_pose", blocked) is None
+
+
 def test_the_override_waives_only_the_localization_check():
     """Every other navigation gate still refuses with the override armed.
 
@@ -582,3 +606,34 @@ def test_the_override_defaults_off():
     assert gates.StateFacts().allow_unlocalized is False
     payload = CommandRequestData(command_id="c1", command="navigate_to_pose")
     assert payload.allow_unlocalized is False
+
+
+@pytest.mark.parametrize("state", [
+    {},
+    {"odom_epoch_valid": False, "localization_recovery_required": False,
+     "localization_seed_stamp_ns": 1},
+    {"odom_epoch_valid": True, "localization_recovery_required": True,
+     "localization_seed_stamp_ns": 1},
+    {"odom_epoch_valid": True, "localization_recovery_required": False,
+     "localization_seed_stamp_ns": 0},
+])
+def test_websocket_navigation_override_cannot_bypass_recovery(client, state):
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        base = json.loads(base_state_frame(1, charge_state="idle", motors_enabled=True))
+        for field in ("odom_epoch_valid", "localization_recovery_required",
+                      "localization_seed_stamp_ns"):
+            base["data"].pop(field, None)
+        base["data"].update(state)
+        robot.send_text(json.dumps(base))
+        robot.send_text(pose_frame(2, localized=True))
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            _, frame = command_frame("navigate_to_pose", goal={"x": 1.0, "y": 2.0})
+            request = json.loads(frame)
+            request["data"]["allow_unlocalized"] = True
+            ui.send_text(json.dumps(request))
+            ack = recv_until(ui, "command.ack")
+            assert ack["data"]["accepted"] is False
+            assert "recovering its location" in ack["data"]["reason"]

@@ -273,6 +273,43 @@ def test_base_state_without_dock_observer_fails_closed():
     assert result["undock_profile_commissioned"] is False
 
 
+def test_base_state_epoch_fields_forward_and_missing_fields_fail_closed():
+    class State:
+        session_generation = 1
+        link_connected = True
+        telemetry_age = 0.1
+        hardware_state_valid = True
+        charge_state = 0
+        charge_state_valid = True
+        motors_enabled = True
+        estop_pressed = False
+        fault_flags = 0
+        stall_value = 0
+        bumpers_valid = True
+        front_bumper_pressed = False
+        rear_bumper_pressed = False
+        odom_epoch_valid = True
+        localization_recovery_required = False
+        localization_recovery_stage = "READY"
+        localization_seed_stamp_ns = 123
+
+    result = normalizers.normalize_base_state(State())
+    assert result["odom_epoch_valid"] is True
+    assert result["localization_recovery_required"] is False
+    assert result["localization_recovery_stage"] == "READY"
+    assert result["localization_seed_stamp_ns"] == 123
+
+    del State.odom_epoch_valid
+    del State.localization_recovery_required
+    del State.localization_recovery_stage
+    del State.localization_seed_stamp_ns
+    result = normalizers.normalize_base_state(State())
+    assert result["odom_epoch_valid"] is False
+    assert result["localization_recovery_required"] is True
+    assert result["localization_recovery_stage"] == ""
+    assert result["localization_seed_stamp_ns"] == 0
+
+
 def test_diagnostics_levels_and_dedupe():
     diag = NS(status=[
         NS(name="laser", level=b"\x01", message="slow"),

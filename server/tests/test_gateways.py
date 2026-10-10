@@ -112,6 +112,8 @@ def test_estop_produces_event_and_status(client):
                 "hardware_state_valid": True, "charge_state": "not_charging",
                 "motors_enabled": True, "estop_pressed": True, "fault_flags": 0,
                 "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
+                "odom_epoch_valid": True, "localization_recovery_required": False,
+                "localization_seed_stamp_ns": 1,
             }))
             event = recv_until(ui, "event.append")
             assert event["data"]["severity"] == "critical"

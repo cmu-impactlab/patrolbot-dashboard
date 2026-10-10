@@ -1,3 +1,13 @@
+import { useTelemetryStore } from "./telemetryStore";
+import type { BaseStateData } from "../types/protocol";
+const readyBase: BaseStateData = {
+  session_generation: 1, link_connected: true, telemetry_age: 0,
+  hardware_state_valid: true, charge_state: "idle", motors_enabled: true,
+  estop_pressed: false, fault_flags: 0, stall_value: 0,
+  bumpers_front: false, bumpers_rear: false,
+  odom_epoch_valid: true, localization_recovery_required: false, localization_seed_stamp_ns: 1,
+};
+beforeEach(() => useTelemetryStore.setState({ baseState: readyBase, baseStateAt: performance.now() }));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCommandSender, useCommandStore } from "./commandStore";
 
@@ -177,5 +187,40 @@ describe("commandStore override safety", () => {
     // gate has to be re-armed deliberately rather than inherited.
     useCommandStore.getState().takeOver();
     expect(JSON.parse(sent[1]).data.allow_unlocalized).toBe(false);
+  });
+});
+
+
+describe("localization recovery", () => {
+  it.each([
+    { odom_epoch_valid: undefined }, { odom_epoch_valid: false },
+    { localization_recovery_required: true }, { localization_seed_stamp_ns: 0 },
+  ])("blocks direct navigation and override during recovery: %o", fields => {
+    const sender = vi.fn(() => true);
+    registerCommandSender(sender);
+    useCommandStore.setState({ allowUnlocalized: true, active: null });
+    useTelemetryStore.setState({ baseState: { ...readyBase, ...fields } });
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2 });
+    expect(sender).not.toHaveBeenCalled();
+    expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
+  });
+  it("keeps pose initialization available and accepts navigation after recovery", () => {
+    const sender = vi.fn(() => true);
+    registerCommandSender(sender);
+    useTelemetryStore.setState({ baseState: { ...readyBase, localization_recovery_required: true } });
+    useCommandStore.getState().send("set_initial_pose", { x: 1, y: 2, yaw: 0 });
+    expect(sender).toHaveBeenCalledTimes(1);
+    useTelemetryStore.setState({ baseState: readyBase });
+    useCommandStore.getState().send("navigate_to_pose", { x: 1, y: 2 });
+    expect(sender).toHaveBeenCalledTimes(2);
+  });
+  it("rechecks freshness when resuming a destination", () => {
+    const sender = vi.fn(() => true);
+    registerCommandSender(sender);
+    useCommandStore.setState({ stoppedGoal: { x: 1, y: 2 }, active: null });
+    useTelemetryStore.setState({ baseStateAt: performance.now() - 3001 });
+    useCommandStore.getState().resume();
+    expect(sender).not.toHaveBeenCalled();
+    expect(useCommandStore.getState().stoppedGoal).toEqual({ x: 1, y: 2 });
   });
 });

@@ -17,6 +17,8 @@ def base_state(**overrides) -> BaseStateData:
         hardware_state_valid=True, charge_state="not_charging", motors_enabled=True,
         estop_pressed=False, fault_flags=0, stall_value=0,
         bumpers_front=False, bumpers_rear=False,
+        odom_epoch_valid=True, localization_recovery_required=False,
+        localization_seed_stamp_ns=1,
     )
     defaults.update(overrides)
     return BaseStateData(**defaults)
@@ -117,6 +119,36 @@ def test_ready_default():
     assert result.status == "ready"
 
 
+def test_localization_recovery_never_reports_ready():
+    for updates in (
+        {"odom_epoch_valid": False},
+        {"localization_recovery_required": True},
+        {"localization_seed_stamp_ns": 0},
+    ):
+        result = derive_status(
+            base_state_age_s=0.5, connection="online", base_state=base_state(**updates),
+            diagnostics=None, pose=pose(localized=True), path=None,
+        )
+        assert result.status == "needs_attention"
+        assert "recovering its location" in result.detail
+
+
+def test_docked_and_charging_status_keep_precedence_during_localization_recovery():
+    recovering = {"localization_recovery_required": True}
+    charging = derive_status(
+        base_state_age_s=0.5, connection="online",
+        base_state=base_state(charge_state="charging", **recovering),
+        diagnostics=None, pose=None, path=None,
+    )
+    docked = derive_status(
+        base_state_age_s=0.5, connection="online",
+        base_state=base_state(charge_state="docked", **recovering),
+        diagnostics=None, pose=None, path=None,
+    )
+    assert charging.status == "charging"
+    assert docked.status == "docked"
+
+
 def test_health_offline_overall():
     health = derive_health(connection="offline", base_state=None, battery=None,
                            diagnostics=None, pose=None, resources=None, lidar_age_s=None)
@@ -140,6 +172,21 @@ def test_health_localization_warning():
     loc = next(s for s in health.subsystems if s.id == "localization")
     assert loc.level == "warning"
     assert loc.action is not None
+
+
+def test_health_localization_is_not_healthy_during_epoch_recovery():
+    for overrides in (
+        {"odom_epoch_valid": False},
+        {"localization_recovery_required": True,
+         "localization_recovery_stage": "WAIT_FOR_AMCL"},
+        {"localization_seed_stamp_ns": 0},
+    ):
+        health = derive_health(connection="online", base_state=base_state(**overrides),
+                               battery=None, diagnostics=None, pose=pose(localized=True),
+                               resources=None, lidar_age_s=0.5, **FRESH)
+        loc = next(s for s in health.subsystems if s.id == "localization")
+        assert loc.level == "warning"
+        assert "recover" in loc.message.lower()
 
 
 def test_health_every_subsystem_has_plain_message():
@@ -359,3 +406,14 @@ def test_bumpers_the_robot_never_mentions_are_not_reported_either_way():
     drive_base = next(s for s in health.subsystems if s.id == "drive_base")
     assert drive_base.level == "healthy"
     assert "bumper" not in drive_base.message.lower()
+
+
+def test_fresh_pose_does_not_hide_stale_localization_readiness():
+    for age in (None, 16.0, float("nan"), float("inf"), -1.0):
+        ages = {**FRESH, "base_state_age_s": age}
+        health = derive_health(connection="online", base_state=base_state(),
+                               battery=None, diagnostics=None, pose=pose(localized=True),
+                               resources=None, lidar_age_s=0.5, **ages)
+        loc = next(s for s in health.subsystems if s.id == "localization")
+        assert loc.level == "warning"
+        assert "not current" in loc.message

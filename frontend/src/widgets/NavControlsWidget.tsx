@@ -1,3 +1,4 @@
+import { localizationRecoveryReason, RECOVERY_RECEIPT_MAX_MS } from "../lib/localizationRecovery";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, Power, X,
@@ -62,8 +63,11 @@ export function NavControlsWidget() {
   // Navigation is hard-blocked until the operator has set the robot's 2D
   // location this session, so the robot is never sent anywhere from an
   // unconfirmed pose.
-  const canNavigate = online && (poseSetThisSession || allowUnlocalized);
-  const gateHint = "Set the robot's 2D location before sending it anywhere.";
+  const recoveryAt = useTelemetryStore(state => state.baseStateAt);
+  const recoveryFresh = useIsFresh(recoveryAt, RECOVERY_RECEIPT_MAX_MS);
+  const recoveryReason = localizationRecoveryReason(recoveryFresh ? baseState : null, recoveryAt);
+  const canNavigate = online && recoveryReason === null && (poseSetThisSession || allowUnlocalized);
+  const gateHint = recoveryReason ?? "Set the robot's 2D location before sending it anywhere.";
 
   // Undock is offered only when the robot is on its charger; there is no Dock
   // control, because the robot has no automatic dock-in path — it is driven
@@ -95,7 +99,7 @@ export function NavControlsWidget() {
           The robot is not connected — commands are unavailable.
         </div>
       )}
-      {online && !poseSetThisSession && !allowUnlocalized && pickMode === "none" && (
+      {online && !canNavigate && pickMode === "none" && (
         <div className="nav-gate-banner">
           <Crosshair size={13} /> {gateHint}
         </div>

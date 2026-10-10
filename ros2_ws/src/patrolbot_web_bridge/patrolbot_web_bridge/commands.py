@@ -221,6 +221,30 @@ def _on_dock(base_state: dict) -> bool:
     return base_state.get("charge_state", "").strip().lower() in ON_DOCK_STATES
 
 
+def localization_epoch_ready(base_state: Any | None,
+                             amcl_stamp_ns: int,
+                             base_state_age: float | None) -> bool:
+    """Require a fresh, post-restart localization epoch before navigation."""
+    if base_state is None or base_state_age is None:
+        return False
+    try:
+        telemetry_age = float(base_state.get("telemetry_age", 999.0))
+        receipt_age = float(base_state_age)
+        seed_stamp_ns = int(base_state.get("localization_seed_stamp_ns", 0))
+        pose_stamp_ns = int(amcl_stamp_ns)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        bool(base_state.get("link_connected", False))
+        and 0.0 <= telemetry_age <= MAX_TELEMETRY_AGE_S
+        and 0.0 <= receipt_age <= MAX_RECEIPT_AGE_S
+        and bool(base_state.get("odom_epoch_valid", False))
+        and not bool(base_state.get("localization_recovery_required", True))
+        and seed_stamp_ns > 0
+        and pose_stamp_ns > seed_stamp_ns
+    )
+
+
 def precheck(command: str, goal: dict | None, base_state: Any | None,
              localized: bool = False, base_state_age: float | None = None,
              allow_unlocalized: bool = False,
@@ -278,6 +302,21 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
                     "sending it anywhere.")
         if not base_state.get("motors_enabled"):
             return "The robot's motors are off. Enable them on the robot first."
+        if not base_state.get("odom_epoch_valid", False):
+            return ("The robot's odometry epoch is not valid — wait for its "
+                    "localization to recover before sending it anywhere.")
+        if base_state.get("localization_recovery_required", True):
+            stage = str(base_state.get("localization_recovery_stage", "")).strip()
+            suffix = f" ({stage})" if stage else ""
+            return ("The robot is recovering localization"
+                    f"{suffix} — wait before sending it anywhere.")
+        try:
+            seed_stamp_ns = int(base_state.get("localization_seed_stamp_ns", 0))
+        except (TypeError, ValueError, OverflowError):
+            seed_stamp_ns = 0
+        if seed_stamp_ns <= 0:
+            return ("The robot has no valid localization seed barrier — wait "
+                    "for localization to recover before sending it anywhere.")
         # An exceptional flag needs the server's verified-role stamp, the same
         # way the guarded undock does. A browser cannot authorize itself past a
         # safety gate; anything arriving here unstamped is treated as if the
