@@ -47,6 +47,7 @@ COMMAND_LABELS = {
     "charge_release": "Release charging",
     "motor_enable": "Enable motors",
     "undock": "Move robot off its charging dock",
+    "software_reset": "Restart robot software",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
 
@@ -73,6 +74,9 @@ class CommandBroker:
         self.ack_timeout_s = ack_timeout_s
         self.result_timeout_s = result_timeout_s
         self.active: dict[str, ActiveCommand] = {}
+        # A reset remains a command barrier until the supervisor reports a
+        # terminal result. A disconnect or timeout cannot resolve the outcome.
+        self.reset_pending: dict[str, str] = {}
         # Every command_id ever seen (bounded) — duplicate protection must
         # cover finished commands too, or a replayed frame re-runs them.
         self._seen: OrderedDict[str, None] = OrderedDict()
@@ -88,6 +92,15 @@ class CommandBroker:
         user = getattr(client, "user", None)
 
         command = payload.command
+
+        pending_reset = self.reset_pending.get(robot_id)
+        if pending_reset and command != "stop":
+            await self._reject_audited(
+                client, robot_id, command_id, command,
+                "A software reset is still pending or its outcome is unknown. "
+                "Wait for the robot supervisor to report its result before sending another command.",
+            )
+            return
 
         # 1. Role gate: command authorization is read-only by default. Reject
         #    observers (and any unauthenticated client) before touching state.
@@ -167,6 +180,8 @@ class CommandBroker:
         entry = ActiveCommand(command_id=command_id, command=payload.command,
                               robot_id=envelope.robot_id)
         self.active[command_id] = entry
+        if command == "software_reset":
+            self.reset_pending[robot_id] = command_id
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
 
@@ -179,7 +194,12 @@ class CommandBroker:
             await session.websocket.send_text(frame)
         except Exception as exc:  # socket died between the check and the send
             log.warning("failed to forward %s to robot: %s", command_id, exc)
-            await self._close_out(entry, "failed", "The robot connection dropped while sending.")
+            if command == "software_reset":
+                await self._mark_reset_uncertain(entry,
+                    "The robot connection dropped while sending. The reset outcome is unknown; "
+                    "inspect the supervisor before retrying.")
+            else:
+                await self._close_out(entry, "failed", "The robot connection dropped while sending.")
             return
 
         await self.hub.emit_event(
@@ -192,7 +212,7 @@ class CommandBroker:
 
     async def handle_robot_reply(self, session: "RobotSession", envelope: Envelope, payload: Any) -> None:
         entry = self.active.get(getattr(payload, "command_id", ""))
-        if entry is None:
+        if entry is None or entry.robot_id != session.robot_id:
             log.warning("dropping %s for unknown/closed command", envelope.type)
             return
 
@@ -206,6 +226,9 @@ class CommandBroker:
             self.hub.publish("command.progress", session.robot_id, payload)
         elif isinstance(payload, CommandResultData):
             self.hub.publish("command.result", session.robot_id, payload)
+            if entry.command == "software_reset" and payload.outcome == "timeout":
+                await self._mark_reset_uncertain(entry, payload.detail or "Reset outcome unknown; inspect the supervisor.")
+                return
             await self._finish(entry, payload.outcome, payload.detail or "")
 
     # -- internals ------------------------------------------------------------
@@ -258,6 +281,9 @@ class CommandBroker:
                                        base_state_age=state.base_state.age(),
                                        pose_age=state.pose.age(),
                                        allow_unlocalized=allow_unlocalized)
+        if any(entry.command == "undock" and entry.robot_id == session.robot_id
+               for entry in self.active.values()):
+            facts.undock_active = True
         return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:
@@ -294,11 +320,29 @@ class CommandBroker:
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)
         if not entry.acked:
+            if entry.command == "software_reset":
+                await self._mark_reset_uncertain(entry,
+                    "The reset outcome is unknown because the robot did not confirm acceptance. "
+                    "Inspect the robot supervisor before retrying.")
+                return
             await self._close_out(entry, "timeout", "The robot did not confirm the command in time.")
 
     async def _result_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.result_timeout_s)
+        if entry.command == "software_reset":
+            await self._mark_reset_uncertain(entry,
+                "The reset outcome is unknown. Inspect the robot supervisor before retrying.")
+            return
         await self._close_out(entry, "timeout", "The command took too long and was abandoned.")
+
+    async def _mark_reset_uncertain(self, entry: ActiveCommand, detail: str) -> None:
+        """Publish uncertainty but keep the command open for supervisor replay."""
+        if entry.command_id not in self.active:
+            return
+        self.hub.publish("command.result", entry.robot_id, CommandResultData(
+            command_id=entry.command_id, outcome="timeout", detail=detail))
+        if self.hub.db is not None:
+            await self.hub.db.complete_command_audit(entry.command_id, "timeout", detail)
 
     async def _close_out(self, entry: ActiveCommand, outcome: str, detail: str) -> None:
         """Synthesize a result for a command the robot never resolved."""
@@ -311,6 +355,8 @@ class CommandBroker:
     async def _finish(self, entry: ActiveCommand, outcome: str, detail: str) -> None:
         if self.active.pop(entry.command_id, None) is None:
             return
+        if entry.command == "software_reset":
+            self.reset_pending.pop(entry.robot_id, None)
         entry.cancel_timers()
         if self.hub.db is not None:
             await self.hub.db.complete_command_audit(entry.command_id, outcome, detail)

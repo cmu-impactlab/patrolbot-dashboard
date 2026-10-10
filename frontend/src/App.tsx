@@ -1,9 +1,8 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { useLayoutsQuery } from "./api/queries";
 import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { DashboardTour } from "./components/DashboardTour";
-import { RestorePosePrompt } from "./components/RestorePosePrompt";
 import { TourPrompt } from "./components/TourPrompt";
 import { MapSelectionHost } from "./components/MapSelectionHost";
 import { TopBar } from "./components/TopBar";
@@ -25,7 +24,6 @@ function Dashboard() {
   useTelemetrySocket();
   const layoutsQuery = useLayoutsQuery();
   const hydrate = useLayoutStore((state) => state.hydrate);
-  const [helpOfferResolved, setHelpOfferResolved] = useState(false);
   const startTour = useUiStore((state) => state.startTour);
   const tourActive = useUiStore((state) => state.tourActive);
 
@@ -50,11 +48,10 @@ function Dashboard() {
         <DashboardGrid />
       </div>
       <TourPrompt
-        onResolved={() => setHelpOfferResolved(true)}
+        onResolved={() => {}}
         tourAlreadyStarted={tourActive}
       />
       <DashboardTour />
-      <RestorePosePrompt enabled={helpOfferResolved && !tourActive} />
     </div>
   );
 }

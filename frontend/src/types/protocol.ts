@@ -209,7 +209,7 @@ export type CommandType =
   // The guarded UI sends `undock` as one action. The two service-level
   // commands remain in the protocol for robot-side diagnostics and recovery.
   // There is no `dock`: the robot has no automatic dock-in path.
-  | "charge_release" | "motor_enable" | "undock";
+  | "charge_release" | "motor_enable" | "undock" | "software_reset";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {

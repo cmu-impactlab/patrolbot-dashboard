@@ -48,6 +48,46 @@ def test_diagnostics_level_transitions():
     assert len(recovered) == 1 and recovered[0].severity == "info"
 
 
+def test_diagnostic_sources_merge_stale_and_expire_deterministically(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("app.telemetry.store.time.monotonic", lambda: now)
+    state = make_state()
+    fault = DiagnosticItem(name="laser", level="ERROR", message="No scan")
+    ok = DiagnosticItem(name="base", level="OK", message="Ready")
+
+    state.record_diagnostics(DiagnosticsData(items=[fault]))
+    state.record_diagnostics(DiagnosticsData(items=[ok]))
+    assert [(item.name, item.level) for item in state.diagnostics.data.items] == [
+        ("base", "OK"), ("laser", "ERROR")
+    ]
+
+    # A fresh report from one component must not keep an absent component
+    # looking current forever; it becomes explicitly stale after the bound.
+    now += 31
+    state.record_diagnostics(DiagnosticsData(items=[ok]))
+    laser = next(item for item in state.diagnostics.data.items if item.name == "laser")
+    assert laser.level == "STALE"
+    assert state.health is None
+    state.recompute()
+    assert next(item for item in state.health.subsystems if item.id == "systems").level == "warning"
+
+    now += 151
+    state.recompute()
+    assert state.diagnostics.data is None
+
+
+def test_reconnect_clears_diagnostic_sources():
+    state = make_state()
+    state.record_diagnostics(DiagnosticsData(items=[
+        DiagnosticItem(name="laser", level="ERROR", message="No scan")
+    ]))
+    state.set_connection("online")
+    state.set_connection("offline")
+    state.set_connection("online")
+    assert state.diagnostics.data is None
+    assert state._diag_levels == {}
+
+
 def test_battery_low_threshold_event_once():
     state = make_state()
     assert state.record_battery(BatteryData(voltage=24.5, percentage=50.0, charging=False)) == []

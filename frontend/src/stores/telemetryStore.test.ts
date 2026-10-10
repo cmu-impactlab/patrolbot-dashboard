@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Envelope, PoseData, SnapshotData } from "../types/protocol";
+import type { BaseStateData, Envelope, PoseData, SnapshotData } from "../types/protocol";
 import { useTelemetryStore } from "./telemetryStore";
 
 function poseFrame(x: number, y: number, sequence = 1): Envelope<"telemetry.pose", PoseData> {
@@ -163,5 +163,37 @@ describe("snapshot freshness", () => {
       },
     } as never);
     expect(useTelemetryStore.getState().baseStateAt).toBeNull();
+  });
+});
+
+
+describe("refresh reconnects to robot localization without reseeding", () => {
+  const ready = { odom_epoch_valid: true, localization_recovery_required: false,
+    localization_seed_stamp_ns: 123 } as BaseStateData;
+  function hydrate(base: BaseStateData, age: number | undefined) {
+    useTelemetryStore.getState().handleFrame({version: 1, type: "server.snapshot",
+      robot_id: "patrolbot-01", sequence: 1, timestamp: new Date().toISOString(),
+      data: {...snapshot, base_state: base, slice_ages_s: {base_state: age},
+        last_known_pose: {x: 0, y: 0, yaw: 0}} as SnapshotData});
+  }
+  it("accepts the existing fresh robot seed on page load without replacing its pose", () => {
+    hydrate(ready, 0);
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(true);
+    expect(useTelemetryStore.getState().pose?.x).toBe(1);
+  });
+  it.each([4, undefined, -1])("keeps stale or unknown snapshot recovery held (%s)", age => {
+    hydrate(ready, age);
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
+  });
+  it("keeps full reset held even if a saved origin pose is present", () => {
+    hydrate({...ready, localization_recovery_required: true, localization_seed_stamp_ns: 0}, 0);
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
+    useTelemetryStore.getState().handleFrame({version: 1, type: "telemetry.base_state",
+      robot_id: "patrolbot-01", sequence: 2, timestamp: new Date().toISOString(), data: ready});
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(true);
+    useTelemetryStore.getState().handleFrame({version: 1, type: "telemetry.base_state",
+      robot_id: "patrolbot-01", sequence: 3, timestamp: new Date().toISOString(),
+      data: {...ready, localization_recovery_required: true, localization_seed_stamp_ns: 0}});
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
   });
 });
