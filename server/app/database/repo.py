@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS robot_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_battery_ts ON battery_samples(robot_id, ts);
+CREATE INDEX IF NOT EXISTS idx_battery_time ON battery_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(robot_id, ts);
 CREATE INDEX IF NOT EXISTS idx_samples_rec ON recording_samples(recording_id, id);
 """
