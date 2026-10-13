@@ -4,7 +4,7 @@ import type { LayoutDoc } from "../src/stores/layoutStore";
 
 export const READY_BASE_STATE = {
   map_id: "cmuq-floor2", map_revision: "test-revision",
-  session_generation: 1, link_connected: true, telemetry_age: 0.1, hardware_state_valid: true,
+  lidar_state: "READY", lidar_scan_age: 0.1, session_generation: 1, link_connected: true, telemetry_age: 0.1, hardware_state_valid: true,
   charge_state: "not_charging", motors_enabled: true, estop_pressed: false,
   fault_flags: 0, stall_value: 0, bumpers_front: false, bumpers_rear: false, bumpers_valid: true,
   odom_epoch_valid: true, localization_recovery_required: false, localization_seed_stamp_ns: 1,
@@ -67,7 +67,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
       events: [{ id: 1, ts: new Date().toISOString(), severity: "warning", title: "Long alert", message: "Long message ".repeat(35) }], slice_ages_s: {pose: 0, base_state: 0, battery: 0, resources: 0},
     });
     clearInterval(baseTimer);
-    baseTimer = setInterval(() => send("telemetry.base_state", baseState), 500);
+    baseTimer = setInterval(() => send("telemetry.base_state", baseState), 100);
     ws.onMessage(message => {
       const frame = JSON.parse(String(message));
       if (frame.type !== "command.request") return;

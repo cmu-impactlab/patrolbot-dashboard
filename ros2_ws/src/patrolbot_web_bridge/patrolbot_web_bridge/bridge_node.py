@@ -408,7 +408,7 @@ class WebBridgeNode(Node):
                 else:
                     self._system_reset.request(data)
                 continue
-            if self._system_reset is not None and self._system_reset.busy and data.get("command") != "stop":
+            if self._system_reset is not None and self._system_reset.commands_blocked and data.get("command") != "stop":
                 self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
                     "accepted": False, "reason": "Software reset is pending or its outcome is unknown."})
                 continue

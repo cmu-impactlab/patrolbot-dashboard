@@ -1,0 +1,8 @@
+# Existing locked server dependencies and maps; source + compiled frontend only.
+ARG PATROLBOT_BASE_IMAGE
+FROM ${PATROLBOT_BASE_IMAGE}
+WORKDIR /app
+COPY server/app /app/app
+COPY frontend/dist /app/static
+COPY shared /shared
+COPY server/maps /maps

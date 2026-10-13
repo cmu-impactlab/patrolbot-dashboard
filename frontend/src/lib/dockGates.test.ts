@@ -69,8 +69,8 @@ describe("charging with the motors still on", () => {
     expect(chargeReleaseReason(facts(stuck))).toBeNull();
   });
 
-  it("still holds motor enable back until the charger is actually released", () => {
-    expect(motorEnableReason(facts(stuck))?.toLowerCase()).toContain("release charging");
+  it("leaves physical charger validation to the robot", () => {
+    expect(motorEnableReason(facts(stuck))).toBeNull();
   });
 
   it("never leaves both steps blocked at once", () => {
@@ -80,16 +80,12 @@ describe("charging with the motors still on", () => {
 });
 
 describe("motor enable", () => {
-  it("refuses while the charger is engaged, allows once released", () => {
-    expect(motorEnableReason(facts())?.toLowerCase()).toContain("release charging");
+  it("admits requests and leaves physical charging checks to the robot", () => {
+    expect(motorEnableReason(facts())).toBeNull();
     expect(motorEnableReason(facts(RELEASED))).toBeNull();
   });
 
   it.each([
-    [{ estopPressed: true }, "emergency stop"],
-    [{ motorsEnabled: true }, "already on"],
-    [{ stationary: false }, "still moving"],
-    [{ navigating: true }, "stop it before enabling"],
     [{ capabilities: ["undock"] }, "not available"],
   ])("refuses %o", (overrides, fragment) => {
     expect(motorEnableReason(facts({ ...RELEASED, ...overrides }))?.toLowerCase())
@@ -167,7 +163,7 @@ describe("there is no dock command", () => {
 describe("fail-closed defaults", () => {
   it("refuses everything with no telemetry at all", () => {
     const blank = factsFrom("online", null, null, ALL_CAPS);
-    for (const command of ["charge_release", "motor_enable", "undock"] as const) {
+    for (const command of ["charge_release", "undock"] as const) {
       expect(rejectionReason(command, blank)).not.toBeNull();
     }
   });
@@ -238,5 +234,19 @@ describe("bumper readings the robot cannot make", () => {
         .toContain("cannot confirm its bumper readings");
     }
     expect(undockReason(facts({ bumpersValid: true }))).toBeNull();
+  });
+});
+
+
+describe("latched charge after physical clearance", () => {
+  it.each(["float", "bulk", "overcharge"])("confirmed clear supersedes %s", (chargeState) => {
+    const clear = facts({ chargeState, dockState: "CLEAR_CONFIRMED", dockStateValid: true });
+    expect(motorEnableReason(clear)).toBeNull();
+    expect(chargeReleaseReason(clear)).toContain("nothing to release");
+  });
+  it.each([false, null])("invalid observer %s preserves the charge inhibit", (dockStateValid) => {
+    const unknown = facts({ chargeState: "float", dockState: "CLEAR_CONFIRMED", dockStateValid });
+    expect(motorEnableReason(unknown)).toBeNull();
+    expect(chargeReleaseReason(unknown)).toBeNull();
   });
 });

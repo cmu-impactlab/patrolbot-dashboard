@@ -35,7 +35,7 @@ and vitest; edit fixtures together with both definitions.
 | `telemetry.lidar` | 5 Hz | `angle_min`, `angle_increment`, `ranges[]` (≤360, metres, `null` = no return) |
 | `telemetry.path` | on change / 2 Hz | `frame_id`, `points[[x,y],…]`, `goal?{x,y,yaw}` |
 | `telemetry.battery` | 1 Hz | `voltage`, `current?`, `percentage?`, `charging` |
-| `telemetry.base_state` | 1 Hz | drive-base state plus the SBC dock observer (`dock_state`, validity, active phase, rear-clearance and commissioning fields); valid `CLEAR_CONFIRMED` is authoritative over a stale raw charge level |
+| `telemetry.base_state` | 10 Hz | drive-base state plus the SBC dock observer (`dock_state`, validity, active phase, rear-clearance and commissioning fields); valid `CLEAR_CONFIRMED` is authoritative over a stale raw charge level |
 | `telemetry.diagnostics` | 1 Hz | `items[{name, level, message, values?}]`, level ∈ OK/WARN/ERROR/STALE |
 | `telemetry.resources` | 1 Hz | `cpu_percent`, `memory_percent`, `cpu_temp_c?`, `disk_percent`, `wifi_signal_dbm?` |
 | `telemetry.map` | on server request + on change | `map_version`, `name`, `resolution`, `width`, `height`, `origin{x,y,yaw}`, `rle[[value,count],…]` |
@@ -66,7 +66,7 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/undock, `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/undock/software_reset/set_lidar_power, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
@@ -141,28 +141,67 @@ Operator browser disconnect, server timeout or shutdown cancels its active map
 transaction; cancellation retains the robot-side hold. Browser gateways never
 accept this internal message as authorization.
 
-### Guarded software reset
+### Emergency software reset
 
-`command.request.command = "software_reset"` is an opt-in capability. It uses
-an ordinary UUID `command_id`, the authenticated server's `operator_authorized`
-stamp, the operator lease and command audit. It accepts no reset scope, shell
-command, host, goal or service arguments. The browser requires confirmation.
-Server gates require fresh, valid docked stationary telemetry, motors disabled
-and no active navigation/undock. Host-side repeated captures enforce these
-conditions independently immediately before restarting either machine.
+`command.request.command = "software_reset"` uses a UUID, the authenticated
+server's `operator_authorized` stamp, confirmation and durable command audit.
+It accepts no shell, host, goal, service or reset-scope arguments. Reset bypasses
+ordinary operator leases, rate limits and unresolved LiDAR commands; authorization,
+UUID dedupe and host single-flight protection remain mandatory.
 
-An accepted acknowledgement means the host durably recorded the request, not
-that reset finished. `command.progress.stage = "restarting"` indicates pending
-work; `reset_outcome_unknown` indicates the request may have reached the host.
-The bridge queries the durable supervisor after reconnect and reports success
-only after its post-reset health, changed-origin and fresh-pose barrier checks.
-`command.result.outcome = "timeout"` means uncertain; it must not release the
-reset command barrier or trigger an automatic resend. Only a verified terminal
-success/failure resolves that barrier. A supervisor restart during a reset also
-becomes uncertain. The bridge enforces its durable host barrier even if the
-browser or dashboard server restarts.
+Neither admission nor the host restart depends on dock contact, pose,
+localization, motion telemetry, idle navigation or ROS health. The host stops
+old Pi command publishers, restarts the fixed SBC hardware-server service and
+existing Pi core/web-bridge containers, retaining images and configuration.
+Later operations are attempted even if an earlier one fails.
 
-Reset restarts SBC hardware-server software and the existing Pi core/web-bridge
-containers; it does not reboot either OS, change images/configuration, publish
-a pose or enable motors. A fresh operator pose is required afterward. Disabled
-or uncommissioned installations do not advertise `software_reset`.
+An accepted acknowledgement means the host durably recorded the request.
+`succeeded` means restart commands completed; it does not certify robot readiness.
+The host reads no robot preflight or postflight and performs no automatic retry.
+An ambiguous result is retained as `timeout`/`uncertain`; ordinary commands remain
+held, but a newly confirmed UUID may request another reset. An actually running
+reset rejects a second request. Old destinations and commands are not resumed.
+
+Normal navigation authorization and fresh-localization requirements are separate
+from reset completion. Reset issues no pose, goal, velocity, motor-enable,
+charge-release or undock request, and does not reboot either OS. The current
+transport still needs a live web bridge; resetting that failed process itself
+requires an independent host management channel.
+
+
+LiDAR admission and power control:
+
+- BaseState adds `lidar_state` (`UNKNOWN`, `OFF`, `STARTING`, `READY`, `FAULT`),
+  `lidar_power_supported` (commissioned power control), and `lidar_scan_age`
+  (seconds since measured acquisition; -1 means unavailable). Missing fields fail
+  closed for commands while older recordings remain readable.
+- `OFF` means commanded off, without electrical power readback. Scan readiness
+  is independent of power commissioning. READY requires scan acquisition age plus
+  downstream receipt age no greater than 0.5 seconds. Both scan and power
+  admission also require connected, valid drive-base telemetry with acquisition
+  age plus receipt age no greater than 0.5 seconds.
+- `set_lidar_power` carries an explicit boolean `enabled`; it uses the existing
+  command permission, rate limit, operator lease and audit lifecycle, then the
+  typed `/patrolbot/set_lidar_power` service with the command UUID as request_id.
+- Power requires fresh hardware data, commissioned support, an idle stationary
+  robot and a known OFF/READY/FAULT state. ON does not require localization.
+- Goal, pose/map-localization, motor-enable, charger-release and undock commands
+  refuse without fresh READY scans, including localization overrides. Stop and
+  map cancellation remain available. A power request also blocks these commands
+  while pending; ambiguous timeouts/disconnects keep the barrier until a definitive
+  robot response. A definitive typed timeout allows a new deliberate power request
+  but keeps spatial commands held until an explicit successful recovery and fresh
+  READY scans. Every terminal power response requires a subsequently received
+  BaseState before another command, so cached READY cannot bridge a transition.
+  Power changes clear saved destinations and require a new pose
+  before navigation; ON never resumes an old goal.
+
+### Measured Set location profile
+
+`command.request` may carry top-level `seed_profile: "measured"` only for
+`set_initial_pose`. The operator explicitly selects this after physically
+measuring position and heading. The web adapter sets `LocalizeOnMap.measured_pose`
+and diagonal covariance x/y `0.0009`, yaw `0.00030461742`. Omission preserves
+the coarse covariance `0.25`, `0.25`, `0.0685`. Map coordinates and yaw remain
+in the map frame; the profile changes no coordinate conversion or safety gate.
+The command audit records the requested profile alongside the goal.

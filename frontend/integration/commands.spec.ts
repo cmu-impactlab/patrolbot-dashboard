@@ -74,3 +74,26 @@ test("recording controls produce a real ZIP download and open an isolated replay
   await expect(replay.getByRole("link",{name:"Return to dashboard"})).toBeVisible();
   await replay.close();
 });
+
+
+test("keyboard LiDAR power control rejects pose while off and requires a new location after on", async ({ page, request }) => {
+  await expect.poll(async () => (await (await request.get("/api/health")).json()).robot_connected).toBe(true);
+  await request.put("/api/help-guide/status");
+  await page.goto("/");
+  await page.getByRole("button", {name:"Menu",exact:true}).click();
+  await page.locator('[data-tour="layouts"]').click();
+  await page.getByRole("menuitem", {name:"Operator",exact:true}).click();
+  await page.getByRole("button", { name: "Stop Robot", exact: true }).click();
+  const status = page.locator('[data-tour="widget-robotStatus"]');
+  const off = status.getByRole("button", { name: "Turn LiDAR off", exact: true });
+  await expect(off).toBeEnabled();
+  await off.focus();
+  await page.keyboard.press("Space");
+  await expect(status.getByText("Commanded off", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Set Robot Location", exact: true })).toBeDisabled();
+  await status.getByRole("button", { name: "Turn LiDAR on", exact: true }).click();
+  await expect(status.getByText("READY", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Set Robot Location", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Send Robot Here", exact: true })).toBeDisabled();
+  await expect(status.getByRole("status")).toContainText("waiting for fresh scans");
+});

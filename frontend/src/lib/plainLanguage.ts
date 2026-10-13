@@ -45,8 +45,10 @@ export const COMMAND_COPY: Record<CommandType, string> = {
   stop: "Stop",
   charge_release: "Release charging",
   motor_enable: "Turn motors on",
+  motor_disable: "Turn motors off",
   software_reset: "Restart robot software",
   undock: "Undock",
+  set_lidar_power: "Change LiDAR power",
 };
 
 export const ESTIMATE_COPY: Record<string, string> = {
@@ -70,3 +72,9 @@ export function healthOverallText(overall: HealthLevel, attentionCount: number):
         : `${attentionCount} systems need attention`;
   }
 }
+
+/** Recovery remains blocked until the robot confirms movement is idle. */
+export const LOCALIZATION_RECOVERY_COPY: Record<string, string> = {
+  "wait-navigation-idle-service-unavailable": "Startup is waiting for the movement stop service to become available. Location recovery cannot continue yet.",
+  "wait-navigation-idle-confirmation": "Startup has requested movement to stop and is waiting for confirmation that the robot is idle. Location recovery cannot continue yet.",
+};

@@ -42,7 +42,8 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
                        undock_active: bool = False,
                        odom_epoch_valid: bool = False,
                        localization_recovery_required: bool = True,
-                       localization_seed_stamp_ns: int = 0) -> dict:
+                       localization_seed_stamp_ns: int = 0,
+                       lidar_state: str = "READY", lidar_scan_age: float = 0.0) -> dict:
     if charging:
         charge_state = "charging"
     elif docked:
@@ -55,6 +56,8 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
         else "CLEAR_CONFIRMED"
     )
     return {
+        "lidar_state": lidar_state, "lidar_scan_age": lidar_scan_age,
+        "lidar_power_supported": True,
         "session_generation": session_generation,
         "odom_epoch_valid": odom_epoch_valid,
         "localization_recovery_required": localization_recovery_required,

@@ -223,7 +223,11 @@ def normalize_base_state(state: Any) -> dict:
     dock_state = str(getattr(state, "dock_state", "UNKNOWN")).strip().upper()
     if not dock_state_valid:
         dock_state = "UNKNOWN"
+    lidar_age = _finite(getattr(state, "lidar_scan_age", -1.0), 3)
     return {
+        "lidar_state": str(getattr(state, "lidar_state", "UNKNOWN")),
+        "lidar_power_supported": bool(getattr(state, "lidar_power_supported", False)),
+        "lidar_scan_age": lidar_age if lidar_age is not None else -1.0,
         "session_generation": int(state.session_generation),
         "link_connected": bool(state.link_connected),
         "telemetry_age": round(float(state.telemetry_age), 3),

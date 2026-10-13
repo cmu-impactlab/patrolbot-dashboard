@@ -166,3 +166,51 @@ def test_ui_command_frames_ignored(client):
         # Connection stays open and functional.
         response = client.get("/api/health")
         assert response.status_code == 200
+
+
+@pytest.mark.parametrize("payload", [
+    {"command": "dock"},
+    {"command": "navigate_to_pose", "goal": {"x": "invalid", "y": 0}},
+    {"command": "stop", "takeover": "invalid"},
+])
+def test_invalid_command_gets_audited_rejection_without_forwarding(client, monkeypatch, payload):
+    import sqlite3
+    from unittest.mock import AsyncMock
+    handler = AsyncMock()
+    monkeypatch.setattr(client.app.state.hub.commands, "handle_browser_request", handler)
+    command_id = "issue22-removed-command"
+    with client.websocket_connect("/ws/ui") as ui:
+        ui.receive_text()
+        ui.send_text(encode("command.request", "patrolbot-01", 1,
+                            dict(payload, command_id=command_id)))
+        ack = recv_until(ui, "command.ack")
+        assert ack["data"]["command_id"] == command_id
+        assert ack["data"]["accepted"] is False
+        assert "command" in ack["data"]["reason"].lower()
+    handler.assert_not_awaited()
+    with sqlite3.connect(client.app.state.settings.database_path) as db:
+        row = db.execute("SELECT command, outcome, rejection_reason, username, source_ip "
+                         "FROM command_audit WHERE command_id=?", (command_id,)).fetchone()
+    assert row[:3] == (payload["command"], "rejected", ack["data"]["reason"])
+    assert row[3] and row[4] == "testclient"
+    assert not client.app.state.hub.commands.active
+
+
+@pytest.mark.parametrize("command_id", [None, "", " ", 42, "x" * 129])
+def test_uncorrelatable_commands_stay_dropped_and_socket_stays_usable(client, command_id):
+    import sqlite3
+    with client.websocket_connect("/ws/ui") as ui:
+        ui.receive_text()
+        payload = {"command": "dock"}
+        if command_id is not None:
+            payload["command_id"] = command_id
+        ui.send_text(encode("command.request", "patrolbot-01", 1, payload))
+        ui.send_text("not JSON")
+        ui.send_text(encode("command.request", "patrolbot-01", 2,
+                            {"command_id": "issue22-after-dropped", "command": "dock"}))
+        ack = recv_until(ui, "command.ack")
+        assert ack["data"]["command_id"] == "issue22-after-dropped"
+        assert ack["data"]["accepted"] is False
+        with sqlite3.connect(client.app.state.settings.database_path) as db:
+            rows = db.execute("SELECT command_id FROM command_audit").fetchall()
+        assert rows == [("issue22-after-dropped",)]

@@ -1,7 +1,7 @@
 import { useTelemetryStore } from "./telemetryStore";
 import type { BaseStateData } from "../types/protocol";
 const readyBase: BaseStateData = { map_id: "cmuq-floor2", map_revision: "test-revision",
-  session_generation: 1, link_connected: true, telemetry_age: 0,
+  lidar_state: "READY", lidar_scan_age: 0.1, session_generation: 1, link_connected: true, telemetry_age: 0,
   hardware_state_valid: true, charge_state: "idle", motors_enabled: true,
   estop_pressed: false, fault_flags: 0, stall_value: 0,
   bumpers_front: false, bumpers_rear: false,
@@ -13,7 +13,7 @@ import { registerCommandSender, useCommandStore } from "./commandStore";
 
 describe("commandStore.cancel", () => {
   beforeEach(() => {
-    useCommandStore.setState({ active: null, stoppedGoal: null, lastResult: null, pickMode: "none" });
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null, pickMode: "none" });
     registerCommandSender(null);
   });
 
@@ -46,7 +46,7 @@ describe("commandStore.cancel", () => {
 describe("commandStore.takeOver", () => {
   beforeEach(() => {
     useCommandStore.setState({
-      active: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
+      active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
     });
     registerCommandSender(null);
   });
@@ -84,7 +84,7 @@ describe("commandStore.takeOver", () => {
 describe("commandStore reconnect safety", () => {
   beforeEach(() => {
     useCommandStore.setState({
-      active: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
+      active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null, pickMode: "none", lastAttempt: null,
     });
     registerCommandSender(null);
   });
@@ -107,7 +107,7 @@ describe("commandStore reconnect safety", () => {
 describe("commandStore.allowUnlocalized", () => {
   beforeEach(() => {
     useCommandStore.setState({
-      active: null, stoppedGoal: null, lastResult: null, pickMode: "none",
+      active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null, pickMode: "none",
       lastAttempt: null, allowUnlocalized: false,
     });
     registerCommandSender(null);
@@ -153,7 +153,7 @@ describe("commandStore.allowUnlocalized", () => {
 describe("commandStore override safety", () => {
   beforeEach(() => {
     useCommandStore.setState({
-      active: null, stoppedGoal: null, lastResult: null, pickMode: "none",
+      active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null, pickMode: "none",
       lastAttempt: null, allowUnlocalized: false,
     });
     registerCommandSender(null);
@@ -228,7 +228,7 @@ describe("localization recovery", () => {
 it("refuses a saved destination after the active floor changes", () => {
   const sender = vi.fn(() => true);
   registerCommandSender(sender);
-  useCommandStore.setState({ active: null, stoppedGoal: {
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: {
     map_id: "cmuq-floor1", map_revision: "first", x: 1, y: 2,
   } });
   useCommandStore.getState().resume();
@@ -239,7 +239,7 @@ it("refuses a saved destination after the active floor changes", () => {
 it("refuses takeover of a pose attempt after the robot changes floors", () => {
   const sender = vi.fn(() => true);
   registerCommandSender(sender);
-  useCommandStore.setState({ active: null, lastAttempt: {
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastAttempt: {
     command: "set_initial_pose", activeMap: readyBase,
     goal: { map_id: "cmuq-floor1", map_revision: "first", x: 1, y: 2 },
   } });
@@ -262,10 +262,101 @@ it("keeps the submitted destination when Stop precedes path telemetry", () => {
   const sender = vi.fn((_frame: string) => true);
   registerCommandSender(sender);
   useTelemetryStore.setState({ path: null });
-  useCommandStore.setState({ active: null, stoppedGoal: null });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null });
   const goal = { map_id: "cmuq-floor2", map_revision: "test-revision", x: 3, y: 4 };
   useCommandStore.getState().send("navigate_to_pose", goal);
   useCommandStore.getState().stop();
   expect(useCommandStore.getState().stoppedGoal).toEqual(goal);
   expect(JSON.parse(sender.mock.calls[1][0]).data.command).toBe("stop");
+});
+
+
+describe("LiDAR power barrier", () => {
+  it("requires a post-terminal BaseState before another spatial command", () => {
+    const clock = vi.spyOn(performance,"now").mockReturnValue(100);
+    const sent: string[] = [];
+    registerCommandSender(frame => { sent.push(frame); return true; });
+    useCommandStore.setState({active:null,lidarPending:null,lidarRecoveryRequired:false,lidarStateAfter:null});
+    useTelemetryStore.setState({baseState:readyBase,baseStateAt:99});
+    useCommandStore.getState().send("set_lidar_power",undefined,false,true);
+    const power = JSON.parse(sent[0]).data.command_id;
+    useCommandStore.getState().handleResult({command_id:power,outcome:"succeeded"});
+    const goal = {map_id:"cmuq-floor2",map_revision:"test-revision",x:0,y:0};
+    useCommandStore.getState().send("set_initial_pose",goal);
+    expect(sent).toHaveLength(1);
+    clock.mockReturnValue(101);
+    useTelemetryStore.setState({baseStateAt:101});
+    useCommandStore.getState().send("set_initial_pose",goal);
+    expect(sent).toHaveLength(2);
+    clock.mockRestore(); registerCommandSender(null);
+  });
+  it("requires a deliberate successful power recovery after a definitive failure", () => {
+    const sent: string[] = [];
+    registerCommandSender(frame => { sent.push(frame); return true; });
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null });
+    useTelemetryStore.setState({ baseState: readyBase, baseStateAt: performance.now() });
+    useCommandStore.getState().send("set_lidar_power", undefined, false, true);
+    const first = JSON.parse(sent[0]).data.command_id;
+    useCommandStore.getState().handleResult({ command_id:first, outcome:"failed", detail:"Timed out; FAULT" });
+    useCommandStore.getState().send("set_initial_pose", {map_id:"cmuq-floor2",map_revision:"test-revision",x:0,y:0});
+    expect(sent).toHaveLength(1);
+    useTelemetryStore.setState({baseStateAt:performance.now()});
+    useCommandStore.getState().send("set_lidar_power", undefined, false, true);
+    expect(sent).toHaveLength(2);
+    const recover = JSON.parse(sent[1]).data.command_id;
+    useCommandStore.getState().handleResult({command_id:recover,outcome:"succeeded",detail:"Commanded on"});
+    useTelemetryStore.setState({baseStateAt:performance.now()});
+    useCommandStore.getState().send("set_initial_pose", {map_id:"cmuq-floor2",map_revision:"test-revision",x:0,y:0});
+    expect(sent).toHaveLength(3);
+    registerCommandSender(null);
+  });
+  it("keeps spatial requests blocked while Stop runs and through ambiguous timeout", () => {
+    const sent: string[] = [];
+    registerCommandSender(frame => { sent.push(frame); return true; });
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastResult: null });
+    useTelemetryStore.setState({ baseState: readyBase, baseStateAt: performance.now() });
+    useCommandStore.getState().send("set_lidar_power", undefined, false, false);
+    const power = JSON.parse(sent[0]).data.command_id;
+    useCommandStore.getState().stop();
+    useCommandStore.getState().handleResult({ command_id: power, outcome: "timeout", detail: "Unknown" });
+    useCommandStore.getState().send("set_initial_pose", { map_id:"cmuq-floor2", map_revision:"test-revision", x:0, y:0 });
+    expect(sent).toHaveLength(2);
+    expect(useCommandStore.getState().lidarPending).toBe(power);
+    useCommandStore.getState().handleResult({ command_id: power, outcome:"succeeded", detail:"Commanded off" });
+    expect(useCommandStore.getState().lidarPending).toBeNull();
+    expect(useCommandStore.getState().lastResult?.detail).toBe("Commanded off");
+    expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
+    expect(useCommandStore.getState().stoppedGoal).toBeNull();
+    registerCommandSender(null);
+  });
+});
+
+
+describe("emergency software reset", () => {
+  it("escapes an unresolved LiDAR command and discards the old destination", () => {
+    const sender = vi.fn((frame: string) => !!frame);
+    registerCommandSender(sender);
+    useCommandStore.setState({ lidarPending: "unknown-power", lidarRecoveryRequired: false,
+      stoppedGoal: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 },
+      active: { commandId: "unknown-power", command: "set_lidar_power", phase: "running", stage: null, distanceRemaining: null } });
+    useCommandStore.getState().send("software_reset");
+    expect(JSON.parse(sender.mock.calls[0][0]).data.command).toBe("software_reset");
+    expect(useCommandStore.getState().stoppedGoal).toBeNull();
+    expect(useCommandStore.getState().lidarPending).toBeNull();
+    expect(useCommandStore.getState().lidarRecoveryRequired).toBe(true);
+    expect(useCommandStore.getState().active?.command).toBe("software_reset");
+    registerCommandSender(null);
+  });
+});
+
+
+it("preserves the explicit measured profile through operator takeover", () => {
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, stoppedGoal: null, lastAttempt: null });
+  const sent: string[] = [];
+  registerCommandSender(frame => { sent.push(frame); return true; });
+  useCommandStore.getState().send("set_initial_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: -3.25, y: 8.5, yaw: Math.PI / 2 }, false, undefined, "measured");
+  useCommandStore.getState().takeOver();
+  expect(sent).toHaveLength(2);
+  for (const frame of sent) expect(JSON.parse(frame).data.seed_profile).toBe("measured");
+  expect(JSON.parse(sent[1]).data.takeover).toBe(true);
 });

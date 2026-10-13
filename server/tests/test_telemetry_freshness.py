@@ -21,13 +21,13 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("undock", "charge_release", "motor_enable")
+ALL_CAPS = ("undock", "charge_release", "motor_enable", "motor_disable")
 STALE = gates.MAX_RECEIPT_AGE_S + 1.0
 
 
 def facts(**overrides) -> gates.StateFacts:
     """A healthy robot on its dock, both slices freshly received."""
-    base = dict(online=True, link_connected=True, telemetry_age=0.1,
+    base = dict(lidar_state="READY", lidar_scan_age=0.1, online=True, link_connected=True, telemetry_age=0.1,
                 base_state_age=0.1, pose_age=0.1,
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
@@ -38,12 +38,9 @@ def facts(**overrides) -> gates.StateFacts:
 
 # -- pure gates -------------------------------------------------------------
 
-# Each gate needs a different world to be *otherwise* allowable — charge
-# release wants the charger on, motor enable and dock want it off — and a gate
-# that refuses for an earlier reason would prove nothing about freshness.
+# Each charge/movement baseline must pass before changing receipt age.
 ALLOWABLE = {
     "charge_release": {"charge_state": "charging"},
-    "motor_enable": {"charge_state": "not_charging"},
     "undock": {"charge_state": "charging"},
 }
 
@@ -67,6 +64,13 @@ def test_every_gate_refuses_an_unheard_base_state(gate, age):
 def test_every_gate_refuses_an_unheard_pose(gate, age):
     reason = gates.GATES[gate](facts(pose_age=age, **ALLOWABLE[gate]))
     assert reason is not None and "position update" in reason.lower()
+
+
+@pytest.mark.parametrize("gate", ["motor_enable", "motor_disable"])
+@pytest.mark.parametrize("age", [None, STALE])
+def test_motor_requests_reach_the_robot_without_a_map_pose(gate, age):
+    # Physical enable/disable confirmation belongs to the typed robot service.
+    assert gates.GATES[gate](facts(base_state_age=age, pose_age=age)) is None
 
 
 def test_a_stale_pose_does_not_read_as_stopped():
@@ -112,7 +116,7 @@ def hello_frame() -> str:
 
 
 def base_state_frame(sequence: int, **overrides) -> str:
-    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "lidar_state": "READY", "lidar_scan_age": 0.1, "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,

@@ -15,12 +15,12 @@ from app.main import create_app
 from app.protocol.envelope import encode
 from app.settings import Settings
 
-ALL_CAPS = ("undock", "charge_release", "motor_enable", "map_context_v1")
+ALL_CAPS = ("undock", "charge_release", "motor_enable", "motor_disable", "map_context_v1")
 
 
 def facts(**overrides) -> gates.StateFacts:
     """A robot sitting on its dock, charging, everything healthy."""
-    base = dict(online=True, link_connected=True, telemetry_age=0.1,
+    base = dict(lidar_state="READY", lidar_scan_age=0.1, online=True, link_connected=True, telemetry_age=0.1,
                 base_state_age=0.1, pose_age=0.1,
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
@@ -57,24 +57,18 @@ def test_charging_with_motors_on_is_not_a_deadlock():
     leaving an operator with two refusals pointing at each other."""
     stuck = facts(charge_state="charging", motors_enabled=True)
     assert gates.charge_release_reason(stuck) is None
-    assert "release charging" in (gates.motor_enable_reason(stuck) or "").lower()
+    assert gates.motor_enable_reason(stuck) is None
     # Whatever else changes, at least one of the two must always be actionable.
     assert None in (gates.charge_release_reason(stuck), gates.motor_enable_reason(stuck))
 
 
-def test_motor_enable_needs_charge_released_first():
-    reason = gates.motor_enable_reason(facts(charge_state="charging"))
-    assert reason is not None and "release charging" in reason.lower()
+def test_motor_enable_request_leaves_charge_interlocks_to_the_base():
+    assert gates.motor_enable_reason(facts(charge_state="charging")) is None
     assert gates.motor_enable_reason(facts(charge_state="docked")) is None
 
 
 @pytest.mark.parametrize("overrides, fragment", [
-    ({"estop_pressed": True}, "emergency stop"),
-    ({"motors_enabled": True}, "already on"),
-    ({"stationary": False}, "still moving"),
-    ({"navigating": True}, "stop it before enabling"),
     ({"capabilities": ("undock",)}, "not available"),
-    ({"fault_flags": 1}, "fault"),
 ])
 def test_motor_enable_refusals(overrides, fragment):
     reason = gates.motor_enable_reason(facts(charge_state="docked", **overrides))
@@ -158,7 +152,8 @@ def test_missing_telemetry_fails_closed():
     """No base_state at all: every gate refuses rather than assuming healthy."""
     blank = gates.facts_from_state("online", None, None, list(ALL_CAPS))
     for command in gates.GATES:
-        assert gates.rejection_reason(command, blank) is not None
+        if command not in {"motor_enable", "motor_disable"}:
+            assert gates.rejection_reason(command, blank) is not None
 
 
 def test_ungated_commands_pass_through():
@@ -259,7 +254,7 @@ def hello_frame(capabilities=ALL_CAPS) -> str:
 
 
 def base_state_frame(sequence: int, **overrides) -> str:
-    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+    data = {"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "lidar_state": "READY", "lidar_scan_age": 0.1, "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -344,7 +339,7 @@ def test_undock_forwarded_straight_from_charging(client):
             assert forwarded["data"]["command_id"] == command_id
 
 
-def test_motor_enable_rejected_while_charging(client):
+def test_motor_enable_request_reaches_authoritative_base_while_charging(client):
     """The Advanced motor-enable action keeps its own interlock: motors must
     not go live on the charger."""
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
@@ -354,11 +349,11 @@ def test_motor_enable_rejected_while_charging(client):
         robot.send_text(pose_frame(2))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            _, frame = command_frame("motor_enable")
+            command_id, frame = command_frame("motor_enable")
             ui.send_text(frame)
-            ack = recv_until(ui, "command.ack")
-            assert ack["data"]["accepted"] is False
-            assert "release charging" in ack["data"]["reason"].lower()
+            forwarded = json.loads(robot.receive_text())
+            assert forwarded["data"]["command"] == "motor_enable"
+            assert forwarded["data"]["command_id"] == command_id
 
 
 def test_undock_rejected_when_robot_does_not_advertise_it(client):
@@ -394,7 +389,7 @@ def test_undock_rejected_while_moving(client):
 
 def test_gated_rejection_is_audited(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
-        robot.send_text(hello_frame())
+        robot.send_text(hello_frame(capabilities=("undock",)))
         robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="charging"))
         robot.send_text(pose_frame(2))
@@ -661,3 +656,26 @@ def test_spatial_commands_require_coordinated_map_interface(client, command, cas
             ack = recv_until(ui, 'command.ack')['data']
             assert not ack['accepted']
             assert fragment in ack['reason']
+
+
+@pytest.mark.parametrize("charge", ["float", "bulk", "overcharge"])
+def test_confirmed_clear_dock_overrides_latched_charger_value(charge):
+    clear = facts(charge_state=charge, dock_state="CLEAR_CONFIRMED", dock_state_valid=True)
+    assert not clear.charging
+    assert gates.motor_enable_reason(clear) is None
+    assert "nothing to release" in gates.charge_release_reason(clear)
+
+
+@pytest.mark.parametrize("valid", [False, None])
+def test_invalid_dock_observer_does_not_clear_charge_inhibit(valid):
+    assert facts(charge_state="float", dock_state="CLEAR_CONFIRMED", dock_state_valid=valid).charging
+
+
+def test_motor_enable_request_does_not_depend_on_map_pose():
+    assert gates.motor_enable_reason(facts(charge_state="not_charging", stationary=False, pose_age=None)) is None
+
+
+def test_motor_disable_request_ignores_motion_faults_and_missing_telemetry():
+    assert gates.rejection_reason("motor_disable", facts(stationary=False, navigating=True,
+        estop_pressed=True, fault_flags=4, link_connected=False, hardware_state_valid=False,
+        telemetry_age=999, base_state_age=None, pose_age=None, lidar_state="OFF")) is None

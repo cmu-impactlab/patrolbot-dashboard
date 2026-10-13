@@ -1,3 +1,4 @@
+import { useLidarReadyReason } from "../../lib/lidar";
 import { sameMap } from "../../lib/mapContext";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, Crosshair, Layers, LockKeyhole, Maximize, Minus, Plus } from "lucide-react";
@@ -298,6 +299,13 @@ export function LiveMapWidget() {
   const [viewedMap, setViewedMap] = useState("cmuq-floor2");
   const catalog = useMapsQuery();
   const activeMap = useTelemetryStore(state => state.baseState);
+  const lidarPending = useCommandStore(state => state.lidarPending);
+  const lidarRecoveryRequired = useCommandStore(state => state.lidarRecoveryRequired);
+  const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
+  const baseAt = useTelemetryStore(state => state.baseStateAt);
+  const waitingForState = lidarStateAfter !== null && (baseAt === null || baseAt <= lidarStateAfter);
+  const mapLidarReason = useLidarReadyReason(activeMap, useTelemetryStore(state => state.baseStateAt))
+    ?? (lidarPending !== null ? "LiDAR power is pending or its outcome is unknown. Wait for its result." : lidarRecoveryRequired ? "LiDAR power recovery is required. Make a new explicit power request first." : waitingForState ? "Waiting for fresh LiDAR state after the power command." : null);
   const mapQuery = useMapQuery(mapVersion, viewedMap);
   const followRobot = useUiStore((state) => state.followRobot);
   const setFollowRobot = useUiStore((state) => state.setFollowRobot);
@@ -309,6 +317,7 @@ export function LiveMapWidget() {
   // Last drawn scene signature; identical means there is nothing new to paint.
   const signatureRef = useRef<string>("");
   const [panning, setPanning] = useState(false);
+  const [measuredPose, setMeasuredPose] = useState(false);
   const gesture = useRef(new MapGesture());
   const fullscreen = useUiStore(state => state.fullscreenWidget === "liveMap");
   const [interacting, setInteracting] = useState(fullscreen);
@@ -399,6 +408,7 @@ export function LiveMapWidget() {
 
   useEffect(() => {
     clear();
+    setMeasuredPose(false);
     if (pickMode !== "none") { setInteracting(true); setFollowRobot(false); }
   }, [pickMode, online, mapVersion, robotId, fullscreen, user, baseSession]);
   useEffect(() => {
@@ -451,7 +461,8 @@ export function LiveMapWidget() {
     const reason = mapCommandReason(selection.mode);
     if (reason) { setError(reason); return; }
     clear(); // Consume before sending: repeated taps cannot resubmit.
-    useCommandStore.getState().send(selection.mode === "goal" ? "navigate_to_pose" : "set_initial_pose", selection.goal);
+    useCommandStore.getState().send(selection.mode === "goal" ? "navigate_to_pose" : "set_initial_pose", selection.goal, false, undefined, selection.mode === "initialpose" && measuredPose ? "measured" : undefined);
+    setMeasuredPose(false);
   };
   const onPointerUp = (event: React.PointerEvent) => {
     const selectable = gesture.current.up(event.pointerId);
@@ -471,7 +482,7 @@ export function LiveMapWidget() {
     // pointer losing capture invalidates the gesture; it never submits.
     if (gesture.current.pointers.has(event.pointerId)) clear();
   };
-  const done = () => { clear(); setInteracting(false); useCommandStore.getState().setPickMode("none"); };
+  const done = () => { clear(); setMeasuredPose(false); setInteracting(false); useCommandStore.getState().setPickMode("none"); };
 
   const zoomButtons = (factor: number) => {
     const canvas = canvasRef.current;
@@ -516,7 +527,7 @@ export function LiveMapWidget() {
           aria-pressed={viewedMap === floor.map_id}
           style={{ outline: viewedMap === floor.map_id ? "2px solid var(--info)" : undefined,
             color: sameMap(activeMap, floor) ? "var(--cmu-red)" : undefined }}
-          onClick={() => { clear(); useCommandStore.getState().setPickMode("none");
+          onClick={() => { clear(); setMeasuredPose(false); useCommandStore.getState().setPickMode("none");
             viewRef.current = null; bitmapRef.current = null; signatureRef.current = "";
             setFollowRobot(false); setViewedMap(floor.map_id!); }}>
           {floor.name}{sameMap(activeMap, floor) ? (online ? " ● Active" : " ● Last known (stale)") : ""}
@@ -526,7 +537,10 @@ export function LiveMapWidget() {
           style={{ opacity: 0.5, cursor: "not-allowed" }}>
           <LockKeyhole size={14} aria-hidden="true" /> Floor 3 — Map unavailable
         </button>
-      </div><button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
+      </div>{pickMode === "initialpose" && <label><input type="checkbox" checked={measuredPose}
+        onChange={event => setMeasuredPose(event.target.checked)} /> Measured position and heading
+        <span> — use only after physically measuring both.</span></label>}
+      <button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
         {pickMode !== "none" && !pending && <p className="map-pick-help">Touch: tap, adjust heading, then confirm. Mouse: release to send.</p>}
       </div>
       {pending && <div className="map-confirm" role="region" aria-label="Confirm map selection">
@@ -539,8 +553,9 @@ export function LiveMapWidget() {
           }} />
         </label>
         {error && <p role="alert">{error}</p>}
+        {mapLidarReason && <p role="status">{mapLidarReason}</p>}
         <div className="actions"><button className="btn" onClick={done}>Cancel</button>
-          <button className="btn primary" onClick={() => { if (pendingRef.current) submit(pendingRef.current); }}>{pending.mode === "goal" ? "Send destination" : "Set location"}</button></div>
+          <button className="btn primary" disabled={mapLidarReason !== null} title={mapLidarReason ?? undefined} onClick={() => { if (pendingRef.current) submit(pendingRef.current); }}>{pending.mode === "goal" ? "Send destination" : "Set location"}</button></div>
       </div>}
       {fullscreen && !pending && pickMode === "none" && <MapCommandFeedback />}
       {!pending && error && <div className="map-confirm" role="alert">{error}</div>}

@@ -28,9 +28,10 @@ def test_goal_status_mapping():
     assert map_goal_status(0) == "failed"  # unknown codes fail closed
 
 
-GOOD_BASE = {"estop_pressed": False, "motors_enabled": True,
+GOOD_BASE = {"lidar_state": "READY", "lidar_scan_age": 0.1, "estop_pressed": False, "motors_enabled": True,
              "hardware_state_valid": True, "link_connected": True,
-             "telemetry_age": 0.1, "fault_flags": 0,
+             "lidar_state": "READY", "lidar_scan_age": 0.1,
+        "telemetry_age": 0.1, "fault_flags": 0,
              "odom_epoch_valid": True,
              "localization_recovery_required": False,
              "localization_seed_stamp_ns": 100}
@@ -56,7 +57,7 @@ def test_precheck_fails_closed_without_base_state():
     assert nav(None) is not None
     # stop and set_initial_pose don't move the robot — allowed regardless.
     assert precheck("stop", None, None) is None
-    assert precheck("set_initial_pose", {"x": 1, "y": 2}, None) is None
+    assert precheck("set_initial_pose", {"x": 1, "y": 2}, None) is not None
 
 
 def test_precheck_refuses_navigate_without_localization():
@@ -104,7 +105,7 @@ def test_set_initial_pose_keeps_existing_independent_guards():
                  localization_recovery_required=True,
                  localization_seed_stamp_ns=0)
     assert precheck("set_initial_pose", {"x": 1, "y": 2}, stale,
-                    localized=False, base_state_age=99.0) is None
+                    localized=False, base_state_age=.1) is None
 
 
 def test_precheck_refuses_navigate_on_stale_or_faulted_base():
@@ -465,6 +466,7 @@ def _navigable_base_state() -> dict:
     """Off the charger, motors live, telemetry fresh and valid."""
     return {
         "link_connected": True,
+        "lidar_state": "READY", "lidar_scan_age": 0.1,
         "telemetry_age": 0.1,
         "hardware_state_valid": True,
         "fault_flags": 0,
@@ -591,3 +593,56 @@ def test_stop_during_map_transaction_acknowledges_cancellation_and_hold():
     executor._check_map_connection.assert_called_once_with(cancel=True)
     executor._ack.assert_called_once_with("stop", True)
     assert executor._result.call_args.args[1] == "succeeded"
+
+
+def test_measured_seed_action_preserves_world_pose_and_uses_measured_covariance():
+    from unittest.mock import Mock
+    def pose_message():
+        return SimpleNamespace(header=SimpleNamespace(frame_id='',stamp=None),pose=SimpleNamespace(
+            pose=SimpleNamespace(position=SimpleNamespace(x=0.,y=0.),orientation=SimpleNamespace(x=0.,y=0.,z=0.,w=0.)),covariance=[0.]*36))
+    for profile, expected in [(None,(.25,.25,.0685)),('measured',(.0009,.0009,.00030461742))]:
+        executor=CommandExecutor.__new__(CommandExecutor)
+        executor._PoseWithCovarianceStamped=pose_message
+        executor._LocalizeOnMap=SimpleNamespace(Goal=SimpleNamespace)
+        executor._node=SimpleNamespace(get_clock=lambda:SimpleNamespace(now=lambda:SimpleNamespace(to_msg=lambda:123)))
+        executor._active=None
+        executor._map_client=SimpleNamespace(server_is_ready=lambda:True,send_goal_async=Mock(return_value=SimpleNamespace(add_done_callback=lambda cb:None)))
+        executor._set_initial_pose('measured-request',{'map_id':'floor','map_revision':'v1','x':-3.25,'y':8.5,'yaw':math.pi/2},True,profile)
+        request=executor._map_client.send_goal_async.call_args.args[0]
+        assert request.measured_pose is (profile=='measured')
+        assert (request.pose.pose.position.x,request.pose.pose.position.y)==(-3.25,8.5)
+        assert math.isclose(2*math.atan2(request.pose.pose.orientation.z,request.pose.pose.orientation.w),math.pi/2)
+        assert tuple(request.pose.covariance[i] for i in (0,7,35))==expected
+
+
+def test_invalid_seed_profile_is_rejected_before_action_dispatch():
+    from unittest.mock import Mock
+    for command,profile in [('set_initial_pose','tight'),('navigate_to_pose','measured')]:
+        executor=CommandExecutor.__new__(CommandExecutor)
+        executor._ack=Mock()
+        executor.handle({'command_id':'invalid-profile','command':command,'seed_profile':profile},None,None)
+        executor._ack.assert_called_once_with('invalid-profile',False,'Invalid measured seed profile.')
+
+
+def test_authorized_override_reports_correlated_navigation_result_without_logger_crash():
+    from unittest.mock import Mock
+    e = CommandExecutor.__new__(CommandExecutor)
+    e._ws = _Ws()
+    e._active = e._undock_active = e._map_active = None
+    e._node = SimpleNamespace(get_logger=lambda: SimpleNamespace(warning=lambda message: None),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: 1)))
+    e._NavigateToPose = SimpleNamespace(Goal=lambda: SimpleNamespace(pose=SimpleNamespace(
+        header=SimpleNamespace(), pose=SimpleNamespace(position=SimpleNamespace(), orientation=SimpleNamespace()))))
+    goal_handle = SimpleNamespace(accepted=True, get_result_async=lambda: _Future(SimpleNamespace(status=4)))
+    e._nav_client = SimpleNamespace(server_is_ready=lambda: True,
+        send_goal_async=Mock(return_value=_Future(goal_handle)))
+    goal = {"map_id": "floor", "map_revision": "r1", "x": -3.25, "y": 8.5, "yaw": 1.2}
+    e.handle({"command_id": "override-result", "command": "navigate_to_pose", "goal": goal,
+        "allow_unlocalized": True, "operator_authorized": True},
+        dict(_navigable_base_state(), map_id="floor", map_revision="r1"),
+        current_yaw=0.0, localized=False, base_state_age=0.1, odom_age=0.1)
+    assert e._ws.results("override-result") == [{"command_id": "override-result", "outcome": "succeeded",
+        "detail": "Arrived at the destination."}]
+    assert e._active is None
+    sent_goal = e._nav_client.send_goal_async.call_args.args[0]
+    assert (sent_goal.pose.pose.position.x, sent_goal.pose.pose.position.y) == (-3.25, 8.5)
