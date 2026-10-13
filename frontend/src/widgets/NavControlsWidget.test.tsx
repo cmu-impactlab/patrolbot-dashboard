@@ -361,6 +361,17 @@ describe("motor power requests", () => {
     fireEvent.click(button);
     expect(sent).toEqual(["motor_disable"]);
   });
+  it.each(["missing", "stale off"])("keeps disable available with %s motor telemetry", (state) => {
+    setState(state === "missing" ? null : baseState({ motors_enabled: false }), null);
+    if (state === "stale off") useTelemetryStore.setState({ baseStateAt: performance.now() - 16_000 });
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(sent).toEqual(["motor_disable"]);
+  });
   it("takes the target from fresh readback after opening enable confirmation", () => {
     setState(baseState({ charge_state: "not_charging" }));
     const sent: string[] = [];
@@ -371,4 +382,14 @@ describe("motor power requests", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm motor enable" }));
     expect(sent).toEqual([]);
   });
+});
+
+
+it("keeps Stop and motor disable available while LiDAR is off", () => {
+  setState(baseState({ lidar_state: "OFF", lidar_scan_age: -1, motors_enabled: true }));
+  useCommandStore.setState({ active: null, lidarPending: "power-unknown", lidarRecoveryRequired: true, lidarStateAfter: null });
+  render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Stop Robot" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement).disabled).toBe(false);
+  cleanup();
 });

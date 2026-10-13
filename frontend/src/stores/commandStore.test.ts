@@ -360,3 +360,15 @@ it("preserves the explicit measured profile through operator takeover", () => {
   for (const frame of sent) expect(JSON.parse(frame).data.seed_profile).toBe("measured");
   expect(JSON.parse(sent[1]).data.takeover).toBe(true);
 });
+
+
+it("motor disable bypasses LiDAR uncertainty and discards saved movement", () => {
+  const sent: string[] = [];
+  registerCommandSender(frame => { sent.push(frame); return true; });
+  useCommandStore.setState({ active: null, lidarPending: "unknown", lidarRecoveryRequired: true, lidarStateAfter: performance.now(),
+    stoppedGoal: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 }, allowUnlocalized: true });
+  useCommandStore.getState().send("motor_disable");
+  expect(JSON.parse(sent[0]).data.command).toBe("motor_disable");
+  expect(useCommandStore.getState().stoppedGoal).toBeNull();
+  expect(useCommandStore.getState().allowUnlocalized).toBe(false);
+});

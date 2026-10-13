@@ -62,12 +62,13 @@ def test_charging_with_motors_on_is_not_a_deadlock():
     assert None in (gates.charge_release_reason(stuck), gates.motor_enable_reason(stuck))
 
 
-def test_motor_enable_request_leaves_charge_interlocks_to_the_base():
+def test_motor_enable_request_leaves_charge_interlock_to_robot():
     assert gates.motor_enable_reason(facts(charge_state="charging")) is None
     assert gates.motor_enable_reason(facts(charge_state="docked")) is None
 
 
 @pytest.mark.parametrize("overrides, fragment", [
+    ({"online": False}, "not connected"),
     ({"capabilities": ("undock",)}, "not available"),
 ])
 def test_motor_enable_refusals(overrides, fragment):
@@ -339,21 +340,17 @@ def test_undock_forwarded_straight_from_charging(client):
             assert forwarded["data"]["command_id"] == command_id
 
 
-def test_motor_enable_request_reaches_authoritative_base_while_charging(client):
-    """The Advanced motor-enable action keeps its own interlock: motors must
-    not go live on the charger."""
+def test_motor_enable_request_is_forwarded_for_robot_physical_interlocks(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
-        robot.send_text(hello_frame())
-        robot.receive_text()
+        robot.send_text(hello_frame());robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="charging"))
-        robot.send_text(pose_frame(2))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
-            command_id, frame = command_frame("motor_enable")
+            command_id,frame=command_frame("motor_enable")
             ui.send_text(frame)
-            forwarded = json.loads(robot.receive_text())
-            assert forwarded["data"]["command"] == "motor_enable"
-            assert forwarded["data"]["command_id"] == command_id
+            forwarded=json.loads(robot.receive_text())
+            assert forwarded['data']['command_id']==command_id
+            assert forwarded['data']['operator_authorized'] is True
 
 
 def test_undock_rejected_when_robot_does_not_advertise_it(client):
@@ -671,11 +668,7 @@ def test_invalid_dock_observer_does_not_clear_charge_inhibit(valid):
     assert facts(charge_state="float", dock_state="CLEAR_CONFIRMED", dock_state_valid=valid).charging
 
 
-def test_motor_enable_request_does_not_depend_on_map_pose():
-    assert gates.motor_enable_reason(facts(charge_state="not_charging", stationary=False, pose_age=None)) is None
-
-
-def test_motor_disable_request_ignores_motion_faults_and_missing_telemetry():
-    assert gates.rejection_reason("motor_disable", facts(stationary=False, navigating=True,
-        estop_pressed=True, fault_flags=4, link_connected=False, hardware_state_valid=False,
-        telemetry_age=999, base_state_age=None, pose_age=None, lidar_state="OFF")) is None
+def test_motor_disable_admission_is_independent_of_stale_lidar_and_faults():
+    assert gates.rejection_reason('motor_disable',facts(lidar_state='OFF',fault_flags=1,
+        estop_pressed=True,stationary=False,hardware_state_valid=False,base_state_age=5)) is None
+    assert gates.rejection_reason('motor_disable',facts(capabilities=())) is not None

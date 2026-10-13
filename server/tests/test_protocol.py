@@ -37,6 +37,43 @@ def test_pose_rejects_non_finite(bad):
         decode(frame)
 
 
+def test_legacy_pose_uncertainty_fields_are_unavailable():
+    _, pose = decode(encode("telemetry.pose", "r", 1, {
+        "x": 0, "y": 0, "yaw": 0, "linear_velocity": 0, "angular_velocity": 0,
+    }))
+    assert pose.planar_covariance is None
+    assert pose.covariance_limit is None
+    assert pose.localization_age_s is None
+    assert pose.localization_max_age_s is None
+
+
+def test_pose_uncertainty_nullable_diagonal_round_trip():
+    _, pose = decode(encode("telemetry.pose", "r", 1, {
+        "x": 0, "y": 0, "yaw": 0, "linear_velocity": 0, "angular_velocity": 0,
+        "planar_covariance": [0.01, None, -1e-9], "covariance_limit": 0.25,
+        "localization_age_s": 12.5, "localization_max_age_s": 30,
+    }))
+    assert pose.planar_covariance == (0.01, None, -1e-9)
+    assert pose.covariance_limit == 0.25
+    assert pose.localization_age_s == 12.5
+    assert pose.localization_max_age_s == 30
+
+
+@pytest.mark.parametrize("fields", [
+    {"planar_covariance": [0.1, 0.1]},
+    {"planar_covariance": [0.1, float("inf"), 0.1]},
+    {"covariance_limit": float("nan")},
+    {"localization_age_s": float("inf")},
+    {"localization_max_age_s": float("nan")},
+])
+def test_pose_rejects_malformed_uncertainty_fields(fields):
+    with pytest.raises(ProtocolError):
+        decode(encode("telemetry.pose", "r", 1, {
+            "x": 0, "y": 0, "yaw": 0, "linear_velocity": 0, "angular_velocity": 0,
+            **fields,
+        }))
+
+
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("field", ["voltage", "current", "percentage"])
 def test_battery_rejects_non_finite(field, bad):

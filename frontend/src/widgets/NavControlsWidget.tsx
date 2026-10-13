@@ -96,7 +96,8 @@ export function NavControlsWidget() {
   const motorEnableBusy = active?.command === "motor_enable";
   const motorDisableBusy = active?.command === "motor_disable";
   const motorEnableUiReason = !wsConnected ? "The robot is not connected right now." : motorEnableReason(facts);
-  const motorUiReason = motorsEnabled ? (!wsConnected ? "The robot is not connected right now." : motorDisableReason(facts)) : motorEnableUiReason;
+  const motorDisableUiReason = !wsConnected ? "The robot is not connected right now." : motorDisableReason(facts);
+  const motorUiReason = motorsEnabled ? motorDisableUiReason : motorEnableUiReason;
   const softwareResetBlockedReason = softwareResetReason(facts);
   const softwareResetUiReason = softwareResetBlockedReason ?? (active?.command === "software_reset"
     ? "Wait for the current command to finish before resetting software."
@@ -186,6 +187,14 @@ export function NavControlsWidget() {
           <Power size={15} />
           {motorsEnabled ? (motorDisableBusy ? "Turning motors off…" : "Turn motors off") : (motorEnableBusy ? "Turning motors on…" : "Turn motors on")}
         </button>
+        {!motorsEnabled && (!baseFresh || !baseState) && <button
+          className="btn danger"
+          disabled={!mayCommand || motorDisableUiReason !== null || motorDisableBusy}
+          onClick={() => send("motor_disable")}
+          title={motorDisableUiReason ?? "Disable drive power when motor state is unavailable"}
+        >
+          <Power size={15} /> {motorDisableBusy ? "Turning motors off…" : "Turn motors off"}
+        </button>}
         <p className="nav-advanced-note">
           Motor power is separate from movement and localization. The robot checks physical safety before enabling; turning motors off remains available during movement and faults.
         </p>

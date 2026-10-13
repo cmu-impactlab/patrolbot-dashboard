@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { dashboardFixture } from "./fixtures";
+import { dashboardFixture, READY_BASE_STATE } from "./fixtures";
 
 async function menu(page: import("@playwright/test").Page) {
   // App hydration can finish after page.goto's load event. Wait for the
@@ -283,7 +283,7 @@ test("charging actions retain touch confirmations and visible rejection reasons"
   const fixture = await dashboardFixture(page);
   await page.goto("/");
   await expect(page.getByRole("button",{name:"Set Robot Location",exact:true})).toBeEnabled();
-  const base = {session_generation:1,link_connected:true,telemetry_age:0.1,hardware_state_valid:true,charge_state:"not_charging",motors_enabled:false,estop_pressed:false,fault_flags:0,stall_value:0,bumpers_front:false,bumpers_rear:false,bumpers_valid:true};
+  const base = {...READY_BASE_STATE,session_generation:1,link_connected:true,telemetry_age:0.1,hardware_state_valid:true,charge_state:"not_charging",motors_enabled:false,estop_pressed:false,fault_flags:0,stall_value:0,bumpers_front:false,bumpers_rear:false,bumpers_valid:true};
   fixture.send("state.capabilities",{capabilities:["motor_enable","undock"]});
   fixture.send("telemetry.base_state",base);
   const nav = page.locator('[data-tour="widget-navControls"]');

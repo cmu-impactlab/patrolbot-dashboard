@@ -48,6 +48,12 @@ class PoseData(MapContext):
     linear_velocity: float
     angular_velocity: float
     covariance_trace: float | None = None
+    # AMCL xx, yy (m²), yaw variance (rad²). Null entries retain invalidity
+    # without putting NaN/Inf in JSON or rounding a small variance to zero.
+    planar_covariance: tuple[float | None, float | None, float | None] | None = None
+    covariance_limit: float | None = None
+    localization_age_s: float | None = None
+    localization_max_age_s: float | None = None
     # Absent means "the robot did not say", which the motion gates must read as
     # "not localized" — every real producer sends it explicitly.
     localized: bool = False

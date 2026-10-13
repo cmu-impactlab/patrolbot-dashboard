@@ -31,7 +31,7 @@ and vitest; edit fixtures together with both definitions.
 |------|------|-----------------|
 | `robot.hello` | on connect (first frame) | `protocol_version`, `capabilities[]`, `map_version`, `software_version` |
 | `telemetry.heartbeat` | 1 Hz | `uptime_s` |
-| `telemetry.pose` | 10 Hz | `frame_id`, `x`, `y`, `yaw`, `linear_velocity`, `angular_velocity`, `covariance_trace?`, `localized` |
+| `telemetry.pose` | 10 Hz | `frame_id`, `x`, `y`, `yaw`, `linear_velocity`, `angular_velocity`, `covariance_trace?`, `planar_covariance?`, `covariance_limit?`, `localization_age_s?`, `localization_max_age_s?`, `localized` |
 | `telemetry.lidar` | 5 Hz | `angle_min`, `angle_increment`, `ranges[]` (≤360, metres, `null` = no return) |
 | `telemetry.path` | on change / 2 Hz | `frame_id`, `points[[x,y],…]`, `goal?{x,y,yaw}` |
 | `telemetry.battery` | 1 Hz | `voltage`, `current?`, `percentage?`, `charging` |
@@ -42,6 +42,26 @@ and vitest; edit fixtures together with both definitions.
 
 Server replies to `robot.hello` with `server.hello_ack` (`data.want_map: bool`).
 The robot sends `telemetry.map` when `want_map` is true or the map changes.
+
+`telemetry.pose.planar_covariance` optionally carries unrounded `[xx, yy, yaw_yaw]`:
+the position entries are m² and the heading entry is rad². A non-finite entry is
+`null`; absent/null arrays mean no filter covariance is available. Zero or
+negative entries are degenerate. The dashboard displays the largest map-axis
+spread `sqrt(max(xx, yy))` in metres and heading spread `sqrt(yaw_yaw)` in degrees
+(both 1σ), never a measured error radius, probability, or pose accuracy.
+`covariance_limit` is the effective dashboard bridge threshold, applied
+separately to each variance. The signed dashboard variance margins are
+`100 * (1 - max(xx, yy) / covariance_limit)` and
+`100 * (1 - yaw_yaw / covariance_limit)`; over-limit values stay negative.
+Missing or invalid thresholds make the margins unavailable.
+
+`localization_age_s` is time since the bridge last received an AMCL estimate;
+`localization_max_age_s` is its current dashboard freshness threshold. Browsers
+add elapsed monotonic receipt time, including a snapshot's existing slice age.
+The display suppresses numeric estimates when the source is odometry, covariance
+is invalid/degenerate, the refresh age is unknown/invalid/stale, or receipt age
+exceeds the existing 15-second display policy. Dock Manager's separate 0.5-second
+freshness policy and the authoritative `localized` verdict are unchanged.
 
 ## Server → Browser  (`/ws/ui`)
 
@@ -66,7 +86,7 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/undock/software_reset/set_lidar_power, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/motor_disable/undock/software_reset/set_lidar_power, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
@@ -86,7 +106,7 @@ Server-side broker rules:
 - There is **no velocity teleop command** — goal-based navigation only, by
   design. The physical e-stop is the only emergency stop. `undock` included:
   it is an action the robot executes, never browser-published velocity.
-- `navigate_to_pose`, `charge_release`, `motor_enable` and `undock` are
+- `navigate_to_pose`, `charge_release` and `undock` are
   additionally gated on live hardware telemetry
   (`server/app/commands/gates.py`) before they are forwarded: readings must be
   fresh and valid, faults and E-stop clear, and `undock` requires the robot to
@@ -107,11 +127,10 @@ Server-side broker rules:
   capability nothing implements.
   `charge_release` remains a robot-side and diagnostic command (zero-motion and
   motor-disabled); the dashboard UI does not send it. `motor_enable` is an
-  explicit, confirmation-gated Advanced dashboard action that refuses while
-  charging, while moving, during active navigation, or when hardware
-  telemetry/capability is unsafe or unavailable. The UI mirrors these rules in
-  `frontend/src/lib/dockGates.ts` to grey out the control and explain why;
-  the server decision is the authoritative one.
+  explicit, confirmed dashboard motor-power request. The browser and server
+  require connection, capability and operator authorization; the robot's typed
+  service enforces physical enable interlocks. `motor_disable` remains available
+  during motion or recovery and cancels outstanding movement.
 - The bridge executes commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1`;
   otherwise it acks `accepted=false` with an explanatory reason.
 
@@ -205,3 +224,15 @@ and diagonal covariance x/y `0.0009`, yaw `0.00030461742`. Omission preserves
 the coarse covariance `0.25`, `0.25`, `0.0685`. Map coordinates and yaw remain
 in the map frame; the profile changes no coordinate conversion or safety gate.
 The command audit records the requested profile alongside the goal.
+
+### Motor power requests
+
+`motor_disable` requests the typed robot service and cancels outstanding movement;
+it stays available to authorized operators during motion, faults, LiDAR recovery,
+and reset uncertainty. It clears the dashboard's saved destination and override.
+Motor enable remains an explicit confirmed request; the robot owns physical
+interlocks and refuses re-enabling while prior movement cancellation is unfinished.
+Neither motor command sends a velocity or goal, or establishes localization.
+Service results retain request correlation; disable success also requires a
+motors-disabled readback. These repairs were recovered from the saved deployment
+source and web-bridge image, not inferred from mock behavior.
