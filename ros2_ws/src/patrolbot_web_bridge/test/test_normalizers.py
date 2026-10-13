@@ -42,6 +42,40 @@ def test_pose_degrades_to_odom_unlocalized():
     pose = normalizers.normalize_pose(None, make_odom())
     assert pose["frame_id"] == "odom"
     assert pose["localized"] is False
+    assert pose["planar_covariance"] is None
+
+
+def test_pose_forwards_unrounded_planar_covariance_and_effective_bridge_policy():
+    amcl = make_amcl()
+    covariance = [0.2238, 0.2453, 1e-12]
+    for index, value in zip((0, 7, 35), covariance):
+        amcl.pose.covariance[index] = value
+    pose = normalizers.normalize_pose(amcl, make_odom(), covariance_warn=0.5,
+                                     localization_age_s=29.5, localization_max_age_s=30)
+    assert pose["planar_covariance"] == covariance
+    assert pose["covariance_limit"] == 0.5
+    assert pose["localization_age_s"] == 29.5
+    assert pose["localization_max_age_s"] == 30
+    assert json.loads(json.dumps(pose, allow_nan=False)) == pose
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+def test_nonfinite_covariance_remains_explainable_in_strict_json(bad):
+    amcl = make_amcl()
+    amcl.pose.covariance[7] = bad
+    pose = normalizers.normalize_pose(amcl, make_odom())
+    assert pose["planar_covariance"] == [0.01, None, 0.01]
+    assert pose["covariance_trace"] is None
+    assert pose["localized"] is False
+    assert json.loads(json.dumps(pose, allow_nan=False)) == pose
+
+
+def test_finite_covariance_sum_overflow_keeps_the_pose_strict_json():
+    pose = normalizers.normalize_pose(make_amcl(var=1e308), make_odom())
+    assert pose["planar_covariance"] == [1e308] * 3
+    assert pose["covariance_trace"] is None
+    assert pose["localized"] is False
+    assert json.loads(json.dumps(pose, allow_nan=False)) == pose
 
 
 def test_pose_uncertain_when_covariance_high():

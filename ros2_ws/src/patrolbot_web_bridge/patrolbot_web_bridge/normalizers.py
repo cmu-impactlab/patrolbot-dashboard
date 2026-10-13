@@ -24,10 +24,10 @@ def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
-def _finite(value: float, digits: int = 3) -> float | None:
+def _finite(value: float, digits: int | None = 3) -> float | None:
     if value is None or not math.isfinite(value):
         return None
-    return round(value, digits)
+    return float(value) if digits is None else round(value, digits)
 
 
 def amcl_localization_usable(amcl_pose: Any, position_limit: float = 0.25) -> bool:
@@ -62,7 +62,9 @@ def amcl_localization_usable(amcl_pose: Any, position_limit: float = 0.25) -> bo
                for value in covariance)
 
 
-def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> dict:
+def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25,
+                   localization_age_s: float | None = None,
+                   localization_max_age_s: float | None = None) -> dict:
     """Pose from AMCL when available (map frame), else odom; twist from odom.
 
     Degrades gracefully when Nav2 localization is down: an odom-only pose is
@@ -75,11 +77,13 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> 
         # array is numpy-backed, so coerce to native Python types — a numpy
         # bool_ (or float64) here would break json.dumps downstream.
         trace = float(covariance[0] + covariance[7] + covariance[35])
+        planar = [_finite(covariance[index], None) for index in (0, 7, 35)]
         localized = amcl_localization_usable(amcl_pose, covariance_warn)
         frame = "map"
     elif odom is not None:
         pose = odom.pose.pose
         trace = None
+        planar = None
         localized = False
         frame = "odom"
     else:
@@ -94,7 +98,11 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25) -> 
         "yaw": round(quaternion_to_yaw(q.x, q.y, q.z, q.w), 4),
         "linear_velocity": round(twist.linear.x, 3) if twist else 0.0,
         "angular_velocity": round(twist.angular.z, 3) if twist else 0.0,
-        "covariance_trace": round(trace, 4) if trace is not None else None,
+        "covariance_trace": _finite(trace, 4),
+        "planar_covariance": planar,
+        "covariance_limit": _finite(covariance_warn, None),
+        "localization_age_s": _finite(localization_age_s, None),
+        "localization_max_age_s": _finite(localization_max_age_s, None),
         "localized": localized,
     }
 
@@ -223,7 +231,11 @@ def normalize_base_state(state: Any) -> dict:
     dock_state = str(getattr(state, "dock_state", "UNKNOWN")).strip().upper()
     if not dock_state_valid:
         dock_state = "UNKNOWN"
+    lidar_age = _finite(getattr(state, "lidar_scan_age", -1.0), 3)
     return {
+        "lidar_state": str(getattr(state, "lidar_state", "UNKNOWN")),
+        "lidar_power_supported": bool(getattr(state, "lidar_power_supported", False)),
+        "lidar_scan_age": lidar_age if lidar_age is not None else -1.0,
         "session_generation": int(state.session_generation),
         "link_connected": bool(state.link_connected),
         "telemetry_age": round(float(state.telemetry_age), 3),

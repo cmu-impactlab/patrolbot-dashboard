@@ -41,3 +41,6 @@ audit/
 frontend/test-results/
 frontend/playwright-report/
 frontend/test-results-mock/
+
+# Preserve local deployment snapshots without publishing them.
+/backups/

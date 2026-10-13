@@ -41,9 +41,13 @@ def test_ambiguous_submission_never_retries_or_releases_on_idle():
     c.transport=lambda *a:{'ok':True,'state':'idle'};c.poll()
     assert c.busy and len(calls)==1
 
-def test_terminal_uncertain_blocks_next_command():
+def test_terminal_uncertain_allows_only_a_new_explicit_reset():
     rid=str(uuid4());c,w=client(lambda *a:{'ok':True,'state':'uncertain','request_id':rid})
-    c.poll();assert c.busy and w.sent[-1][1]['outcome']=='timeout'
+    c.poll();assert not c.busy and c._uncertain and w.sent[-1][1]['outcome']=='timeout'
+    new=str(uuid4());c.request({'command_id':new,'operator_authorized':True})
+    assert c.busy and c.commands_blocked and c._requests.get_nowait()==new
+    c.request({'command_id':str(uuid4()),'operator_authorized':True})
+    assert w.sent[-1][1]['accepted'] is False
 
 def test_transport_bounds_reply(tmp_path):
     path=str(tmp_path/'socket');server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(path);server.listen()

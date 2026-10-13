@@ -237,6 +237,9 @@ class WebBridgeNode(Node):
         payload = normalizers.normalize_pose(
             self._latest_amcl, self._latest_odom,
             covariance_warn=float(self.cfg["covariance_warn_threshold"]),
+            localization_age_s=(self.get_clock().now().nanoseconds / 1e9 - self._latest_amcl_at
+                                if self._latest_amcl is not None else None),
+            localization_max_age_s=float(self.cfg["localization_max_age_s"]),
         )
         if payload and self._on_active_map(self._latest_amcl):
             # One definition of "localized", so the dashboard's navigation gate
@@ -408,7 +411,7 @@ class WebBridgeNode(Node):
                 else:
                     self._system_reset.request(data)
                 continue
-            if self._system_reset is not None and self._system_reset.busy and data.get("command") != "stop":
+            if self._system_reset is not None and self._system_reset.commands_blocked and data.get("command") != "stop":
                 self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
                     "accepted": False, "reason": "Software reset is pending or its outcome is unknown."})
                 continue

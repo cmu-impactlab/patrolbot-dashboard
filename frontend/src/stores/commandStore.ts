@@ -1,3 +1,4 @@
+import { lidarReadyReason } from "../lib/lidar";
 import { sameMap } from "../lib/mapContext";
 import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
@@ -37,10 +38,13 @@ export interface CommandResultInfo {
 /** Commands that hand the robot the ability to move, or take it away. A
  *  pending destination must not survive one — requiring a new, explicit
  *  operator action afterwards is the whole point. */
-const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "undock", "software_reset"];
+const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power"];
 
 interface CommandState {
   active: ActiveCommand | null;
+  lidarPending: string | null;
+  lidarRecoveryRequired: boolean;
+  lidarStateAfter: number | null;
   lastResult: CommandResultInfo | null;
   pickMode: PickMode;
   /** Where the robot was heading when the operator pressed Stop; offering
@@ -48,7 +52,7 @@ interface CommandState {
   stoppedGoal: GoalData | null;
   /** The most recent command intent, remembered so "Take over" can re-send it
    *  with the takeover flag after a single-operator-lease rejection. */
-  lastAttempt: { command: CommandType; goal?: GoalData; activeMap?: MapContext } | null;
+  lastAttempt: { command: CommandType; goal?: GoalData; activeMap?: MapContext; enabled?: boolean; seedProfile?: "measured" } | null;
   /** Operator override, armed under Advanced: send the next destination even
    *  though the robot reports it does not know where it is. Cleared as soon as
    *  it is used, so it can never be left switched on. */
@@ -58,7 +62,7 @@ interface CommandState {
   setAllowUnlocalized: (allow: boolean) => void;
   resetOverrides: () => void;
   connectionLost: () => void;
-  send: (command: CommandType, goal?: GoalData, takeover?: boolean) => void;
+  send: (command: CommandType, goal?: GoalData, takeover?: boolean, enabled?: boolean, seedProfile?: "measured") => void;
   stop: () => void;
   resume: () => void;
   cancel: () => void;
@@ -78,6 +82,9 @@ export function registerCommandSender(sender: ((frame: string) => boolean) | nul
 
 export const useCommandStore = create<CommandState>((set, get) => ({
   active: null,
+  lidarPending: null,
+  lidarRecoveryRequired: false,
+  lidarStateAfter: null,
   lastResult: null,
   pickMode: "none",
   stoppedGoal: null,
@@ -95,9 +102,9 @@ export const useCommandStore = create<CommandState>((set, get) => ({
 
   connectionLost: () => {
     const active = get().active;
-    if (active?.command === "software_reset") {
+    if (active?.command === "software_reset" || active?.command === "set_lidar_power") {
       set({ active: { ...active, phase: "running",
-        stage: "Connection lost — reset outcome is unknown. Waiting for the supervisor result; do not retry." } });
+        stage: "Connection lost — command outcome is unknown. Waiting for the robot result; do not retry." } });
     }
   },
 
@@ -107,7 +114,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     const telemetry = useTelemetryStore.getState();
     // Path telemetry can lag the acknowledged command. Keep the destination
     // actually sent, even when Stop arrives before the first path update.
-    const candidate = active?.command === "navigate_to_pose"
+    const candidate = get().lidarPending ? null : active?.command === "navigate_to_pose"
       ? active.goal ?? telemetry.path?.goal : telemetry.path?.goal;
     const goal = candidate && sameMap(candidate, telemetry.baseState) ? candidate : null;
     set({ stoppedGoal: goal ?? get().stoppedGoal });
@@ -137,10 +144,28 @@ export const useCommandStore = create<CommandState>((set, get) => ({
         detail: "The robot map changed. Select a new position before taking over." } });
       return;
     }
-    get().send(attempt.command, attempt.goal, true);
+    get().send(attempt.command, attempt.goal, true, attempt.enabled, attempt.seedProfile);
   },
 
-  send: (command, goal, takeover = false) => {
+  send: (command, goal, takeover = false, enabled, seedProfile) => {
+    const telemetry = useTelemetryStore.getState();
+    const lidarCommands = ["navigate_to_pose", "set_initial_pose", "undock", "charge_release"];
+    const reason = get().lidarPending !== null && command !== "stop" && command !== "software_reset" && command !== "motor_disable" && command !== "motor_enable"
+      ? "LiDAR power is pending or its outcome is unknown. Wait for the robot result."
+      : command !== "stop" && command !== "software_reset" && command !== "motor_disable" && command !== "motor_enable" && get().lidarStateAfter !== null && (telemetry.baseStateAt === null || telemetry.baseStateAt <= get().lidarStateAfter!)
+        ? "Waiting for fresh LiDAR state after the power command."
+      : get().lidarRecoveryRequired && lidarCommands.includes(command) ? "LiDAR power recovery is required. Make a new explicit power request first."
+      : lidarCommands.includes(command) ? lidarReadyReason(telemetry.baseState, telemetry.baseStateAt) : null;
+    if (reason || (command === "set_lidar_power" && typeof enabled !== "boolean")) {
+      set({ pickMode: "none", lastResult: { commandId: null, command, outcome: "rejected", at: Date.now(),
+        detail: reason ?? "LiDAR power requires an explicit target." } });
+      return;
+    }
+    if (command === "motor_disable") set({ stoppedGoal: null, allowUnlocalized: false });
+    if (command === "set_lidar_power") {
+      useTelemetryStore.setState({ poseSetThisSession: false });
+      set({ pickMode: "none", stoppedGoal: null, allowUnlocalized: false });
+    }
     if ((command === "navigate_to_pose" || command === "set_initial_pose") &&
         (!goal?.map_id || !goal.map_revision ||
          (command === "navigate_to_pose" && !sameMap(goal, useTelemetryStore.getState().baseState)))) {
@@ -173,7 +198,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({ stoppedGoal: null });
     }
     // Remember the intent so a lease rejection can be retried as a takeover.
-    set({ lastAttempt: { command, goal, activeMap: useTelemetryStore.getState().baseState ?? undefined } });
+    set({ lastAttempt: { command, goal, enabled, seedProfile, activeMap: useTelemetryStore.getState().baseState ?? undefined } });
     // Read the override once and disarm it. A takeover re-send of the same
     // destination therefore has to be armed again deliberately, which is the
     // point: the operator re-confirms driving on a fix the robot distrusts.
@@ -186,7 +211,8 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       sequence: ++sequence,
       timestamp: new Date().toISOString(),
       data: {
-        command_id: commandId, command, goal: goal ?? null, takeover,
+        command_id: commandId, command, goal: goal ?? null, takeover, enabled,
+        seed_profile: command === "set_initial_pose" ? seedProfile : undefined,
         allow_unlocalized: allowUnlocalized,
       },
     });
@@ -206,6 +232,9 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     set({
       pickMode: "none",
       allowUnlocalized: allowUnlocalized ? false : get().allowUnlocalized,
+      lidarPending: command === "software_reset" ? null : command === "set_lidar_power" ? commandId : get().lidarPending,
+      lidarRecoveryRequired: command === "software_reset" && get().lidarPending !== null ? true : get().lidarRecoveryRequired,
+      lidarStateAfter: command === "software_reset" ? null : get().lidarStateAfter,
       active: { commandId, command, phase: "sending", stage: null, distanceRemaining: null, goal },
     });
   },
@@ -218,13 +247,15 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       }
       return;
     }
+    const lidarReply = get().lidarPending === data.command_id;
+    if (lidarReply) set({ lidarPending: null });
     // Rejections may target a command this tab never sent (another operator's,
     // or a synthesized server rejection) — always surface the reason.
     set({
       active: active?.commandId === data.command_id ? null : active,
       lastResult: {
         commandId: data.command_id,
-        command: active?.command ?? "navigate_to_pose",
+        command: lidarReply ? "set_lidar_power" : active?.command ?? "navigate_to_pose",
         outcome: "rejected",
         detail: data.reason ?? "The command was not accepted.",
         at: Date.now(),
@@ -245,6 +276,14 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   },
 
   handleResult: (data) => {
+    if (get().lidarPending === data.command_id) {
+      if (data.outcome === "timeout") {
+        set({ lastResult: { commandId: data.command_id, command: "set_lidar_power", outcome: data.outcome, detail: data.detail ?? null, at: Date.now() } });
+        return;
+      }
+      set({ lidarPending: null, lidarRecoveryRequired: data.outcome !== "succeeded", lidarStateAfter: performance.now(), lastResult: { commandId: data.command_id, command: "set_lidar_power",
+        outcome: data.outcome, detail: data.detail ?? null, at: Date.now() } });
+    }
     const active = get().active;
     if (active?.commandId !== data.command_id) {
       const previous = get().lastResult;

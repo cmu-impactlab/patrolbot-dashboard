@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import get_args
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..protocol.envelope import ProtocolError, decode
-from ..protocol.messages import CommandRequestData
+from ..protocol.envelope import Envelope, ProtocolError, decode
+from ..protocol.messages import CommandRequestData, CommandType
 
 log = logging.getLogger("ui_gateway")
 router = APIRouter()
@@ -65,6 +66,22 @@ async def ui_ws(websocket: WebSocket) -> None:
                 envelope, payload = decode(raw)
             except ProtocolError as exc:
                 log.warning("dropping bad browser frame: %s", exc)
+                try:
+                    invalid = Envelope.model_validate_json(raw)
+                except ValueError:
+                    continue
+                command_id = invalid.data.get("command_id")
+                if (invalid.type != "command.request" or not isinstance(command_id, str)
+                        or not command_id.strip() or len(command_id) > 128):
+                    continue
+                command = invalid.data.get("command")
+                if not isinstance(command, str) or len(command) > 64:
+                    command = "invalid"
+                reason = ("Unsupported command. Refresh the dashboard and try again."
+                          if command not in get_args(CommandType) else
+                          "Invalid command fields. Check the goal coordinates and request fields.")
+                await hub.commands._reject_audited(
+                    client, invalid.robot_id, command_id, command, reason)
                 continue
             if envelope.type == "command.request" and isinstance(payload, CommandRequestData):
                 await hub.commands.handle_browser_request(client, envelope, payload)

@@ -4,11 +4,12 @@ import { LiveMapWidget, poseNeedsUncertaintyRing } from ".";
 import { registerCommandSender, useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useAuthStore } from "../../stores/authStore";
+import type { BaseStateData } from "../../types/protocol";
 import { useUiStore } from "../../stores/uiStore";
 
 vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string) => ({ data: {
   map_id: id, map_revision: id === "cmuq-floor1" ? "test-first" : "test-revision", map_version: 1, name: "Test", width: 100, height: 100, resolution: 0.05,
-  origin: { x: 0, y: 0, yaw: 0 }, rle: [[0, 10000]],
+  origin: { x: -5, y: 7, yaw: 0 }, rle: [[0, 10000]],
 } }), useMapsQuery: () => ({ data: [{ map_id: "cmuq-floor1", map_revision: "test-first", name: "Floor 1" }, { map_id: "cmuq-floor2", map_revision: "test-revision", name: "Floor 2" }] }) }));
 vi.mock("./bitmap", () => ({ buildMapBitmap: () => document.createElement("canvas") }));
 let paint: FrameRequestCallback;
@@ -28,9 +29,10 @@ beforeEach(() => {
   }) as CanvasRenderingContext2D);
   Element.prototype.setPointerCapture = vi.fn();
   sender.mockClear(); registerCommandSender(sender);
-  useTelemetryStore.setState({ wsConnected: true, connection: { state: "online" }, pose: null, poseSetThisSession: true });
+  useTelemetryStore.setState({ wsConnected: true, connection: { state: "online" }, pose: null, poseSetThisSession: true, baseStateAt: performance.now(),
+    baseState: { lidar_state: "READY", lidar_scan_age: .1, link_connected:true, hardware_state_valid:true, telemetry_age:.1 } as BaseStateData });
   useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
-  useCommandStore.setState({ active: null, pickMode: "initialpose", lastResult: null });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "initialpose", lastResult: null });
   useUiStore.setState({ fullscreenWidget: null, followRobot: false });
 });
 
@@ -52,6 +54,40 @@ function mount() {
 const down = (canvas: Element, id = 1, pointerType = "touch") => fireEvent.pointerDown(canvas, { pointerId: id, pointerType, clientX: 150, clientY: 150 });
 const up = (canvas: Element, id = 1, pointerType = "touch") => fireEvent.pointerUp(canvas, { pointerId: id, pointerType, clientX: 150, clientY: 150 });
 describe("live map command boundary", () => {
+  it("sends an explicit measured profile with world coordinates, image Y and heading", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    fireEvent.click(screen.getByLabelText(/Measured position and heading/));
+    fireEvent.change(screen.getByLabelText("Heading"), { target: { value: "90" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set location" }));
+    const data = JSON.parse(sender.mock.calls[0][0]).data;
+    expect(data.seed_profile).toBe("measured");
+    expect(data.goal).toMatchObject({ map_id: "cmuq-floor2", map_revision: "test-revision", x: -3.19, y: 10.19 });
+    expect(data.goal.yaw).toBeCloseTo(Math.PI / 2);
+  });
+  it("keeps the coarse profile omitted and resets measured intent after a send", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    fireEvent.click(screen.getByRole("button", { name: "Set location" }));
+    expect(JSON.parse(sender.mock.calls[0][0]).data.seed_profile).toBeUndefined();
+  });
+  it("supports measured mouse selection and preserves screen-up heading", () => {
+    const canvas = mount();
+    fireEvent.click(screen.getByLabelText(/Measured position and heading/));
+    down(canvas, 1, "mouse");
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 100 });
+    const data = JSON.parse(sender.mock.calls[0][0]).data;
+    expect(data.seed_profile).toBe("measured");
+    expect(data.goal.yaw).toBeCloseTo(Math.PI / 2, 3);
+  });
+  it("disables confirmation and explains when LiDAR turns off during a preview", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    act(() => useTelemetryStore.setState({ baseState: { lidar_state: "OFF", lidar_scan_age: -1 } as BaseStateData }));
+    const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(screen.getByText(/LiDAR is off/)).toBeTruthy();
+    fireEvent.click(confirm);
+    expect(sender).not.toHaveBeenCalled();
+  });
   it("previews a touch tap and sends only after explicit confirmation", () => {
     const canvas = mount(); down(canvas); up(canvas);
     expect(sender).not.toHaveBeenCalled();

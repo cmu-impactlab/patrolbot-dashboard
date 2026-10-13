@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONNECTION_COPY,
+  LOCALIZATION_RECOVERY_COPY,
   ESTIMATE_COPY,
   HEALTH_COPY,
   SEVERITY_COPY,
@@ -57,4 +58,13 @@ describe("plain-language copy tables", () => {
     expect(healthOverallText("warning", 1)).toBe("1 system needs attention");
     expect(healthOverallText("fault", 2)).toBe("2 systems need attention");
   });
+});
+
+it("explains the two navigation idle startup waits without suggesting readiness", () => {
+  expect(LOCALIZATION_RECOVERY_COPY["wait-navigation-idle-service-unavailable"]).toContain("stop service to become available");
+  expect(LOCALIZATION_RECOVERY_COPY["wait-navigation-idle-confirmation"]).toContain("waiting for confirmation");
+  for (const text of Object.values(LOCALIZATION_RECOVERY_COPY)) {
+    expect(text).toContain("cannot continue yet");
+    expect(text).not.toMatch(ROS_JARGON);
+  }
 });

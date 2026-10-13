@@ -17,14 +17,24 @@ def test_reset_does_not_require_localization():
     assert software_reset_reason(safe()) is None
 
 
+@pytest.mark.parametrize('changes',[{'pose_age':None,'stationary':False},{'pose_age':4,'stationary':False}])
+def test_reset_can_be_requested_before_a_pose_exists(changes):
+    assert software_reset_reason(safe(**changes)) is None
+
+
 @pytest.mark.parametrize('changes',[
     {'motors_enabled':True},{'navigating':True},{'undock_active':True},
     {'stationary':False},{'base_state_age':None},{'base_state_age':4},
     {'pose_age':None},{'pose_age':4},{'hardware_state_valid':False},
-    {'dock_state_valid':False},{'dock_state':'UNKNOWN'},{'online':False},
-    {'capabilities':()},{'telemetry_age':float('nan')},
+    {'dock_state_valid':False},{'dock_state':'UNKNOWN'},
+    {'telemetry_age':float('nan')},
 ])
-def test_unsafe_or_unknown_reset_is_refused(changes):
+def test_robot_telemetry_does_not_prevent_emergency_reset(changes):
+    assert software_reset_reason(safe(**changes)) is None
+
+
+@pytest.mark.parametrize('changes',[{'online':False},{'capabilities':()}])
+def test_reset_still_requires_a_reachable_commissioned_supervisor(changes):
     assert software_reset_reason(safe(**changes)) is not None
 
 
@@ -51,3 +61,46 @@ async def test_other_robot_cannot_release_reset_barrier():
     await broker.handle_robot_reply(SimpleNamespace(robot_id='other'),SimpleNamespace(type='command.result'),
         CommandResultData(command_id='reset-id',outcome='succeeded'))
     assert broker.reset_pending['robot']=='reset-id'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous,uncertain,authorized,accepted", [
+    ("software_reset", False, True, False),
+    ("software_reset", True, True, True),
+    ("set_lidar_power", True, True, True),
+    ("navigate_to_pose", False, True, True),
+    ("navigate_to_pose", False, False, False),
+])
+async def test_explicit_reset_retires_old_intents_but_never_overlaps_a_running_reset(previous, uncertain, authorized, accepted):
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+    from app.protocol.messages import CommandRequestData
+    sent=[]
+    slice=SimpleNamespace(data=None,age=lambda:None)
+    session=SimpleNamespace(robot_id="robot",websocket=SimpleNamespace(send_text=AsyncMock()),
+        state=SimpleNamespace(connection="online",base_state=slice,pose=slice,capabilities=["software_reset"]))
+    hub=SimpleNamespace(settings=SimpleNamespace(command_rate_per_min=20),db=None,
+        robots={"robot":session},publish=lambda *args:sent.append(args),_next_seq=lambda:1,
+        emit_event=AsyncMock())
+    broker=CommandBroker(hub)
+    broker.rate.allow=lambda _:False
+    broker.lease.can_command=lambda *_:False
+    old=ActiveCommand(command_id="old",command=previous,robot_id="robot",uncertain=uncertain)
+    broker.active[old.command_id]=old
+    if previous=="software_reset":broker.reset_pending["robot"]="old"
+    if previous=="set_lidar_power":broker.lidar_pending["robot"]="old"
+    client=SimpleNamespace(user=SimpleNamespace(id=1,username="operator",can_command=authorized))
+    rid=str(uuid4())
+    try:
+        await broker.handle_browser_request(client,SimpleNamespace(robot_id="robot"),
+            CommandRequestData(command_id=rid,command="software_reset"))
+        assert bool(session.websocket.send_text.call_count)==accepted
+        if accepted:
+            assert list(broker.active)==[rid]
+            assert broker.reset_pending["robot"]==rid
+            assert not broker.lidar_pending
+            if previous=="set_lidar_power":assert "robot" in broker.lidar_recovery_required
+        else:
+            assert list(broker.active)==["old"]
+    finally:
+        for entry in broker.active.values():entry.cancel_timers()

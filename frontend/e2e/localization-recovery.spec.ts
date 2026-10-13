@@ -18,6 +18,8 @@ test("recovery blocks override, preserves pose control and recovers without relo
   await expect(goal).toBeEnabled();
   fixture.stopBaseUpdates();
   await expect(goal).toBeDisabled({ timeout: 6000 });
+  await expect(seed).toBeDisabled();
+  fixture.send("telemetry.base_state", READY_BASE_STATE);
   await expect(seed).toBeEnabled();
   expect(fixture.commands).toHaveLength(0);
 });

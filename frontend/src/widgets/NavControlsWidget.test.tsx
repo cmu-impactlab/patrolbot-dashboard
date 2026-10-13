@@ -3,7 +3,7 @@
  * path, so it is driven onto its charger by hand. The button is present only
  * while the robot is on the dock.
  */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NavControlsWidget } from "./NavControlsWidget";
 import { useAuthStore } from "../stores/authStore";
@@ -11,7 +11,7 @@ import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { BaseStateData, PoseData } from "../types/protocol";
 
-const CAPS = ["undock", "motor_enable"];
+const CAPS = ["undock", "motor_enable", "motor_disable"];
 
 const PARKED: PoseData = {
   x: 1, y: 1, yaw: 0, linear_velocity: 0, angular_velocity: 0, localized: true,
@@ -19,7 +19,7 @@ const PARKED: PoseData = {
 
 function baseState(overrides: Partial<BaseStateData> = {}): BaseStateData {
   return {
-    session_generation: 1,
+    lidar_state: "READY", lidar_scan_age: 0.1, session_generation: 1,
     link_connected: true,
     telemetry_age: 0.1,
     hardware_state_valid: true,
@@ -70,7 +70,7 @@ function motorEnableButton(): HTMLButtonElement {
 
 describe("NavControlsWidget dock control", () => {
   beforeEach(() => {
-    useCommandStore.setState({ active: null, lastResult: null, stoppedGoal: null });
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastResult: null, stoppedGoal: null });
   });
 
   afterEach(cleanup);
@@ -175,23 +175,23 @@ describe("NavControlsWidget dock control", () => {
 
 describe("NavControlsWidget advanced motor enable", () => {
   beforeEach(() => {
-    useCommandStore.setState({ active: null, lastResult: null, stoppedGoal: null });
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastResult: null, stoppedGoal: null });
   });
 
   afterEach(cleanup);
 
-  it("keeps motor enable inside the collapsed Advanced disclosure", () => {
+  it("keeps motor enable outside the collapsed Advanced disclosure", () => {
     setState(baseState({ charge_state: "not_charging", motors_enabled: false }));
     render(<NavControlsWidget />);
 
     const advanced = screen.getByText("Advanced").closest("details") as HTMLDetailsElement;
     expect(advanced.open).toBe(false);
-    expect(advanced.contains(motorEnableButton())).toBe(true);
+    expect(advanced.contains(motorEnableButton())).toBe(false);
     openAdvanced();
     expect(advanced.open).toBe(true);
   });
 
-  it("requires confirmation before sending motor_enable from Advanced", () => {
+  it("requires confirmation before sending motor_enable", () => {
     setState(baseState({ charge_state: "not_charging", motors_enabled: false }));
     const sent: string[] = [];
     useCommandStore.setState({ send: (command) => { sent.push(command); } });
@@ -209,21 +209,19 @@ describe("NavControlsWidget advanced motor enable", () => {
   });
 
   it.each([
-    [{ motors_enabled: true }, "already on"],
     [{ charge_state: "charging" }, "release charging"],
     [{ estop_pressed: true }, "emergency stop"],
     [{ fault_flags: 4 }, "fault"],
-  ])("disables motor enable when %o", (overrides, reason) => {
+  ])("leaves the enable request available when %o", (overrides, _reason) => {
     setState(baseState({ charge_state: "not_charging", ...overrides }));
     render(<NavControlsWidget />);
 
     openAdvanced();
     const button = motorEnableButton();
-    expect(button.disabled).toBe(true);
-    expect(button.title.toLowerCase()).toContain(reason);
+    expect(button.disabled).toBe(false);
   });
 
-  it("disables motor enable while a navigation goal is active", () => {
+  it("keeps the enable request available while a navigation goal is active", () => {
     setState(baseState({ charge_state: "not_charging" }));
     useCommandStore.setState({
       active: {
@@ -235,8 +233,7 @@ describe("NavControlsWidget advanced motor enable", () => {
 
     openAdvanced();
     const button = motorEnableButton();
-    expect(button.disabled).toBe(true);
-    expect(button.title.toLowerCase()).toContain("stop it before enabling the motors");
+    expect(button.disabled).toBe(false);
   });
 
   it("shows the in-flight state and prevents a duplicate request", () => {
@@ -261,7 +258,7 @@ describe("localization recovery controls", () => {
 it("blocks destinations during recovery but leaves operator pose initialization available", () => {
   setState(baseState({ odom_epoch_valid: true, localization_recovery_required: true,
     localization_seed_stamp_ns: 1 }));
-  useCommandStore.setState({ active: null, pickMode: "none", allowUnlocalized: true });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "none", allowUnlocalized: true });
   render(<NavControlsWidget />);
   expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "Set Robot Location" }) as HTMLButtonElement).disabled).toBe(false);
@@ -271,7 +268,7 @@ it("blocks destinations during recovery but leaves operator pose initialization 
 it("offers destinations after recovery with an operator-confirmed pose", () => {
   setState(baseState({ odom_epoch_valid: true, localization_recovery_required: false,
     localization_seed_stamp_ns: 1 }));
-  useCommandStore.setState({ active: null, pickMode: "none", allowUnlocalized: false });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "none", allowUnlocalized: false });
   render(<NavControlsWidget />);
   expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(false);
 });
@@ -280,7 +277,7 @@ it("offers destinations after recovery with an operator-confirmed pose", () => {
 
 
 describe("software reset", () => {
-  beforeEach(() => useCommandStore.setState({ active: null, lastResult: null, stoppedGoal: null }));
+  beforeEach(() => useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastResult: null, stoppedGoal: null }));
   afterEach(cleanup);
   function setup() {
     setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, [...CAPS, "software_reset"]);
@@ -289,6 +286,41 @@ describe("software reset", () => {
     render(<NavControlsWidget />); openAdvanced();
     return sent;
   }
+  it("keeps reset visible outside Advanced when the robot lacks the capability", () => {
+    setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, CAPS);
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: "Restart robot software" }) as HTMLButtonElement;
+    expect(button.closest("details")).toBeNull();
+    expect(button.disabled).toBe(true);
+    expect(button.title).toContain("Software reset is not available");
+  });
+  it("keeps an available reset visible without opening Advanced", () => {
+    setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, [...CAPS, "software_reset"]);
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: "Restart robot software" }) as HTMLButtonElement;
+    expect(button.closest("details")).toBeNull();
+    expect(button.disabled).toBe(false);
+  });
+  it("allows a recovery request before any pose or hardware telemetry exists", () => {
+    setState(null, null, [...CAPS, "software_reset"]);
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    const reset = screen.getByRole("button", { name: "Restart robot software" }) as HTMLButtonElement;
+    expect(reset.disabled).toBe(false);
+    fireEvent.click(reset);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm software reset" }));
+    expect(sent).toEqual(["software_reset"]);
+  });
+  it("allows recovery from a stuck pose command without retrying a pending reset", () => {
+    setState(null, null, [...CAPS, "software_reset"]);
+    useCommandStore.setState({ active: { commandId: "stuck", command: "set_initial_pose", phase: "running", stage: null, distanceRemaining: null } });
+    render(<NavControlsWidget />);
+    const reset = screen.getByRole("button", { name: "Restart robot software" }) as HTMLButtonElement;
+    expect(reset.disabled).toBe(false);
+    act(() => useCommandStore.setState({ active: { commandId: "reset", command: "software_reset", phase: "running", stage: null, distanceRemaining: null } }));
+    expect((screen.getByRole("button", { name: "Reset pending…" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("requires confirmation and cancellation sends nothing", () => {
     const sent=setup();
     fireEvent.click(screen.getByRole("button", {name:"Restart robot software"}));
@@ -307,4 +339,57 @@ describe("software reset", () => {
     fireEvent.click(screen.getByRole("button", {name:"Confirm software reset"}));
     expect(sent).toEqual([]);
   });
+});
+
+
+describe("motor power requests", () => {
+  afterEach(cleanup);
+  beforeEach(() => useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastResult: null, stoppedGoal: null }));
+  it("allows an enable request without a map pose", () => {
+    setState(baseState({ charge_state: "not_charging", motors_enabled: false }), null);
+    render(<NavControlsWidget />);
+    expect(motorEnableButton().disabled).toBe(false);
+  });
+  it("offers a different color and immediate disable while moving with faults", () => {
+    setState(baseState({ motors_enabled: true, fault_flags: 4, estop_pressed: true }), { ...PARKED, linear_velocity: .2 });
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); }, active: { commandId: "nav", command: "navigate_to_pose", phase: "running", stage: null, distanceRemaining: null } });
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.className).toContain("danger");
+    fireEvent.click(button);
+    expect(sent).toEqual(["motor_disable"]);
+  });
+  it.each(["missing", "stale off"])("keeps disable available with %s motor telemetry", (state) => {
+    setState(state === "missing" ? null : baseState({ motors_enabled: false }), null);
+    if (state === "stale off") useTelemetryStore.setState({ baseStateAt: performance.now() - 16_000 });
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(sent).toEqual(["motor_disable"]);
+  });
+  it("takes the target from fresh readback after opening enable confirmation", () => {
+    setState(baseState({ charge_state: "not_charging" }));
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    fireEvent.click(motorEnableButton());
+    act(() => useTelemetryStore.setState({ baseState: baseState({ motors_enabled: true }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm motor enable" }));
+    expect(sent).toEqual([]);
+  });
+});
+
+
+it("keeps Stop and motor disable available while LiDAR is off", () => {
+  setState(baseState({ lidar_state: "OFF", lidar_scan_age: -1, motors_enabled: true }));
+  useCommandStore.setState({ active: null, lidarPending: "power-unknown", lidarRecoveryRequired: true, lidarStateAfter: null });
+  render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Stop Robot" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement).disabled).toBe(false);
+  cleanup();
 });

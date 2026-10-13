@@ -140,3 +140,26 @@ def test_legacy_base_payload_is_fail_closed_until_simulator_supplies_readiness()
     assert not payload["odom_epoch_valid"]
     assert payload["localization_recovery_required"]
     assert payload["localization_seed_stamp_ns"] == 0
+
+
+def test_measured_profile_and_omitted_coarse_preserve_world_pose():
+    for profile in ('measured',None):
+        robot=make_robot()
+        frame=request('set_initial_pose',goal={'x':-3.25,'y':8.5,'yaw':1.5707963267948966})
+        if profile is not None: frame['data']['seed_profile']=profile
+        ws=FakeWs([frame])
+        asyncio.run(robot._receive_loop(ws))
+        assert ws.of_type('command.ack')[0]['data']['accepted']
+        assert robot.seed_profile==profile
+        assert (robot.robot.x,robot.robot.y,robot.robot.yaw)==(-3.25,8.5,1.5707963267948966)
+
+
+def test_disable_preempts_simulated_motion_even_when_lidar_off():
+    robot=make_robot();robot.lidar_state='OFF';robot.motors_enabled=True
+    robot.command={'command_id':'old','kind':'navigate'}
+    robot.mode='commanded'
+    ws=FakeWs([request('motor_disable','off')])
+    asyncio.run(robot._receive_loop(ws))
+    assert robot.motors_enabled is False and robot.command is None
+    assert ws.of_type('command.ack')[0]['data']['accepted'] is True
+    assert ws.of_type('command.result')[0]['data']['command_id']=='old'

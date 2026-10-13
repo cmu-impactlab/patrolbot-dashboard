@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { dashboardFixture } from "./fixtures";
+import { dashboardFixture, READY_BASE_STATE } from "./fixtures";
 
 async function menu(page: import("@playwright/test").Page) {
   // App hydration can finish after page.goto's load event. Wait for the
@@ -96,13 +96,21 @@ test("real touch tap previews, mouse release sends, and fullscreen Stop stays re
   await page.goto("/");
   await page.getByRole("button", { name: "Set Robot Location", exact: true }).click();
   const canvas = page.getByLabel("Live robot map");
+  // Floor/profile controls overlay the upper canvas; select visible map below them.
+  await expect.poll(() => canvas.evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height * 0.65) === el;
+  })).toBe(true);
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error("Map is not visible");
+  const position = { x: bounds.width / 2, y: bounds.height * 0.65 };
   if (info.project.use.hasTouch) {
-    await canvas.tap({ position: { x: 80, y: 180 } });
+    await canvas.tap({ position });
     await expect(page.getByLabel("Confirm map selection")).toBeVisible();
     expect(fixture.commands).toHaveLength(0);
     await page.getByRole("button", { name: "Set location", exact: true }).click();
   } else {
-    await canvas.click({ position: { x: 80, y: 180 } });
+    await canvas.click({ position });
   }
   await expect.poll(() => fixture.commands.length).toBe(1);
   const live = page.locator('[data-tour="widget-liveMap"]');
@@ -283,7 +291,7 @@ test("charging actions retain touch confirmations and visible rejection reasons"
   const fixture = await dashboardFixture(page);
   await page.goto("/");
   await expect(page.getByRole("button",{name:"Set Robot Location",exact:true})).toBeEnabled();
-  const base = {session_generation:1,link_connected:true,telemetry_age:0.1,hardware_state_valid:true,charge_state:"not_charging",motors_enabled:false,estop_pressed:false,fault_flags:0,stall_value:0,bumpers_front:false,bumpers_rear:false,bumpers_valid:true};
+  const base = {...READY_BASE_STATE,session_generation:1,link_connected:true,telemetry_age:0.1,hardware_state_valid:true,charge_state:"not_charging",motors_enabled:false,estop_pressed:false,fault_flags:0,stall_value:0,bumpers_front:false,bumpers_rear:false,bumpers_valid:true};
   fixture.send("state.capabilities",{capabilities:["motor_enable","undock"]});
   fixture.send("telemetry.base_state",base);
   const nav = page.locator('[data-tour="widget-navControls"]');

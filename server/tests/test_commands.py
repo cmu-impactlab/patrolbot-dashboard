@@ -43,7 +43,7 @@ def make_drivable(robot) -> None:
     localized pose have actually arrived — see app/commands/gates.py.
     """
     robot.send_text(encode("telemetry.base_state", "patrolbot-01", 1, {
-        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "lidar_state": "READY", "lidar_scan_age": 0.1, "session_generation": 1, "link_connected": True, "telemetry_age": 0.1,
         "hardware_state_valid": True, "charge_state": "idle",
         "motors_enabled": True, "estop_pressed": False, "fault_flags": 0,
         "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
@@ -527,7 +527,7 @@ def test_robot_reconnect_does_not_replay_command(client):
 
 def _base_state_frame(seq: int, generation: int) -> str:
     return encode("telemetry.base_state", "patrolbot-01", seq, {
-        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "session_generation": generation, "link_connected": True, "telemetry_age": 0.1,
+        "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "lidar_state": "READY", "lidar_scan_age": 0.1, "session_generation": generation, "link_connected": True, "telemetry_age": 0.1,
         "hardware_state_valid": True, "charge_state": "idle", "motors_enabled": True,
         "estop_pressed": False, "fault_flags": 0, "stall_value": 0,
         "bumpers_front": False, "bumpers_rear": False,
@@ -634,3 +634,23 @@ def test_stale_sequence_frame_dropped(client):
                         break
             assert 2.0 not in seen_x  # the stale frame never propagated
             assert 1.0 in seen_x and 3.0 in seen_x
+
+
+def test_measured_seed_profile_forwarded_and_recorded(client):
+    with client.websocket_connect('/ws/robot?token=test-token') as robot:
+        robot.send_text(hello_frame());robot.receive_text();make_drivable(robot)
+        with client.websocket_connect('/ws/ui') as ui:
+            ui.receive_text()
+            command_id,raw=request_frame('set_initial_pose')
+            frame=json.loads(raw);frame['data']['seed_profile']='measured'
+            ui.send_text(json.dumps(frame))
+            forwarded=json.loads(robot.receive_text())
+            assert forwarded['data']['seed_profile']=='measured'
+            assert forwarded['data']['operator_authorized'] is True
+            assert forwarded['data']['goal']==frame['data']['goal']
+            robot.send_text(encode('command.ack','patrolbot-01',3,{'command_id':command_id,'accepted':True}))
+            robot.send_text(encode('command.result','patrolbot-01',4,{'command_id':command_id,'outcome':'succeeded'}))
+            recv_until(ui,'command.result')
+    row=client.get('/api/commands').json()[0]
+    assert json.loads(row['goal']) == dict(frame['data']['goal'], seed_profile='measured')
+    assert row['outcome'] == 'succeeded'

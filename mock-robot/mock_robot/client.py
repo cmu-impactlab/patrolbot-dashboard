@@ -33,7 +33,7 @@ CAPABILITIES = ["map_context_v1", "pose", "lidar", "path", "battery", "base_stat
                 # works here is a flow that exists there. `dock` is absent for
                 # that reason — the robot has no automatic dock-in path, and a
                 # mock that implemented one hid the gap.
-                "charge_release", "motor_enable", "undock"]
+                "charge_release", "motor_enable", "motor_disable", "undock", "set_lidar_power"]
 
 # Undocking reverses straight back off the contacts — no turning on the dock.
 UNDOCK_DISTANCE_M = 1.2
@@ -67,6 +67,8 @@ class MockRobot:
         self.sequence = 0
         self.map_version = 1
         self.map_id = "cmuq-floor2"
+        self.lidar_state = "READY"
+        self._last_lidar_scan = time.monotonic()
         self.session_generation = 1
         # The simulator starts at an exact, known world pose. This synthetic
         # seed is not hardware acceptance and survives transport reconnects.
@@ -203,6 +205,7 @@ class MockRobot:
                 asyncio.create_task(self._lidar_loop(ws)),
                 asyncio.create_task(self._path_loop(ws)),
                 asyncio.create_task(self._slow_loop(ws)),
+                asyncio.create_task(self._base_state_loop(ws)),
                 asyncio.create_task(self._receive_loop(ws)),
                 asyncio.create_task(self._disconnect_watch()),
             ]
@@ -238,7 +241,11 @@ class MockRobot:
     async def _lidar_loop(self, ws) -> None:
         while True:
             await asyncio.sleep(0.2)
+            if self.lidar_state == "OFF":
+                continue
             ranges = self.world.scan(self.robot.x, self.robot.y, self.robot.yaw)
+            self._last_lidar_scan = time.monotonic()
+            self.lidar_state = "READY"
             await ws.send(self.frame("telemetry.lidar", {
                 "angle_min": -math.pi / 2,
                 "angle_increment": math.pi / (len(ranges) - 1),
@@ -255,8 +262,25 @@ class MockRobot:
                 "goal": None if goal is None else {"x": goal[0], "y": goal[1], "yaw": None},
             }))
 
+    async def _base_state_loop(self, ws) -> None:
+        while True:
+            await asyncio.sleep(.1)
+            elapsed = self.elapsed()
+            front, rear = self.scenario.bumper_active(elapsed)
+            await ws.send(self.frame("telemetry.base_state", base_state_payload(
+                session_generation=self.session_generation,
+                odom_epoch_valid=self.odom_epoch_valid,
+                localization_recovery_required=self.localization_recovery_required,
+                localization_seed_stamp_ns=self.localization_seed_stamp_ns,
+                charging=self.battery.charging, docked=self.on_dock,
+                estop=self.scenario.estop_active(elapsed), bumper_front=front, bumper_rear=rear,
+                motors_enabled=self.motors_enabled, undock_active=self.mode == "undocking",
+                lidar_state=self.lidar_state,
+                lidar_scan_age=time.monotonic() - self._last_lidar_scan if self.lidar_state == "READY" else -1.0,
+            )))
+
     async def _slow_loop(self, ws) -> None:
-        """1 Hz: heartbeat, battery, base_state, diagnostics, resources, map changes."""
+        """1 Hz: heartbeat, battery, diagnostics, resources, map changes."""
         while True:
             await asyncio.sleep(1.0)
             elapsed = self.elapsed()
@@ -264,17 +288,6 @@ class MockRobot:
             estop = self.scenario.estop_active(elapsed)
             await ws.send(self.frame("telemetry.heartbeat", {"uptime_s": round(elapsed, 1)}))
             await ws.send(self.frame("telemetry.battery", self.battery.payload()))
-            await ws.send(self.frame("telemetry.base_state", base_state_payload(
-                session_generation=self.session_generation,
-                odom_epoch_valid=self.odom_epoch_valid,
-                localization_recovery_required=self.localization_recovery_required,
-                localization_seed_stamp_ns=self.localization_seed_stamp_ns,
-                charging=self.battery.charging,
-                docked=self.on_dock,
-                estop=estop, bumper_front=front, bumper_rear=rear,
-                motors_enabled=self.motors_enabled,
-                undock_active=self.mode == "undocking",
-            )))
             await ws.send(self.frame("telemetry.diagnostics",
                                      diagnostics_payload(elapsed, self.battery.level, front or rear)))
             await ws.send(self.frame("telemetry.resources", {
@@ -303,7 +316,32 @@ class MockRobot:
             data = frame.get("data", {})
             command_id, command = data.get("command_id"), data.get("command")
             log.info("command received: %s (%s)", command, command_id)
+            if data.get("seed_profile") is not None and (command != "set_initial_pose" or data["seed_profile"] != "measured"):
+                await ws.send(self.frame("command.ack", {"command_id": command_id,
+                    "accepted": False, "reason": "Invalid measured seed profile."}))
+                continue
 
+            if command in {"navigate_to_pose", "set_initial_pose", "undock", "charge_release"} and self.lidar_state != "READY":
+                await ws.send(self.frame("command.ack", {"command_id": command_id,
+                    "accepted": False, "reason": "LiDAR is not ready."}))
+                continue
+            if command == "set_lidar_power":
+                enabled = data.get("enabled")
+                if (type(enabled) is not bool or data.get("operator_authorized") is not True
+                        or self.command is not None or self.mode == "undocking"
+                        or abs(self.robot.speed) > .02 or abs(self.robot.yaw_rate) > .05):
+                    await ws.send(self.frame("command.ack", {"command_id": command_id,
+                        "accepted": False, "reason": "LiDAR power requires an authorized explicit target and an idle stationary robot."}))
+                    continue
+                self.mode = "idle"
+                self.robot.set_goal(None)
+                self.localization_recovery_required = True
+                self.localization_seed_stamp_ns = 0
+                self.lidar_state = "STARTING" if enabled else "OFF"
+                await ws.send(self.frame("command.ack", {"command_id": command_id, "accepted": True}))
+                await ws.send(self.frame("command.result", {"command_id": command_id, "outcome": "succeeded",
+                    "detail": "LiDAR commanded on; waiting for fresh scans." if enabled else "LiDAR commanded off."}))
+                continue
             if command in ("navigate_to_pose", "set_initial_pose"):
                 target = data.get("goal") or {}
                 valid = (target.get("map_id") in MAP_REVISIONS and
@@ -346,6 +384,7 @@ class MockRobot:
                         "accepted": False, "reason": "Another operation owns the simulated robot."}))
                     continue
                 goal = data["goal"]
+                self.seed_profile = data.get("seed_profile")
                 self.mode = "idle"
                 self.robot.set_goal(None)
                 self.map_id = goal["map_id"]
@@ -359,6 +398,18 @@ class MockRobot:
                 await ws.send(self.frame("command.result",
                                          {"command_id": command_id, "outcome": "succeeded",
                                           "detail": "Robot location updated."}))
+            elif command == "motor_disable":
+                if data.get("operator_authorized") is not True:
+                    await ws.send(self.frame("command.ack", {"command_id": command_id,
+                        "accepted": False, "reason": "Motor power requires operator authorization."}))
+                    continue
+                await self._preempt(ws, "Canceled by motor disable.")
+                self.motors_enabled = False
+                self.mode = "idle"
+                self.robot.set_goal(None)
+                await ws.send(self.frame("command.ack", {"command_id": command_id, "accepted": True}))
+                await ws.send(self.frame("command.result", {"command_id": command_id,
+                    "outcome": "succeeded", "detail": "Motors are off."}))
             elif command in ("charge_release", "motor_enable", "undock"):
                 await self._handle_dock_command(ws, command, command_id)
             else:
