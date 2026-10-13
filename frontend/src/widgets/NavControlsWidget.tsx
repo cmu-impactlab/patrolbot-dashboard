@@ -187,11 +187,11 @@ export function NavControlsWidget() {
           <Power size={15} />
           {motorsEnabled ? (motorDisableBusy ? "Turning motors off…" : "Turn motors off") : (motorEnableBusy ? "Turning motors on…" : "Turn motors on")}
         </button>
-        {!motorsEnabled && (!baseFresh || !baseState) && <button
+        {!motorsEnabled && <button
           className="btn danger"
           disabled={!mayCommand || motorDisableUiReason !== null || motorDisableBusy}
           onClick={() => send("motor_disable")}
-          title={motorDisableUiReason ?? "Disable drive power when motor state is unavailable"}
+          title={motorDisableUiReason ?? "Disable drive power"}
         >
           <Power size={15} /> {motorDisableBusy ? "Turning motors off…" : "Turn motors off"}
         </button>}
