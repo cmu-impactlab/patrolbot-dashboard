@@ -361,9 +361,10 @@ describe("motor power requests", () => {
     fireEvent.click(button);
     expect(sent).toEqual(["motor_disable"]);
   });
-  it.each(["missing", "stale off"])("keeps disable available with %s motor telemetry", (state) => {
+  it.each(["missing", "stale off", "invalid hardware", "fresh off"])("keeps disable available with %s motor telemetry", (state) => {
     setState(state === "missing" ? null : baseState({ motors_enabled: false }), null);
     if (state === "stale off") useTelemetryStore.setState({ baseStateAt: performance.now() - 16_000 });
+    if (state === "invalid hardware") useTelemetryStore.setState({ baseState: baseState({ hardware_state_valid: false, link_connected: false, motors_enabled: false }) });
     const sent: string[] = [];
     useCommandStore.setState({ send: command => { sent.push(command); } });
     render(<NavControlsWidget />);

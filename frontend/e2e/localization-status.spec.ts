@@ -21,16 +21,17 @@ test("filter spread, invalid data and AMCL expiration remain honest", async ({ p
   expect(fixture.commands).toHaveLength(0);
 });
 
-test("stale off readback retains immediate motor disable", async ({ page }) => {
+test("invalid and stale off readback retains immediate motor disable", async ({ page }) => {
   const fixture = await dashboardFixture(page);
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Set Robot Location", exact: true })).toBeEnabled();
   fixture.send("state.capabilities", { capabilities: ["motor_enable", "motor_disable"] });
-  fixture.send("telemetry.base_state", { ...READY_BASE_STATE, motors_enabled: false });
+  fixture.send("telemetry.base_state", { ...READY_BASE_STATE, motors_enabled: false, hardware_state_valid: false, link_connected: false });
+  const off = page.getByRole("button", { name: "Turn motors off", exact: true });
+  await expect(off).toBeEnabled();
   fixture.stopBaseUpdates();
   await page.clock.install();
   await page.clock.fastForward(16_000);
-  const off = page.getByRole("button", { name: "Turn motors off", exact: true });
   await expect(off).toBeEnabled();
   await off.click();
   await expect.poll(() => fixture.commands.map(command => command.command)).toEqual(["motor_disable"]);
