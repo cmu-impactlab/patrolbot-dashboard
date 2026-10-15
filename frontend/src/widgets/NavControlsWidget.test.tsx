@@ -373,6 +373,30 @@ describe("motor power requests", () => {
     fireEvent.click(button);
     expect(sent).toEqual(["motor_disable"]);
   });
+  it.each([
+    [false, "observer"], [true, "observer"],
+    [false, "offline"], [true, "offline"],
+    [false, "missing capability"], [true, "missing capability"],
+    [false, "duplicate request"], [true, "duplicate request"],
+  ] as const)("keeps disable guarded with motors=%s and %s", (motorsEnabled, blocker) => {
+    setState(baseState({ motors_enabled: motorsEnabled }), null);
+    if (blocker === "observer") useAuthStore.setState({ user: {
+      id: 2, username: "viewer", display_name: "Viewer", role: "observer", auth_mode: "local",
+    } });
+    if (blocker === "offline") useTelemetryStore.setState({ wsConnected: false,
+      connection: { state: "offline", last_seen: null } });
+    if (blocker === "missing capability") useTelemetryStore.setState({ capabilities: ["motor_enable"] });
+    if (blocker === "duplicate request") useCommandStore.setState({ active: {
+      commandId: "disable-1", command: "motor_disable", phase: "sending", stage: null, distanceRemaining: null,
+    } });
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    const button = screen.getByRole("button", { name: /Turn motors off|Turning motors off/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(sent).toEqual([]);
+  });
   it("takes the target from fresh readback after opening enable confirmation", () => {
     setState(baseState({ charge_state: "not_charging" }));
     const sent: string[] = [];
