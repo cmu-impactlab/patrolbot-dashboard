@@ -34,6 +34,14 @@ Build/types/bundle checks pass. Chromium device tests pass; the first local
 WebKit invocation failed before browser startup due to missing `libicudata.so.74`.
 That failed run must remain recorded; isolated browser revalidation is required.
 
+Final narrow revalidation: **305 frontend cases pass** (297 existing +8 added
+account/connection/capability/duplicate guards). All12 focused browser cases pass
+in pinned Playwright image `eff16c30…`, including Chromium and WebKit phone,
+tablet and desktop projects. The first container attempt failed before testing
+because cap-dropped root could not write owner-private evidence/cache paths;
+running as the workstation owner resolved it without weakening isolation/tests.
+The missing host-library and failed-harness evidence remain preserved.
+
 `Dockerfile.ui-only` derives from the verified current production server image
 `sha256:04a464df6668b2197795ed965f4c1704f180a7b08bf733dcd2086af47e9240bc`.
 It replaces only `/app/static`. The build context must contain ONLY the reviewed
@@ -41,6 +49,24 @@ frontend `dist/` contents under `static/`; never send a repository/private archi
 directory as its context. Base-image bytes must be verified before assigning a
 local build alias. Record the immutable resulting image, source revision and
 frontend tree hash; an available tag is not sufficient provenance.
+
+Built candidate `sha256:9a9235d31278d9959855b693cfced11336ac23a0277e70f7bcb45840bef96529`
+contains source revision `fa94998559ec06af5b26550097f526d38a144fad` and frontend
+tree digest `13845994ba5e6ffb996f82683c23bb45c45155d8b82e129eb2ee1d95acfd40c6`.
+Run the network-isolated, installed-image check:
+
+```bash
+python3 -B scripts/check_ui_image.py infrastructure/releases/ui-restoration-20261015.candidate.json
+```
+
+It verifies production base-layer ancestry, unchanged environment/command/user,
+all49 application/map files, all15 static files and actual HTTP delivery/startup/
+application shutdown with temporary data only. The first smoke harness incorrectly
+required exit0 after SIGTERM; installed Uvicorn0.52.1 deliberately re-raises its
+captured signal after cleanup. The corrected check requires completed application
+shutdown logs and accepts -SIGTERM only with that evidence. No runtime shutdown
+behavior was changed. All these artifact checks pass; no production instance was
+started or restarted. Source code is unchanged by this evidence-only follow-up.
 
 ## Before any later activation
 

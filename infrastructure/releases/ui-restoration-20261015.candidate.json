@@ -1,0 +1,69 @@
+{
+  "source_revision": "fa94998559ec06af5b26550097f526d38a144fad",
+  "base_image": "sha256:04a464df6668b2197795ed965f4c1704f180a7b08bf733dcd2086af47e9240bc",
+  "static_tree_sha256": "13845994ba5e6ffb996f82683c23bb45c45155d8b82e129eb2ee1d95acfd40c6",
+  "files": [
+    {
+      "path": ".vite/manifest.json",
+      "sha256": "e304f50b3ca3091f49d1bf29bffe8c336fba25b83ca3945380c4a695e1c3397f"
+    },
+    {
+      "path": "assets/BatteryWidget-BQ7Jd28e.js",
+      "sha256": "9b904eab8db8c0663691c04fe2eb899bc4ca410e5bf5099222037a96a38496fc"
+    },
+    {
+      "path": "assets/PiStatsWidget-Cufov1BX.js",
+      "sha256": "9c37beee5f7762b1e964712ac3f21dfeeceee8a559a91fb8ecfa3172b6bfe555"
+    },
+    {
+      "path": "assets/ReplayPage-XaSEHzU6.js",
+      "sha256": "7bbc4e5a2a70e75068af09bf3b0de2c4cb0a2eb72171d3b21d5f45253f5efb06"
+    },
+    {
+      "path": "assets/charts-YOWUxDd6.js",
+      "sha256": "50be15b7040ac33d4e86a0311a648d0d23f6df8967cfc7d924b02a3d34ae6344"
+    },
+    {
+      "path": "assets/cmuq-logo-DnPkAzOp.png",
+      "sha256": "856f1f798319067e481c2c83e198884233d43223b4576bed4eef9da61bfd398e"
+    },
+    {
+      "path": "assets/grid-BOltB2Hq.css",
+      "sha256": "78fd1b4741a9c03bc5b9eeafa9cc02e52022f5d4d36b4c257b3678386f1b09e5"
+    },
+    {
+      "path": "assets/grid-BpirG-2p.js",
+      "sha256": "513bdd761496ed623486140dc7e8993af4e76b29c483d6c51e007b602fdae9fb"
+    },
+    {
+      "path": "assets/index-UJo_ha2_.js",
+      "sha256": "8299aab51de57519e19ac86b94e1c3b878052216f95ced92a0d6cf27e20b029e"
+    },
+    {
+      "path": "assets/index-bd00mmmq.css",
+      "sha256": "292dd6b4e9f7c20cd0559b525887745cdadadb885e7dd5d9001c568907e83da8"
+    },
+    {
+      "path": "assets/query-Bu3rHtS9.js",
+      "sha256": "f68643ec84441fe5d8f17aba7bcf015c7aed8d12c28dce1359aa74f6c8e1d7ac"
+    },
+    {
+      "path": "assets/react-B9d5PHkA.js",
+      "sha256": "3085508179c5d47d05a0e88700dcb911458b2fd201e7f63c51cf467246957f10"
+    },
+    {
+      "path": "assets/ui-CPwTA00r.js",
+      "sha256": "29d5feeae79e75f993bb9cbec5b31dcdb6fc96c6bfd36eb3666ea5ebe7320485"
+    },
+    {
+      "path": "assets/useChartInspection-BkuEJKzZ.js",
+      "sha256": "f538e370b99cbe72c59dcc7ec52df511b4a4d388ed5484bd04d1153cc046fdd1"
+    },
+    {
+      "path": "index.html",
+      "sha256": "80fae70934ee85f64989306c00abf3827cbb80cf71cd48a2f862fa056cb15464"
+    }
+  ],
+  "deployed": false,
+  "image_id": "sha256:9a9235d31278d9959855b693cfced11336ac23a0277e70f7bcb45840bef96529"
+}
