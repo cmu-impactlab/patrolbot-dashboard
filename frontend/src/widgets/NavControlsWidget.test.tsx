@@ -85,10 +85,36 @@ describe("NavControlsWidget dock control", () => {
     expect(button.disabled).toBe(false);
   });
 
-  it("still reads Undock once the charger is released but the robot is on the dock", () => {
-    setState(baseState({ charge_state: "docked", motors_enabled: true }));
+  it("hides a new Undock once charging is released, even on the dock", () => {
+    setState(baseState({ charge_state: "docked", motors_enabled: true,
+      dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }));
     render(<NavControlsWidget />);
-    expect(dockButton().textContent).toContain("Undock");
+    expect(dockButtonOrNull()).toBeNull();
+  });
+
+  it("allows charging Undock without a map pose or localization seed", () => {
+    setState(baseState({ localization_recovery_required: true }), null);
+    useTelemetryStore.setState({ poseSetThisSession: false });
+    render(<NavControlsWidget />);
+    expect(dockButton().disabled).toBe(false);
+  });
+
+  it("defers stale map velocity to the robot instead of treating it as current", () => {
+    setState(baseState(), { ...PARKED, linear_velocity: 0.3 });
+    useTelemetryStore.setState({ poseReceivedAt: performance.now() - 4000 });
+    render(<NavControlsWidget />);
+    expect(dockButton().disabled).toBe(false);
+  });
+
+  it("keeps active Undock, progress and Stop after charging releases", () => {
+    setState(baseState({ charge_state: "docked" }), null);
+    useCommandStore.setState({ active: { commandId: "undock-1", command: "undock",
+      phase: "running", stage: "Turning away from the dock", distanceRemaining: null } });
+    render(<NavControlsWidget />);
+    expect(dockButton().textContent).toContain("Undocking");
+    expect(dockButton().disabled).toBe(true);
+    expect(screen.getByText("Turning away from the dock")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("is absent once the robot is off the dock", () => {
@@ -393,4 +419,21 @@ it("keeps Stop and motor disable available while LiDAR is off", () => {
   expect((screen.getByRole("button", { name: "Stop Robot" }) as HTMLButtonElement).disabled).toBe(false);
   expect((screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement).disabled).toBe(false);
   cleanup();
+});
+
+
+it("offers age-only refresh only for a verified native guard without arming override", () => {
+  const base = baseState({ map_id: "floor1", map_revision: "revision", odom_epoch_valid: true,
+    localization_recovery_required: false, localization_seed_stamp_ns: 1, charge_state: "not_charging", motors_enabled: true });
+  const pose: PoseData = { ...PARKED, frame_id: "map", map_id: "floor1", map_revision: "revision",
+    localized: false, planar_covariance: [.01,.01,.01], covariance_limit: .25,
+    localization_age_s: 31, localization_max_age_s: 30 };
+  setState(base, pose, []);
+  useCommandStore.setState({ allowUnlocalized: false, active: null, pickMode: "none", lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null });
+  const view = render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
+  act(() => useTelemetryStore.setState({ capabilities: ["navigation_stationary_refresh_v1"] }));
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(useCommandStore.getState().allowUnlocalized).toBe(false);
+  view.unmount();
 });

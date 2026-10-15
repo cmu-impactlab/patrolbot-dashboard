@@ -134,7 +134,8 @@ def test_stall_detection_flags_stuck():
     state = RobotState(Settings(stall_warning_s=0.05), "patrolbot-01")
     state.connection = "online"
     state.record_base_state(base_state())
-    state.record_path(PathData(points=[], goal=GoalData(x=5.0, y=5.0)))
+    state.record_path(PathData(points=[(1, 1), (5, 5)], goal=GoalData(x=5.0, y=5.0),
+                               command_id="current", path_valid=True))
 
     still = PoseData(x=1.0, y=1.0, yaw=0.0, linear_velocity=0.0, angular_velocity=0.0)
     assert state.record_pose(still) == []  # stall clock starts, no event yet
@@ -162,7 +163,8 @@ def test_stall_not_counted_when_stop_is_explained():
     state = RobotState(Settings(stall_warning_s=0.05), "patrolbot-01")
     state.connection = "online"
     state.record_base_state(base_state(motors_enabled=False))
-    state.record_path(PathData(points=[], goal=GoalData(x=5.0, y=5.0)))
+    state.record_path(PathData(points=[(1, 1), (5, 5)], goal=GoalData(x=5.0, y=5.0),
+                               command_id="current", path_valid=True))
     still = PoseData(x=1.0, y=1.0, yaw=0.0, linear_velocity=0.0, angular_velocity=0.0)
     state.record_pose(still)
     _time.sleep(0.08)

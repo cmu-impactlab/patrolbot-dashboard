@@ -75,6 +75,8 @@ class PathData(MapContext):
     frame_id: str = "map"
     points: list[tuple[float, float]]
     goal: GoalData | None = None
+    command_id: str | None = None
+    path_valid: bool = False
 
 
 class BatteryEstimate(BaseModel):
@@ -240,16 +242,20 @@ class CommandAckData(BaseModel):
 
 
 class CommandProgressData(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     command_id: str
     stage: str
     detail: str | None = None
-    distance_remaining: float | None = None
+    distance_remaining: float | None = Field(default=None, ge=0)
+    path_valid: bool = False
 
 
 class CommandResultData(BaseModel):
     command_id: str
     outcome: CommandOutcome
     detail: str | None = None
+    error_code: int | None = None
+    error_message: str | None = None
 
 
 # ---- Server -> robot ------------------------------------------------------

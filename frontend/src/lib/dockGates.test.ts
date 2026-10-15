@@ -96,7 +96,18 @@ describe("motor enable", () => {
 describe("undock", () => {
   it("is allowed straight off the charger — the robot handles the rest", () => {
     expect(undockReason(facts())).toBeNull();               // charging, motors off
-    expect(undockReason(facts(READY_TO_UNDOCK))).toBeNull(); // released, motors on
+    expect(undockReason(facts({ motorsEnabled: true }))).toBeNull();
+    expect(undockReason(facts(READY_TO_UNDOCK))).toContain("not charging");
+  });
+
+  it("refuses a released robot even if the observer still says docked", () => {
+    expect(undockReason(facts({
+      chargeState: "docked", dockState: "DOCKED_CONFIRMED", dockStateValid: true,
+    }))).toContain("not charging");
+  });
+
+  it("defers missing map velocity to the robot's raw odometry check", () => {
+    expect(undockReason(facts({ localized: false, stationary: null }))).toBeNull();
   });
 
   it("trusts CLEAR_CONFIRMED over a stale float charge state", () => {
@@ -106,7 +117,7 @@ describe("undock", () => {
       dockStateValid: true,
       undockProfileCommissioned: true,
     });
-    expect(undockReason(clear)?.toLowerCase()).toContain("not on its dock");
+    expect(undockReason(clear)?.toLowerCase()).toContain("not charging");
   });
 
   it("refuses an invalid or uncommissioned dock observer", () => {
@@ -132,7 +143,7 @@ describe("undock", () => {
 
   it.each([
     [{ capabilities: ["charge_release"] }, "not commissioned"],
-    [{ chargeState: "not_charging" }, "not on its dock"],
+    [{ chargeState: "not_charging" }, "not charging"],
     [{ bumpersRear: true }, "rear bumper"],
     [{ estopPressed: true }, "emergency stop"],
     [{ stationary: false }, "still moving"],
@@ -198,15 +209,15 @@ describe("factsFrom", () => {
       .toBe(false);
   });
 
-  it("is not stationary without a pose to prove it", () => {
-    expect(factsFrom("online", baseState, null, ALL_CAPS).stationary).toBe(false);
+  it("does not invent a stopped velocity without a pose", () => {
+    expect(factsFrom("online", baseState, null, ALL_CAPS).stationary).toBeNull();
   });
 });
 
 describe("when the undock button appears", () => {
-  it("follows the robot's actual dock state", () => {
+  it("requires charging for a new undock and retains an active undock", () => {
     expect(showsUndock(facts())).toBe(true);                     // charging
-    expect(showsUndock(facts(RELEASED))).toBe(true);             // on dock, released
+    expect(showsUndock(facts(RELEASED))).toBe(false);            // on dock, released
     expect(showsUndock(facts({ chargeState: "not_charging" }))).toBe(false);
     expect(showsUndock(facts({ chargeState: "unknown" }))).toBe(false);
     // A usable observer proving departure hides it, whatever the raw charge

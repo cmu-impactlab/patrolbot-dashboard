@@ -66,6 +66,8 @@ export interface PathData extends MapContext {
   frame_id?: string;
   points: [number, number][];
   goal?: GoalData | null;
+  command_id?: string | null;
+  path_valid?: boolean;
 }
 
 export interface BatteryEstimate {
@@ -253,12 +255,15 @@ export interface CommandProgressData {
   stage: string;
   detail?: string | null;
   distance_remaining?: number | null;
+  path_valid?: boolean;
 }
 
 export interface CommandResultData {
   command_id: string;
   outcome: CommandOutcome;
   detail?: string | null;
+  error_code?: number | null;
+  error_message?: string | null;
 }
 
 export type AnyFrame =

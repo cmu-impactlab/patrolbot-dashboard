@@ -14,6 +14,7 @@ never /cmd_vel, and never anything that talks to the SBC.
 """
 from __future__ import annotations
 
+import math
 import os
 from collections import deque
 
@@ -42,6 +43,7 @@ try:
     from patrolbot_interfaces.msg import BaseState
 except ImportError:  # allows running against the simulator without the iface pkg
     BaseState = None
+
 
 
 class WebBridgeNode(Node):
@@ -94,10 +96,8 @@ class WebBridgeNode(Node):
             ("undock_dock_id", "main_charger"),
             # Commissioned 2026-07-26 after a validation-capped undock was
             # accepted on the real robot: full reverse, validation mode off.
-            # 0.60 m sits under the manager's 0.70 m hard cap; 0.10 m/s is the
-            # cap. The manager still reverses via Nav2 BackUp and then turns
-            # (undock_turn_yaw), so the robot ends up clear of the dock.
-            ("undock_reverse_distance", 0.60),
+            # Match the manager's 0.53 m hardware reverse, then turn away.
+            ("undock_reverse_distance", 0.53),
             # 0.10 m/s is the SBC's reverse authorization ceiling, not a
             # cautious default — 0.20 got the motors cut mid-reverse.
             ("undock_reverse_speed", 0.10),
@@ -119,6 +119,8 @@ class WebBridgeNode(Node):
             # robot, so this is about detecting a dead/restarted AMCL, not
             # ordinary idle silence.
             ("localization_max_age_s", 30.0),
+            # Enable only after all installed native binaries/interfaces are verified.
+            ("navigation_stationary_refresh_verified", False),
             # A charger latching against marginal dock contacts inverts
             # charge_state every few seconds. Everything downstream — the dock
             # button's meaning, the command gates, the charging event log,
@@ -271,6 +273,8 @@ class WebBridgeNode(Node):
                              mirror=bool(self.cfg["scan_mirror"])), **self._map_context()))
 
     def _on_plan(self, msg: Path) -> None:
+        if self._commands is not None:
+            return  # Untagged planner paths cannot identify a navigation command.
         if not self._path_throttle.ready() or not self._on_active_map(msg):
             return
         payload = normalizers.normalize_path(msg, int(self.cfg["path_max_points"]))
@@ -306,6 +310,8 @@ class WebBridgeNode(Node):
         # command prechecks, the payload feeds the server's gates and the UI,
         # and _maybe_seed_dock_pose re-seeds localization off it.
         payload["charge_state"] = self._charge_state_debounce.update(payload["charge_state"])
+        if self._commands is not None:
+            self._commands.update_navigation_context(payload)
         self._latest_base_state = payload
         self._latest_base_state_at = self.get_clock().now().nanoseconds / 1e9
         self.ws.send("telemetry.base_state", payload)
@@ -337,7 +343,7 @@ class WebBridgeNode(Node):
             self.get_logger().info(
                 "charging without a localization fix — seeding the dock pose")
 
-    def _localization_is_usable(self) -> bool:
+    def _localization_is_usable(self, ignore_age: bool = False) -> bool:
         """A tight covariance is not enough — the fix has to be recent too.
 
         Nav2 restarting leaves this node holding the last pose AMCL ever sent,
@@ -366,12 +372,20 @@ class WebBridgeNode(Node):
                                         amcl_stamp_ns, base_age):
             return False
         age = now - self._latest_amcl_at
-        if age > float(self.cfg["localization_max_age_s"]):
+        if not math.isfinite(age) or age < 0 or (not ignore_age and age > float(self.cfg["localization_max_age_s"])):
             return False
         return normalizers.amcl_localization_usable(
             self._latest_amcl,
             float(self.cfg["covariance_warn_threshold"]),
         )
+
+    def _age_only_refresh_eligible(self) -> bool:
+        return (self.cfg.get("navigation_stationary_refresh_verified", False)
+                and self._localization_is_usable(ignore_age=True)
+                and self.get_clock().now().nanoseconds / 1e9 - self._latest_amcl_at
+                    > float(self.cfg["localization_max_age_s"])
+                and self._latest_amcl.header.frame_id == "map"
+                and self._on_active_map(self._latest_amcl))
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         signature = normalizers.map_signature(msg)
@@ -429,7 +443,7 @@ class WebBridgeNode(Node):
                             - self._latest_odom_at)
             self._commands.handle(data, self._latest_base_state, current_yaw,
                                   self._localization_is_usable(), base_state_age,
-                                  odom_age)
+                                  odom_age, self._age_only_refresh_eligible())
 
     def _refresh_capabilities(self) -> None:
         """Tell the dashboard which dock operations are actually available.
@@ -440,9 +454,7 @@ class WebBridgeNode(Node):
         """
         if self._commands is None:
             return
-        # Same 2 s tick releases an undock whose action server died holding the
-        # goal; otherwise the bridge refuses every later attempt with "already
-        # undocking" until the container is restarted.
+        # Detect silent Undock actions without retiring their motion owner.
         self._commands.check_undock_health()
         available = self._commands.available_capabilities()
         if self._system_reset is not None and self._system_reset.available:

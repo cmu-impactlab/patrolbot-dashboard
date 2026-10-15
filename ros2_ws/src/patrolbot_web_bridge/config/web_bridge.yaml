@@ -38,6 +38,8 @@
     # value remains 0.25 and matches Dock Manager's position/yaw defaults;
     # covariance_trace remains telemetry for display/export, not this gate.
     covariance_warn_threshold: 0.25
+    # Rollout gate: enable only after native guard/planner/interface hash verification.
+    navigation_stationary_refresh_verified: false
 
     # Undock (patrolbot_dock_manager's /patrolbot/undock action). These are
     # node config, never browser input; the dock manager bounds them again
@@ -59,7 +61,7 @@
     # manager's hard caps (patrolbot_dock_manager/contracts.py::validate_goal)
     # are 0.70 m and 0.10 m/s. Commissioned 2026-07-26 on the real robot:
     # full reverse, validation mode off.
-    undock_reverse_distance: 0.60
+    undock_reverse_distance: 0.53
     undock_reverse_speed: 0.10
     undock_validation_mode: false
 

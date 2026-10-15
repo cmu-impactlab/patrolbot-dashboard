@@ -1,5 +1,5 @@
 import { useLidarReadyReason } from "../lib/lidar";
-import { localizationRecoveryReason, RECOVERY_RECEIPT_MAX_MS } from "../lib/localizationRecovery";
+import { navigationLocalizationReason, RECOVERY_RECEIPT_MAX_MS } from "../lib/localizationRecovery";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, Power, X,
@@ -28,9 +28,8 @@ const OUTCOME_COPY: Record<string, string> = {
  * drive power without sending motion.
  *
  * There is no Dock control to pair with Undock: the robot has no automatic
- * dock-in path, so it is driven onto its charger by hand. Undock appears only
- * when the robot is on the dock, and is absent rather than greyed out
- * otherwise — a permanently disabled button reads as something broken.
+ * dock-in path, so it is driven onto its charger by hand. Undock appears while
+ * charging or while an accepted undock is active, and is otherwise absent.
  */
 export function NavControlsWidget() {
   const mayCommand = canCommand(useAuthStore(state => state.user));
@@ -67,7 +66,10 @@ export function NavControlsWidget() {
   // unconfirmed pose.
   const recoveryAt = useTelemetryStore(state => state.baseStateAt);
   const recoveryFresh = useIsFresh(recoveryAt, RECOVERY_RECEIPT_MAX_MS);
-  const recoveryReason = localizationRecoveryReason(recoveryFresh ? baseState : null, recoveryAt);
+  const poseAt = useTelemetryStore(state => state.poseReceivedAt);
+  const poseFresh = useIsFresh(poseAt, RECOVERY_RECEIPT_MAX_MS);
+  const recoveryReason = navigationLocalizationReason(recoveryFresh ? baseState : null, recoveryAt,
+    poseFresh ? pose : null, poseAt, capabilities, allowUnlocalized);
   const lidarPending = useCommandStore(state => state.lidarPending);
   const lidarRecoveryRequired = useCommandStore(state => state.lidarRecoveryRequired);
   const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
@@ -85,13 +87,12 @@ export function NavControlsWidget() {
   // server's own gates read them: they judge receipt age, so a browser working
   // from a frozen frame would otherwise offer a control the server refuses.
   const baseFresh = useIsFresh(useTelemetryStore((state) => state.baseStateAt));
-  const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
   const facts = factsFrom(connection.state, baseFresh ? baseState : null,
     poseFresh ? pose : null, capabilities,
     active?.command === "navigate_to_pose");
-  const onDock = showsUndock(facts);
-  const undockBlockedReason = lidarReason ?? undockReason(facts);
   const undockBusy = active?.command === "undock" || facts.undockActive;
+  const onDock = undockBusy || showsUndock(facts);
+  const undockBlockedReason = undockBusy ? "The robot is already undocking." : lidarReason ?? undockReason(facts);
   const motorsEnabled = baseState?.motors_enabled === true;
   const motorEnableBusy = active?.command === "motor_enable";
   const motorDisableBusy = active?.command === "motor_disable";
@@ -120,7 +121,7 @@ export function NavControlsWidget() {
         <div className="nav-pick-banner">
           {pickMode === "goal"
             ? "Press on the Live Map where the robot should go, and drag to choose which way it should face."
-            : "Press on the robot's true position on the Live Map, and drag toward where it is facing."}
+            : "Press on the robot's true position on the Live Map, and drag toward where it is facing. Hold Ctrl to use measured position and heading."}
           <button className="btn" onClick={() => setPickMode("none")} title="Cancel">
             <X size={13} /> Cancel
           </button>
@@ -318,7 +319,7 @@ export function NavControlsWidget() {
               ?? "Move the robot clear of its charging dock and turn it around"}
           >
             <ArrowUpFromDot size={15} />
-            {facts.undockActive ? "Undocking…" : "Undock"}
+            {undockBusy ? "Undocking…" : "Undock"}
           </button>
         )}
         {offerResume ? (

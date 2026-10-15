@@ -1,5 +1,5 @@
 import { lidarReadyReason } from "./lidar";
-import { localizationRecoveryReason } from "./localizationRecovery";
+import { navigationLocalizationReason } from "./localizationRecovery";
 import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore, type PickMode } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
@@ -18,7 +18,8 @@ export function mapCommandReason(mode: PickMode): string | null {
   if (lidarReason) return lidarReason;
   if (commands.active?.phase === "sending" || (commands.active && commands.active.command !== "navigate_to_pose")) return "Wait for the current command to finish.";
   if (mode === "goal") {
-    const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt);
+    const reason = navigationLocalizationReason(telemetry.baseState, telemetry.baseStateAt,
+      telemetry.pose, telemetry.poseReceivedAt, telemetry.capabilities, commands.allowUnlocalized);
     if (reason) return reason;
   }
   if (mode === "goal" && !telemetry.poseSetThisSession && !commands.allowUnlocalized)

@@ -163,7 +163,8 @@ class RobotState:
         base = self.base_state.data
         explained = base is not None and (not base.motors_enabled or base.estop_pressed)
         stopped = abs(data.linear_velocity) < 0.02 and abs(data.angular_velocity) < 0.05
-        if path is None or path.goal is None or not stopped or explained:
+        if (path is None or not path.path_valid or not path.command_id
+                or path.goal is None or not stopped or explained):
             self._stopped_since_mono = None
             self._stalled = False
             return []

@@ -19,6 +19,8 @@ import math
 import time
 from typing import Any
 
+from . import normalizers
+
 log = logging.getLogger("web_bridge.commands")
 
 DISABLED_REASON = (
@@ -150,8 +152,11 @@ UNDOCK_STAGE_TEXT = {
     "VERIFY_LOCALIZATION": "Confirming the robot's location",
     "VERIFY_COMMAND_PATH": "Checking the guarded motion path",
     "HARDWARE_UNDOCK": "Moving clear of the dock",
+    "VERIFY_HANDOFF": "Checking the robot is ready to turn",
     "RESTORE_LOCALIZATION": "Refreshing the robot's location",
     "TURN_AWAY_FROM_DOCK": "Turning away from the dock",
+    "UNKNOWN": "Waiting for the robot to confirm the undock outcome",
+    "STOPPING": "Waiting for undocking to stop",
     "STOPPED": "Stopping clear of the dock",
     "RELEASING": "Releasing the charger",
     "ENABLING_MOTORS": "Powering the motors",
@@ -198,6 +203,18 @@ def service_detail(code: int, message: str) -> str:
     if message and message.strip() and int(code) != 0:
         text = f"{text} ({message.strip()})"
     return text
+
+
+def navigation_failure_detail(code: int, message: str = "") -> str:
+    reason = {
+        205: "The robot's planning start is blocked by obstacles.",
+        305: "A planning start or intermediate waypoint is blocked by obstacles.",
+        207: "The navigation costmap did not update in time.",
+        307: "The navigation costmap did not update in time.",
+        208: "No route to the destination could be found.",
+        308: "No route through the destinations could be found.",
+    }.get(code, "The robot could not reach the destination.")
+    return f"{reason} Navigation error {code}." + (f" {message.strip()}" if message.strip() else "")
 
 
 def undock_stage(state: str, hardware_phase: str = "") -> str:
@@ -249,7 +266,8 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
              localized: bool = False, base_state_age: float | None = None,
              allow_unlocalized: bool = False,
              odom_age: float | None = None,
-             operator_authorized: bool = False) -> str | None:
+             operator_authorized: bool = False,
+             age_only_refresh_eligible: bool = False) -> str | None:
     """Plain-language rejection reason, or None when the command may proceed.
 
     base_state is the latest normalized base_state payload (a dict) or None
@@ -280,6 +298,26 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
                 or (base_state or {}).get("lidar_state") != "READY" or not math.isfinite(age)
                 or not math.isfinite(receipt) or age < 0 or receipt < 0 or age + receipt > .5):
             return "LiDAR is off, starting, stale or unavailable — wait for fresh scans."
+    if command == "undock":
+        if base_state.get("fault_flags"):
+            return (f"The drive base is reporting a fault (code {int(base_state['fault_flags'])}). "
+                    "Clear it on the robot first.")
+        if base_state.get("dock_state_valid") is False:
+            return "The robot's dock observer is not reporting valid data. Check the robot before trying to undock."
+        if base_state.get("undock_profile_commissioned") is False:
+            return "The robot's guarded undock profile has not been commissioned."
+        if base_state.get("undock_active"):
+            return "The robot is already undocking."
+        departed = base_state.get("dock_state_valid") and base_state.get("dock_state", "").strip().upper() in {"CLEAR_CONFIRMED", "DEPARTING"}
+        if departed or base_state.get("charge_state", "").strip().lower() not in CHARGING_STATES:
+            return "The robot is not charging, so it cannot start undocking."
+        if base_state.get("estop_pressed"):
+            return "The emergency stop is pressed. Release it on the robot first."
+        if base_state.get("bumpers_valid") is not True:
+            return ("The robot cannot confirm its bumper readings, so it cannot "
+                    "tell whether anything is behind it. Check the robot before undocking.")
+        if base_state.get("bumpers_rear"):
+            return "The rear bumper is pressed — clear whatever is behind the robot before backing it off the dock."
     if command == "navigate_to_pose":
         if base_state is None:
             return "The robot's drive base has not reported in yet — cannot navigate."
@@ -334,18 +372,19 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
         # safety gate; anything arriving here unstamped is treated as if the
         # override had not been asked for.
         override = allow_unlocalized and operator_authorized
-        # Bound to the override only, so the ordinary path keeps exactly the
-        # behaviour it had. On that path `localized` already implies a recent
-        # AMCL pose; the override is precisely what removes that implication,
+        # An override or stationary-refresh admission still needs fresh odometry.
+        # On the ordinary path `localized` already implies a recent AMCL pose;
+        # these two admissions remove that implication,
         # and would otherwise leave the bridge with no pose-recency check at
         # all. "Unsure where it is" and "no longer saying where it is" are
         # different failures, and only the first is the operator's to accept.
         # This matters because the bridge is the barrier that has to hold when
         # a crafted or replayed frame arrives without passing the server.
-        if override and (odom_age is None or odom_age > MAX_ODOM_AGE_S):
+        if (override or age_only_refresh_eligible) and (odom_age is None
+                or not math.isfinite(odom_age) or not 0 <= odom_age <= MAX_ODOM_AGE_S):
             return ("The robot has stopped reporting its position — wait for "
                     "fresh data before sending it anywhere.")
-        if not localized and not override:
+        if not localized and not override and not age_only_refresh_eligible:
             return "The robot does not know where it is. Set its location first."
         # RViz has always been able to send a goal on a bad fix -- Nav2 has no
         # localization gate of its own -- so the override restores parity
@@ -363,6 +402,7 @@ class CommandExecutor:
     def __init__(self, node, ws, undock_config: dict | None = None) -> None:
         from geometry_msgs.msg import PoseWithCovarianceStamped
         from nav2_msgs.action import NavigateToPose
+        from patrolbot_interfaces.srv import GetNavigationPath
         from rclpy.action import ActionClient
 
         self._node = node
@@ -370,13 +410,21 @@ class CommandExecutor:
         self._NavigateToPose = NavigateToPose
         self._PoseWithCovarianceStamped = PoseWithCovarianceStamped
         self._nav_client = ActionClient(node, NavigateToPose, "navigate_to_pose")
+        self._GetNavigationPath = GetNavigationPath
+        self._path_client = node.create_client(GetNavigationPath, "/patrolbot/navigate_to_pose_path")
+        self._path_future = None
+        self._last_navigation_path = None
+        node.create_timer(.5, self._poll_navigation_path)
         from patrolbot_interfaces.action import LocalizeOnMap
         self._LocalizeOnMap = LocalizeOnMap
         self._map_client = ActionClient(node, LocalizeOnMap, "/patrolbot/localize_on_map")
         self._map_active = None
         node.create_timer(.1, self._check_map_connection)
         self._active: dict | None = None  # {command_id, goal_handle}
+        self._nav_pending = None
         self._last_progress_mono = 0.0
+        self._navigation_context = None
+        self._navigation_generation = 0
         node.get_logger().warning(
             "WEB_BRIDGE_ENABLE_COMMANDS=1 — motion commands are ENABLED")
 
@@ -469,13 +517,11 @@ class CommandExecutor:
     # -- undock watchdog -------------------------------------------------------
 
     def check_undock_health(self) -> None:
-        """Close out an undock whose action server died holding the goal.
+        """Cancel and retain an undock whose action server stopped answering.
 
-        A crashed dock manager never resolves the result future, so without
-        this `_undock_active` stays set forever and every later attempt is
-        refused with "the robot is already undocking" — the bridge wedged
-        until someone restarts the container. The dashboard's own 120 s
-        timeout closes the *command*; only this clears the bridge's state.
+        Silence cannot resolve its movement outcome. Keep the owner until an
+        actual result or explicit operator recovery; never offer a retry while
+        the earlier operation may still be moving.
 
         Two consecutive misses before declaring, because the server briefly
         reads unavailable while launch respawns it.
@@ -489,24 +535,22 @@ class CommandExecutor:
             if self._undock_server_misses >= 2:
                 self._fail_undock(
                     "The robot's docking system stopped responding mid-undock. "
-                    "The robot has not moved — check the dock manager on the robot.")
+                    "Its motion outcome is unknown — check the robot and dock manager.")
             return
         self._undock_server_misses = 0
         if time.monotonic() - active["started"] > self._undock_timeout_s:
-            self._fail_undock("Undocking did not finish in time and was abandoned.")
+            self._fail_undock("Undocking did not finish in time; cancellation was requested.")
 
     def _fail_undock(self, detail: str) -> None:
         active = self._undock_active
-        if active is None:
+        if active is None or active.get("uncertain", False):
             return
-        self._undock_active = None
-        self._undock_server_misses = 0
-        self._node.get_logger().warning(f"undock closed out: {detail}")
-        self._result(active["command_id"], "failed", detail)
-        for stop_command_id in self._claim_all_stops(active):
-            self._result(stop_command_id, "failed",
-                         "The robot stopped answering while being stopped. It may "
-                         "still be moving — use the emergency stop on the robot.")
+        active["uncertain"] = True
+        self._cancel_navigation(active["command_id"])
+        self._node.get_logger().warning(f"undock outcome unknown: {detail}")
+        self._ws.send("command.progress", {"command_id": active["command_id"],
+            "stage": "unknown", "distance_remaining": None,
+            "detail": detail + " The outcome is unknown; do not retry. Use motor disable or the emergency stop."})
 
     # -- capability advertisement ----------------------------------------------
 
@@ -519,6 +563,9 @@ class CommandExecutor:
         command at all — the robot has no dock-in path to advertise.
         """
         capabilities: list[str] = []
+        if (self._node.cfg.get("navigation_stationary_refresh_verified", False)
+                and self._nav_client.server_is_ready() and self._path_client.service_is_ready()):
+            capabilities.append("navigation_stationary_refresh_v1")
         if self._map_client.server_is_ready():
             capabilities.append("map_context_v1")
         if self._undock_client is not None and self._undock_client.server_is_ready():
@@ -539,15 +586,18 @@ class CommandExecutor:
         self._ws.send("command.ack", {"command_id": command_id,
                                       "accepted": accepted, "reason": reason})
 
-    def _result(self, command_id: str, outcome: str, detail: str | None = None) -> None:
+    def _result(self, command_id: str, outcome: str, detail: str | None = None,
+                **result_fields) -> None:
         self._ws.send("command.result", {"command_id": command_id,
-                                         "outcome": outcome, "detail": detail})
+                                         "outcome": outcome, "detail": detail,
+                                         **result_fields})
 
     # -- dispatch --------------------------------------------------------------
 
     def handle(self, data: dict, base_state: dict | None, current_yaw: float | None,
                localized: bool = False, base_state_age: float | None = None,
-               odom_age: float | None = None) -> None:
+               odom_age: float | None = None,
+               age_only_refresh_eligible: bool = False) -> None:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
@@ -555,9 +605,11 @@ class CommandExecutor:
         if seed_profile is not None and (command != "set_initial_pose" or seed_profile != "measured"):
             self._ack(command_id, False, "Invalid measured seed profile.")
             return
-        if command == "cancel_map":
+        if command in {"cancel", "cancel_map"}:
             if self._map_active and self._map_active["command_id"] == command_id:
                 self._check_map_connection(cancel=True)
+            if command == "cancel":
+                self._cancel_navigation(command_id)
             return
 
         if command in {"motor_enable", "motor_disable"}:
@@ -599,7 +651,8 @@ class CommandExecutor:
         allow_unlocalized = bool(data.get("allow_unlocalized", False))
         operator_authorized = bool(data.get("operator_authorized", False))
         reason = precheck(command, goal, base_state, localized, base_state_age,
-                          allow_unlocalized, odom_age, operator_authorized)
+                          allow_unlocalized, odom_age, operator_authorized,
+                          age_only_refresh_eligible)
         if reason is not None:
             self._ack(command_id, False, reason)
             return
@@ -663,23 +716,45 @@ class CommandExecutor:
         nav_goal.pose.pose.orientation.z = qz
         nav_goal.pose.pose.orientation.w = qw
 
+        self._clear_navigation_path()
         generation = getattr(self, "_motor_disable_generation", 0)
+        context = self._navigation_context
+        self._navigation_generation = getattr(self, "_navigation_generation", 0) + 1
+        navigation_generation = self._navigation_generation
+        self._nav_pending = {"command_id": command_id, "cancel": False}
         future = self._nav_client.send_goal_async(
             nav_goal, feedback_callback=lambda fb: self._on_feedback(command_id, fb))
-        future.add_done_callback(lambda f: self._on_goal_response(command_id, f, generation))
+        future.add_done_callback(lambda f: self._on_goal_response(
+            command_id, f, generation, context, navigation_generation))
 
-    def _on_goal_response(self, command_id: str, future, generation: int | None = None) -> None:
+    def _on_goal_response(self, command_id: str, future, generation: int | None = None,
+                          context: tuple | None = None,
+                          navigation_generation: int | None = None) -> None:
+        pending = getattr(self, "_nav_pending", None)
+        if pending is None or pending["command_id"] != command_id:
+            pending = None
         try:
             goal_handle = future.result()
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator
             self._ack(command_id, False, f"Navigation refused the request: {exc}")
             return
         if not goal_handle.accepted:
+            if pending is not None and self._nav_pending is pending:
+                self._nav_pending = None
             self._ack(command_id, False, "Navigation declined the destination.")
             return
         if generation is not None and generation != getattr(self, "_motor_disable_generation", 0):
             goal_handle.cancel_goal_async()
             self._ack(command_id, False, "Destination canceled by motor disable.")
+            return
+        if (navigation_generation is not None and navigation_generation !=
+                getattr(self, "_navigation_generation", 0)):
+            goal_handle.cancel_goal_async()
+            self._ack(command_id, False, "A newer destination replaced this request.")
+            return
+        if context is not None and context != self._navigation_context:
+            goal_handle.cancel_goal_async()
+            self._ack(command_id, False, "Destination canceled because the robot context changed.")
             return
         # Nav2 preempts a prior goal itself; close ours out for the UI.
         if self._active is not None:
@@ -692,39 +767,228 @@ class CommandExecutor:
                              "A new destination replaced the goal being stopped. "
                              "The robot is moving again — use the emergency stop "
                              "on the robot.")
-        self._active = {"command_id": command_id, "goal_handle": goal_handle}
+        self._active = {"command_id": command_id, "goal_handle": goal_handle,
+                        "goal_id": bytes(goal_handle.goal_id.uuid),
+                        "navigation_context": self._navigation_context,
+                        "path_valid": False, "path_blocked": False}
+        if pending is not None and self._nav_pending is pending:
+            self._nav_pending = None
+        self._last_progress_mono = 0.0
         self._ack(command_id, True)
+        self._clear_navigation_path()
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(lambda f: self._on_result(command_id, f))
+        if pending is not None and pending["cancel"]:
+            self._cancel_navigation(command_id)
+
+    def _cancel_navigation(self, command_id: str) -> None:
+        undock = self._undock_active
+        if undock is not None and undock["command_id"] == command_id:
+            if not undock.get("cancel_requested", False):
+                undock["cancel_requested"] = True
+                if undock.get("goal_handle") is not None:
+                    try:
+                        undock["goal_handle"].cancel_goal_async()
+                    except Exception as exc:
+                        self._ws.send("command.progress", {"command_id": command_id,
+                            "stage": "stopping", "distance_remaining": None,
+                            "detail": f"Undock could not be asked to stop: {exc}. Use Stop or the emergency stop."})
+            return
+        pending = getattr(self, "_nav_pending", None)
+        if pending is not None and pending["command_id"] == command_id:
+            pending["cancel"] = True
+        active = self._active
+        if (active is None or active["command_id"] != command_id
+                or active.get("cancel_requested", False)):
+            return
+        active["cancel_requested"] = active["cancel_pending"] = active["path_blocked"] = True
+        self._clear_navigation_path()
+        self._ws.send("command.progress", {"command_id": command_id,
+            "stage": "stopping", "path_valid": False, "distance_remaining": None,
+            "detail": "Waiting for navigation to stop."})
+        try:
+            future = active["goal_handle"].cancel_goal_async()
+        except Exception as exc:
+            self._on_navigation_cancel_response(active, None, str(exc))
+            return
+        future.add_done_callback(lambda f: self._on_navigation_cancel_response(active, f))
+
+    def _on_navigation_cancel_response(self, active: dict, future, error: str = "") -> None:
+        if self._active is not active:
+            return
+        try:
+            if future is not None and cancel_verdict(future.result()) in {"canceling", "finished"}:
+                return  # Only the goal's terminal result closes the command.
+        except Exception as exc:
+            error = str(exc)
+        active["cancel_pending"] = False
+        self._ws.send("command.progress", {"command_id": active["command_id"],
+            "stage": "stopping", "path_valid": False, "distance_remaining": None,
+            "detail": "Navigation did not confirm cancellation. It may still be moving; use Stop or the emergency stop."
+                      + (f" {error}" if error else "")})
+
+    def update_navigation_context(self, base_state: dict) -> None:
+        context = tuple(base_state.get(k) for k in (
+            "map_id", "map_revision", "map_activated_stamp_ns", "session_generation",
+            "odom_epoch_valid", "localization_recovery_required", "localization_seed_stamp_ns"))
+        if context != self._navigation_context:
+            self._navigation_context = context
+            if self._active is not None:
+                self._active["path_blocked"] = True
+                self._clear_navigation_path()
+
+    def _clear_navigation_path(self) -> None:
+        active = self._active
+        if active is None:
+            return
+        active["path_valid"] = False
+        self._last_navigation_path = None
+        context = active.get("navigation_context") or (None, None)
+        self._send_navigation_progress(active)
+        self._ws.send("telemetry.path", {"frame_id": "map", "points": [], "goal": None,
+                      "command_id": active["command_id"], "path_valid": False,
+                      "map_id": context[0], "map_revision": context[1]})
+
+    def _poll_navigation_path(self) -> None:
+        if self._path_future is not None and not self._path_future.done():
+            if time.monotonic() - self._path_sent_mono <= 2.0:
+                return
+            self._path_client.remove_pending_request(self._path_future)
+            self._path_future = None
+            self._clear_navigation_path()
+        active = self._active
+        if active is None or active.get("path_blocked", False):
+            return
+        if not self._path_client.service_is_ready():
+            if active.get("path_valid", False):
+                self._clear_navigation_path()
+            return
+        request = self._GetNavigationPath.Request()
+        request.goal_id.uuid = list(active["goal_id"])
+        self._path_sent_mono = time.monotonic()
+        self._path_future = self._path_client.call_async(request)
+        self._path_future.add_done_callback(
+            lambda future: self._on_navigation_path(active, future))
+
+    def _on_navigation_path(self, active: dict, future) -> None:
+        if (self._active is not active or future is not self._path_future
+                or active.get("path_blocked", False)
+                or active.get("navigation_context") != self._navigation_context):
+            return
+        try:
+            response = future.result()
+        except Exception:  # A lost navigator cannot retain a usable path.
+            self._clear_navigation_path()
+            return
+        if not response.active:
+            self._clear_navigation_path()
+            return
+        stage = getattr(response, "planning_stage", "") or ""
+        code = int(getattr(response, "planning_error_code", 0))
+        message = (getattr(response, "planning_error_message", "") or "").strip()
+        status = (stage, code, message)
+        active["planning_status"] = status
+        if stage in {"planning", "refreshing", "failed"} or code:
+            self._clear_navigation_path()
+            return
+        payload = self.navigation_path(active["goal_id"], response.path)
+        if payload is not None and not payload["path_valid"]:
+            self._send_navigation_progress(active)
+        if payload is not None and payload != self._last_navigation_path:
+            self._last_navigation_path = payload
+            self._ws.send("telemetry.path", payload)
+
+    def navigation_path(self, goal_id: bytes, path) -> dict | None:
+        active = self._active
+        if (active is None or active.get("path_blocked", False)
+                or goal_id != active.get("goal_id")
+                or active.get("navigation_context") != self._navigation_context):
+            return None
+        context = self._navigation_context
+        if (context is None or not context[0] or not context[1]
+                or not context[4] or context[5]):
+            return None
+        valid = bool(path.poses)
+        if valid:
+            stamp = path.header.stamp.sec * 1_000_000_000 + path.header.stamp.nanosec
+            valid = (path.header.frame_id == "map"
+                     and stamp >= max(context[2] or 0, context[6] or 0) > 0
+                     and all(math.isfinite(float(v)) for pose in path.poses for v in (
+                         pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
+                         pose.pose.orientation.x, pose.pose.orientation.y,
+                         pose.pose.orientation.z, pose.pose.orientation.w)))
+        active["path_valid"] = valid
+        payload = (normalizers.normalize_path(path, int(self._node.cfg["path_max_points"]))
+                   if valid else {"frame_id": "map", "points": [], "goal": None})
+        payload.update(command_id=active["command_id"], path_valid=valid,
+                       map_id=context[0], map_revision=context[1])
+        if payload.get("goal"):
+            payload["goal"].update(map_id=context[0], map_revision=context[1])
+        return payload
 
     def _on_feedback(self, command_id: str, feedback_msg) -> None:
+        active = self._active
+        if (active is None or active["command_id"] != command_id
+                or bytes(feedback_msg.goal_id.uuid) != active.get("goal_id")):
+            return
         now = time.monotonic()
         if now - self._last_progress_mono < 1.0:
             return
         self._last_progress_mono = now
         distance = getattr(feedback_msg.feedback, "distance_remaining", None)
+        stopping = active.get("cancel_requested", False)
+        valid = (not stopping and active.get("path_valid", False)
+                 and distance is not None and math.isfinite(float(distance))
+                 and float(distance) >= 0.0)
+        self._send_navigation_progress(active, float(distance) if valid else None)
+
+    def _send_navigation_progress(self, active: dict, distance: float | None = None) -> None:
+        stopping = active.get("cancel_requested", False)
+        valid = not stopping and active.get("path_valid", False) and distance is not None
+        stage, code, message = active.get("planning_status", ("", 0, ""))
+        if stopping:
+            stage, detail = "stopping", "Waiting for navigation to stop"
+        elif stage == "refreshing":
+            detail = "Refreshing localization while stationary."
+        elif code:
+            stage = "failed"
+            detail = navigation_failure_detail(code, message)
+        elif valid:
+            stage, detail = "navigating", "Heading to the destination"
+        else:
+            stage, detail = "planning", "Planning a path to the destination"
         self._ws.send("command.progress", {
-            "command_id": command_id, "stage": "navigating",
-            "detail": "Heading to the destination",
-            "distance_remaining": round(float(distance), 2) if distance is not None else None,
+            "command_id": active["command_id"], "stage": stage, "detail": detail,
+            "path_valid": bool(valid),
+            "distance_remaining": round(distance, 2) if valid and distance is not None else None,
         })
 
     def _on_result(self, command_id: str, future) -> None:
         if self._active is None or self._active["command_id"] != command_id:
             return  # already superseded/canceled and reported
         stops = self._claim_all_stops(self._active)
+        self._clear_navigation_path()
         self._active = None
         try:
-            status = future.result().status
+            response = future.result()
+            status = response.status
         except Exception as exc:  # noqa: BLE001
             self._result(command_id, "failed", f"Navigation ended abnormally: {exc}")
             outcome = "failed"
         else:
             outcome = map_goal_status(status)
-            self._result(command_id, outcome,
-                         {"succeeded": "Arrived at the destination.",
-                          "canceled": "Navigation was canceled.",
-                          "failed": "The robot could not reach the destination."}[outcome])
+            result = getattr(response, "result", None)
+            code = getattr(result, "error_code", None)
+            message = getattr(result, "error_msg", "") or ""
+            detail = {"succeeded": "Arrived at the destination.",
+                      "canceled": "Navigation was canceled.",
+                      "failed": "The robot could not reach the destination."}[outcome]
+            if outcome == "failed" and code:
+                detail = navigation_failure_detail(int(code), message)
+            elif outcome == "failed" and message.strip():
+                detail += f" {message.strip()}"
+            self._result(command_id, outcome, detail, error_code=code,
+                         error_message=message.strip() or None)
         # The goal is terminal, so Nav2 is no longer driving the robot — only
         # now can anything true be said about the robot having stopped.
         for stop_command_id in stops:
@@ -749,9 +1013,15 @@ class CommandExecutor:
         if active is None:
             self._result(command_id, "succeeded", "The robot was not navigating.")
             return
+        already_cancelling = bool(active.get("stop_command_ids")) or active.get("cancel_pending", False)
+        active["cancel_requested"] = True
+        if active is self._active:
+            active["path_blocked"] = True
+            self._clear_navigation_path()
         stops = active.setdefault("stop_command_ids", [])
-        already_cancelling = bool(stops)
         stops.append(command_id)
+        if active.get("goal_handle") is None:
+            return  # Cancel an undock whose acceptance reply has not arrived.
         if already_cancelling:
             # A cancel is already in flight for this goal. Asking again would
             # get ERROR_GOAL_TERMINATED — which the server returns for a goal
@@ -832,7 +1102,7 @@ class CommandExecutor:
         if self._undock_active is not None:
             self._ack(command_id, False, "The robot is already undocking.")
             return
-        if self._active is not None:
+        if self._active is not None or getattr(self, "_nav_pending", None) is not None:
             # The other half of _navigate's guard: never two motion owners.
             self._ack(command_id, False,
                       "The robot is driving to a destination. Stop it before "
@@ -841,23 +1111,40 @@ class CommandExecutor:
 
         goal = self._Undock.Goal()
         goal.dock_id = str(self._undock_config.get("dock_id", ""))
-        goal.reverse_distance = float(self._undock_config.get("reverse_distance", 0.5))
+        goal.reverse_distance = float(self._undock_config.get("reverse_distance", 0.53))
         goal.reverse_speed = float(self._undock_config.get("reverse_speed", 0.1))
         goal.validation_mode = bool(self._undock_config.get("validation_mode", False))
         goal.operator_authorized = True
 
         generation = getattr(self, "_motor_disable_generation", 0)
-        future = self._undock_client.send_goal_async(
-            goal, feedback_callback=lambda fb: self._on_undock_feedback(command_id, fb))
+        self._undock_active = {"command_id": command_id, "goal_handle": None,
+                               "started": time.monotonic()}
+        try:
+            future = self._undock_client.send_goal_async(
+                goal, feedback_callback=lambda fb: self._on_undock_feedback(command_id, fb))
+        except Exception as exc:
+            self._undock_active = None
+            self._ack(command_id, False, f"The undock request could not be sent: {exc}")
+            return
         future.add_done_callback(lambda f: self._on_undock_response(command_id, f, generation))
 
     def _on_undock_response(self, command_id: str, future, generation: int | None = None) -> None:
+        active = self._undock_active
         try:
             goal_handle = future.result()
+            if goal_handle is None:
+                raise RuntimeError("the action returned no acceptance reply")
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator
-            self._ack(command_id, False, f"The robot refused the undock request: {exc}")
+            if active is None or active["command_id"] != command_id:
+                return
+            self._fail_undock(f"Undock acceptance is unknown: {exc}.")
+            return
+        if active is None or active["command_id"] != command_id:
+            if goal_handle.accepted:
+                goal_handle.cancel_goal_async()
             return
         if not goal_handle.accepted:
+            self._undock_active = None
             # A rejected ROS action goal carries no message, and the dock
             # manager's real reason (unknown dock id, out-of-range distance or
             # speed, another goal active) only reaches its own log. Echo the
@@ -871,49 +1158,70 @@ class CommandExecutor:
                       f"{float(config.get('reverse_speed', 0)):.2f} m/s"
                       f"{', validation mode' if config.get('validation_mode') else ''}). "
                       "The robot's dock manager log has the exact reason.")
+            for stop_id in self._claim_all_stops(active):
+                self._result(stop_id, "succeeded", "The robot did not accept the undock request.")
             return
         if generation is not None and generation != getattr(self, "_motor_disable_generation", 0):
-            goal_handle.cancel_goal_async()
-            self._ack(command_id, False, "Undock canceled by motor disable.")
-            return
-        self._undock_active = {"command_id": command_id, "goal_handle": goal_handle,
-                               "started": time.monotonic()}
+            active["cancel_requested"] = True
+        active["goal_handle"] = goal_handle
         self._undock_server_misses = 0
         self._ack(command_id, True)
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(lambda f: self._on_undock_result(command_id, f))
+        if active.get("cancel_requested", False):
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+            except Exception as exc:
+                for stop_id in list(active.get("stop_command_ids", [])):
+                    self._fail_stop(stop_id, f"The robot could not be asked to stop: {exc}.")
+                return
+            stops = active.get("stop_command_ids", [])
+            if stops:
+                stop_id = stops[0]
+                cancel_future.add_done_callback(lambda f: self._on_cancel_response(stop_id, f))
 
     def _on_undock_feedback(self, command_id: str, feedback_msg) -> None:
+        active = self._undock_active
+        if active is None or active["command_id"] != command_id or active.get("goal_handle") is None:
+            return
         now = time.monotonic()
         if now - self._last_undock_progress_mono < 1.0:
             return
         self._last_undock_progress_mono = now
         feedback = feedback_msg.feedback
-        state = getattr(feedback, "state", "")
+        state = "STOPPING" if active.get("cancel_requested", False) else getattr(feedback, "state", "")
         hardware_phase = getattr(feedback, "hardware_phase", "")
         self._ws.send("command.progress", {
             "command_id": command_id,
             "stage": state or "undocking",
-            "detail": undock_stage(state, hardware_phase),
+            "detail": "Waiting for undocking to stop" if state == "STOPPING" else undock_stage(state, hardware_phase),
             "distance_remaining": None,
         })
 
     def _on_undock_result(self, command_id: str, future) -> None:
         if self._undock_active is None or self._undock_active["command_id"] != command_id:
             return
+        try:
+            wrapped = future.result()
+            if getattr(wrapped, "status", None) not in (
+                    _STATUS_SUCCEEDED, _STATUS_CANCELED, _STATUS_ABORTED):
+                raise RuntimeError("the action returned no terminal result")
+            result = wrapped.result
+            code = int(result.code)
+            outcome = undock_outcome(bool(result.success), code)
+            detail = undock_detail(code, getattr(result, "message", ""),
+                bool(getattr(result, "manual_recovery_required", False)))
+            if ((outcome in {"succeeded", "canceled"}
+                 and outcome != map_goal_status(wrapped.status))
+                    or (code == 0 and not result.success)):
+                outcome = "failed"
+                detail = "The robot returned an inconsistent undock result. Check the robot before assuming it has stopped."
+        except Exception as exc:  # noqa: BLE001
+            self._fail_undock(f"Undock result is unknown: {exc}.")
+            return
         stops = self._claim_all_stops(self._undock_active)
         self._undock_active = None
-        try:
-            result = future.result().result
-        except Exception as exc:  # noqa: BLE001
-            self._result(command_id, "failed", f"Undocking ended abnormally: {exc}")
-            outcome = "failed"
-        else:
-            code = int(getattr(result, "code", 1))
-            outcome = undock_outcome(bool(result.success), code)
-            self._result(command_id, outcome, undock_detail(
-                code, getattr(result, "message", ""),
-                bool(getattr(result, "manual_recovery_required", False))))
+        self._result(command_id, outcome, detail)
         for stop_command_id in stops:
             self._result(stop_command_id, *stop_result(outcome))
 
@@ -924,6 +1232,9 @@ class CommandExecutor:
                                 "release charging")
 
     def _motor_disable(self, command_id: str) -> None:
+        if self._active is not None:
+            self._active["path_blocked"] = True
+            self._clear_navigation_path()
         self._motor_disable_generation = getattr(self, "_motor_disable_generation", 0) + 1
         self._call_dock_service(command_id, getattr(self, "_motor_disable_client", None),
                                 getattr(self, "_MotorDisable", None), "turn the motors off")
@@ -934,6 +1245,9 @@ class CommandExecutor:
                 self._node.get_logger().warning(f"Motor disable map cancellation failed: {exc}")
         for active in (self._active, self._undock_active):
             if active is not None:
+                active["cancel_requested"] = True
+                if active.get("goal_handle") is None:
+                    continue
                 try:
                     active["goal_handle"].cancel_goal_async()
                 except Exception as exc:

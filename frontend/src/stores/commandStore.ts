@@ -1,6 +1,6 @@
 import { lidarReadyReason } from "../lib/lidar";
 import { sameMap } from "../lib/mapContext";
-import { localizationRecoveryReason } from "../lib/localizationRecovery";
+import { navigationLocalizationReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import { useTelemetryStore } from "./telemetryStore";
 import type {
@@ -105,6 +105,9 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     if (active?.command === "software_reset" || active?.command === "set_lidar_power") {
       set({ active: { ...active, phase: "running",
         stage: "Connection lost — command outcome is unknown. Waiting for the robot result; do not retry." } });
+    } else if (active?.command === "navigate_to_pose") {
+      set({ active: { ...active, distanceRemaining: null,
+        stage: "Connection lost — navigation progress is unknown." } });
     }
   },
 
@@ -112,12 +115,15 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     // Remember the destination in effect right now so Resume can restore it.
     const active = get().active;
     const telemetry = useTelemetryStore.getState();
+    const pathGoal = telemetry.path?.path_valid && telemetry.path.command_id
+      ? telemetry.path.goal : null;
+    const nonNavigation = active !== null && !["navigate_to_pose", "stop"].includes(active.command);
     // Path telemetry can lag the acknowledged command. Keep the destination
     // actually sent, even when Stop arrives before the first path update.
-    const candidate = get().lidarPending ? null : active?.command === "navigate_to_pose"
-      ? active.goal ?? telemetry.path?.goal : telemetry.path?.goal;
+    const candidate = get().lidarPending || nonNavigation ? null : active?.command === "navigate_to_pose"
+      ? active.goal ?? (telemetry.path?.command_id === active.commandId ? pathGoal : null) : pathGoal;
     const goal = candidate && sameMap(candidate, telemetry.baseState) ? candidate : null;
-    set({ stoppedGoal: goal ?? get().stoppedGoal });
+    set({ stoppedGoal: nonNavigation ? null : goal ?? get().stoppedGoal });
     get().send("stop");
   },
 
@@ -179,7 +185,8 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     }
     if (command === "navigate_to_pose") {
       const telemetry = useTelemetryStore.getState();
-      const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt);
+      const reason = navigationLocalizationReason(telemetry.baseState, telemetry.baseStateAt,
+        telemetry.pose, telemetry.poseReceivedAt, telemetry.capabilities, get().allowUnlocalized);
       if (reason) {
         set({ pickMode: "none", lastResult: {
           commandId: crypto.randomUUID(), command, outcome: "rejected", at: Date.now(), detail: reason,
@@ -266,11 +273,16 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   handleProgress: (data) => {
     const active = get().active;
     if (active?.commandId !== data.command_id) return;
+    const navigation = active.command === "navigate_to_pose";
+    const distance = data.distance_remaining;
+    const distanceKnown = typeof distance === "number" && Number.isFinite(distance) && distance >= 0;
+    const planning = navigation && data.path_valid !== true;
     set({
       active: {
         ...active,
-        stage: data.detail ?? data.stage,
-        distanceRemaining: data.distance_remaining ?? null,
+        stage: planning && data.stage === "navigating"
+          ? "Planning a route to the destination." : data.detail ?? data.stage,
+        distanceRemaining: !planning && distanceKnown ? distance : null,
       },
     });
   },

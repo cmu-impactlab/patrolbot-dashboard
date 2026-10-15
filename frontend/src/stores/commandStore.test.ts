@@ -7,9 +7,60 @@ const readyBase: BaseStateData = { map_id: "cmuq-floor2", map_revision: "test-re
   bumpers_front: false, bumpers_rear: false,
   odom_epoch_valid: true, localization_recovery_required: false, localization_seed_stamp_ns: 1,
 };
-beforeEach(() => useTelemetryStore.setState({ baseState: readyBase, baseStateAt: performance.now() }));
+beforeEach(() => useTelemetryStore.setState({ baseState: readyBase, baseStateAt: performance.now(),
+  pose: { x: 0, y: 0, yaw: 0, linear_velocity: 0, angular_velocity: 0, localized: true },
+  poseReceivedAt: performance.now() }));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCommandSender, useCommandStore } from "./commandStore";
+
+describe("navigation progress", () => {
+  beforeEach(() => useCommandStore.setState({ active: {
+    commandId: "current", command: "navigate_to_pose", phase: "running",
+    stage: null, distanceRemaining: null,
+  } }));
+
+  it("keeps distance unknown until a current-command path exists", () => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "navigating",
+      detail: "Heading to the destination", distance_remaining: 0 });
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+    expect(useCommandStore.getState().active?.stage).toBe("Planning a route to the destination.");
+  });
+
+  it("retains genuine zero after a valid path and clears it when invalidated", () => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "navigating",
+      distance_remaining: 0, path_valid: true });
+    expect(useCommandStore.getState().active?.distanceRemaining).toBe(0);
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "planning",
+      distance_remaining: 0, path_valid: false });
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+
+  it("ignores an old command's valid path feedback", () => {
+    useCommandStore.getState().handleProgress({ command_id: "previous", stage: "navigating",
+      distance_remaining: 0, path_valid: true });
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+
+  it("shows a pending stop while keeping its distance unknown", () => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "stopping",
+      detail: "Stopping; awaiting the robot's result.", distance_remaining: 0, path_valid: false });
+    expect(useCommandStore.getState().active?.stage).toBe("Stopping; awaiting the robot's result.");
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+
+  it.each([NaN, Infinity, -1])("keeps invalid distance %s unknown", distance => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "navigating",
+      distance_remaining: distance, path_valid: true });
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+
+  it("clears navigation distance on connection loss", () => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "navigating",
+      distance_remaining: 2, path_valid: true });
+    useCommandStore.getState().connectionLost();
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+});
 
 describe("commandStore.cancel", () => {
   beforeEach(() => {
@@ -268,6 +319,8 @@ it("keeps the submitted destination when Stop precedes path telemetry", () => {
   useCommandStore.getState().stop();
   expect(useCommandStore.getState().stoppedGoal).toEqual(goal);
   expect(JSON.parse(sender.mock.calls[1][0]).data.command).toBe("stop");
+  useCommandStore.getState().stop();
+  expect(useCommandStore.getState().stoppedGoal).toEqual(goal);
 });
 
 
@@ -371,4 +424,50 @@ it("motor disable bypasses LiDAR uncertainty and discards saved movement", () =>
   expect(JSON.parse(sent[0]).data.command).toBe("motor_disable");
   expect(useCommandStore.getState().stoppedGoal).toBeNull();
   expect(useCommandStore.getState().allowUnlocalized).toBe(false);
+});
+
+it("stopping Undock sends Stop once and cannot resume an earlier path or saved goal", () => {
+  const sent: string[] = [];
+  registerCommandSender(frame => { sent.push(frame); return true; });
+  const oldGoal = { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 };
+  useTelemetryStore.setState({ path: { ...oldGoal, command_id: "old-navigation",
+    path_valid: true, frame_id: "map", points: [[0, 0], [1, 2]], goal: oldGoal } });
+  useCommandStore.setState({ active: { commandId: "undock", command: "undock", phase: "running",
+    stage: "Turning away from the dock", distanceRemaining: null },
+    stoppedGoal: oldGoal, lidarPending: null });
+  useCommandStore.getState().stop();
+  expect(sent).toHaveLength(1);
+  expect(JSON.parse(sent[0]).data.command).toBe("stop");
+  expect(useCommandStore.getState().stoppedGoal).toBeNull();
+});
+
+
+describe("specific navigation reasons", () => {
+  beforeEach(() => useCommandStore.setState({ active: { commandId: "current", command: "navigate_to_pose",
+    phase: "running", stage: null, distanceRemaining: 2 }, lastResult: null }));
+  it.each(["refreshing", "failed", "planning"])("retains %s reason while distance is unknown", stage => {
+    useCommandStore.getState().handleProgress({ command_id: "current", stage,
+      detail: "Specific native planning reason", path_valid: false, distance_remaining: 0 });
+    expect(useCommandStore.getState().active?.stage).toBe("Specific native planning reason");
+    expect(useCommandStore.getState().active?.distanceRemaining).toBeNull();
+  });
+  it("retains a specific terminal reason and ignores late feedback", () => {
+    useCommandStore.getState().handleResult({ command_id: "current", outcome: "failed",
+      detail: "Start blocked. Navigation error 205.", error_code: 205, error_message: "all exits blocked" });
+    useCommandStore.getState().handleProgress({ command_id: "current", stage: "navigating", path_valid: true, distance_remaining: 0 });
+    expect(useCommandStore.getState().active).toBeNull();
+    expect(useCommandStore.getState().lastResult?.detail).toContain("205");
+  });
+  it("age-only admission sends a normal goal with no localization override", () => {
+    const sent: string[] = [];
+    registerCommandSender(frame => { sent.push(frame); return true; });
+    useTelemetryStore.setState({ capabilities: ["navigation_stationary_refresh_v1"],
+      pose: { ...useTelemetryStore.getState().pose!, frame_id: "map", map_id: "cmuq-floor2", map_revision: "test-revision",
+        localized: false, planar_covariance: [.01, .02, .03], covariance_limit: .25,
+        localization_age_s: 31, localization_max_age_s: 30 }, poseReceivedAt: performance.now() });
+    useCommandStore.setState({ allowUnlocalized: false, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
+    expect(JSON.parse(sent[0]).data.allow_unlocalized).toBe(false);
+    expect(useTelemetryStore.getState().pose?.localized).toBe(false);
+  });
 });

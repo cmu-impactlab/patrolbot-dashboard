@@ -88,8 +88,14 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 |---|---|---|
 | `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/motor_disable/undock/software_reset/set_lidar_power, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
-| `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
-| `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
+| `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `path_valid` (default false), `distance_remaining?` (unknown/null until a current-command path exists; valid zero is allowed) |
+| `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?`, `error_code?`, `error_message?` |
+
+`telemetry.path` includes `command_id?` and `path_valid` (default false).
+Only a path tagged by the navigator with the accepted action goal UUID can
+authorize navigation progress. Untagged `/plan` messages remain untrusted for
+this purpose. Replacement, cancellation, map/epoch changes and restart clear
+path validity.
 
 Server-side broker rules:
 
@@ -98,9 +104,12 @@ Server-side broker rules:
   `goal` is missing for a command that needs one, or the `command_id` was
   already seen (duplicate protection).
 - Every request is written to the `command_audit` table before forwarding.
-- If no `command.ack` arrives within 5 s, or no `command.result` within 120 s,
-  the server synthesizes `command.result` `outcome=timeout` and closes out the
-  command. Late robot replies for a closed command are dropped.
+- If navigation or Undock acceptance is not confirmed within 5 s, or no fresh
+  action progress arrives for 120 s, the server requests cancellation of that
+  original `command_id` and keeps the command and audit pending until an actual
+  robot result. Silence does not prove that movement stopped. Unknown progress
+  does not prove acceptance. Other commands retain their existing timeout
+  policies; replies for definitively closed commands are dropped.
 - A new `navigate_to_pose` while one is active implicitly replaces it
   (Nav2 preemption semantics); `stop` cancels any active navigation.
 - There is **no velocity teleop command** — goal-based navigation only, by
@@ -111,10 +120,14 @@ Server-side broker rules:
   (`server/app/commands/gates.py`) before they are forwarded: readings must be
   fresh and valid, faults and E-stop clear, and `undock` requires the robot to
   claim the capability in `robot.hello`. `undock` is a **single operator
-  action**: the commissioned action atomically releases charging, powers the
-  motors, backs clear, restores localization, turns away from the dock, and
-  stops; the dashboard only sends `undock` and renders its progress/result. It
-  also needs a valid commissioned dock observer and a clear rear bumper.
+  action** available only while fresh hardware confirms charging. The robot
+  releases charging, powers the motors, reverses 0.53 m, confirms clearance,
+  turns 180 degrees under local collision protection, and stops. It does not
+  require an AMCL/map pose; the robot checks fresh raw odometry and manoeuvre
+  ownership. Charge release during an accepted manoeuvre does not cancel it.
+  The dashboard renders progress/Stop until its result. A new request from a
+  released but docked robot, or stale FLOAT after confirmed clearance, refuses.
+  A commissioned dock observer, rear sensors and clear bumper remain required.
   `navigate_to_pose` needs a fresh pose the robot reports as localized, live
   motors, and a robot that is not on its charger — driving off the dock is
   undock's job.
@@ -156,6 +169,12 @@ Navigation, restoration and retries must retain and revalidate their original
 map context. Map switching invalidates selections and cross-floor overlays.
 
 `command.cancel` is a server-to-robot frame carrying the original `command_id`.
+For navigation or Undock silence it targets only that matching pending/active
+action. If acceptance has not arrived, it marks the request for cancellation
+and cancels any late accepted goal. A request with an unknown outcome retains
+its owner; cancellation is not a terminal result and never grants retry or
+reports the robot stopped. An unresolved robot-side acceptance remains held
+for operator motor disable or software reset, without automatic resubmission.
 Operator browser disconnect, server timeout or shutdown cancels its active map
 transaction; cancellation retains the robot-side hold. Browser gateways never
 accept this internal message as authorization.

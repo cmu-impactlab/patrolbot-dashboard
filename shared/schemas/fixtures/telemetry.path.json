@@ -32,6 +32,8 @@
       "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"
     },
     "map_id": "cmuq-floor2",
-    "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"
+    "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1",
+    "path_valid": true,
+    "command_id": "3f2b8a1c-9d4e-4f6a-b7c8-1a2b3c4d5e6f"
   }
 }

@@ -156,7 +156,8 @@ def derive_status(
         status = "stuck"
     elif recording:
         status = "recording"
-    elif (path is not None and path.goal is not None and pose is not None
+    elif (path is not None and path.path_valid and path.command_id
+          and path.goal is not None and pose is not None
           and not stale_age(pose_age_s, MAX_POSE_AGE_S)
           and abs(pose.linear_velocity) > 0.02):
         # A stale pose showing movement is not a robot that is still moving.

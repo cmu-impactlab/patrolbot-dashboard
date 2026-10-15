@@ -59,11 +59,16 @@ def test_every_gate_refuses_an_unheard_base_state(gate, age):
     assert reason is not None and "stale" in reason.lower()
 
 
-@pytest.mark.parametrize("gate", sorted(ALLOWABLE))
+@pytest.mark.parametrize("gate", ["charge_release"])
 @pytest.mark.parametrize("age", [None, STALE], ids=["never-received", "stale"])
 def test_every_gate_refuses_an_unheard_pose(gate, age):
     reason = gates.GATES[gate](facts(pose_age=age, **ALLOWABLE[gate]))
     assert reason is not None and "position update" in reason.lower()
+
+
+@pytest.mark.parametrize("age", [None, STALE])
+def test_undock_defers_missing_map_velocity_to_robot_odometry(age):
+    assert gates.undock_reason(facts(pose_age=age, stationary=False)) is None
 
 
 @pytest.mark.parametrize("gate", ["motor_enable", "motor_disable"])
@@ -161,8 +166,10 @@ def freeze(state, slice_name: str, seconds: float = STALE) -> None:
     getattr(state, slice_name).received_mono -= seconds
 
 
-@pytest.mark.parametrize("frozen_slice", ["base_state", "pose"])
-@pytest.mark.parametrize("command", ["charge_release", "undock"])
+@pytest.mark.parametrize("frozen_slice,command", [
+    ("base_state", "charge_release"), ("base_state", "undock"),
+    ("pose", "charge_release"),
+])
 def test_frozen_slice_is_refused_while_the_robot_still_looks_online(
         client, frozen_slice, command):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
@@ -188,6 +195,19 @@ def test_frozen_slice_is_refused_while_the_robot_still_looks_online(
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
             assert ack["data"]["reason"]
+
+
+def test_undock_with_a_stale_map_pose_still_reaches_robot_interlocks(client):
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame()); robot.receive_text()
+        robot.send_text(base_state_frame(1)); robot.send_text(pose_frame(2))
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            freeze(client.app.state.hub.primary().state, "pose")
+            command_id, frame = command_frame("undock")
+            ui.send_text(frame)
+            forwarded = json.loads(robot.receive_text())
+            assert forwarded["data"]["command_id"] == command_id
 
 
 def test_refusal_is_recorded_in_the_audit(client):

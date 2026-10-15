@@ -80,7 +80,19 @@ def test_undock_allowed_straight_off_the_charger():
     """One operator action: the robot releases its own charger and powers its
     own motors, so neither is required of the dashboard beforehand."""
     assert gates.undock_reason(facts(charge_state="charging", motors_enabled=False)) is None
-    assert gates.undock_reason(facts(charge_state="docked", motors_enabled=True)) is None
+    assert gates.undock_reason(facts(charge_state="charging", motors_enabled=True)) is None
+
+
+def test_undock_refuses_a_released_but_docked_robot():
+    released = facts(charge_state="docked", dock_state="DOCKED_CONFIRMED",
+                     dock_state_valid=True, motors_enabled=True)
+    assert "not charging" in gates.undock_reason(released)
+
+
+@pytest.mark.parametrize("pose_age", [None, 9.0])
+def test_undock_without_a_map_pose_defers_stationarity_to_raw_odometry(pose_age):
+    assert gates.undock_reason(facts(pose_age=pose_age, stationary=False,
+                                    localized=False)) is None
 
 
 def test_dock_observer_overrides_stale_charge_state_after_departure():
@@ -91,7 +103,7 @@ def test_dock_observer_overrides_stale_charge_state_after_departure():
         undock_profile_commissioned=True,
     )
     assert clear.on_dock is False
-    assert "not on its dock" in (gates.undock_reason(clear) or "").lower()
+    assert "not charging" in (gates.undock_reason(clear) or "").lower()
 
 
 def test_undock_refuses_invalid_or_uncommissioned_dock_observer():
@@ -118,7 +130,7 @@ def test_undock_refuses_duplicate_reported_by_robot_state():
 
 @pytest.mark.parametrize("overrides, fragment", [
     ({"capabilities": ("charge_release",)}, "not commissioned"),
-    ({"charge_state": "not_charging"}, "not on its dock"),
+    ({"charge_state": "not_charging"}, "not charging"),
     ({"bumpers_rear": True}, "rear bumper"),
     ({"estop_pressed": True}, "emergency stop"),
     ({"stationary": False}, "still moving"),
@@ -330,7 +342,6 @@ def test_undock_forwarded_straight_from_charging(client):
         robot.send_text(hello_frame())
         robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="charging", motors_enabled=False))
-        robot.send_text(pose_frame(2))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             command_id, frame = command_frame("undock")
@@ -373,7 +384,7 @@ def test_undock_rejected_while_moving(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
-        robot.send_text(base_state_frame(1, charge_state="docked"))
+        robot.send_text(base_state_frame(1, charge_state="charging"))
         robot.send_text(pose_frame(2, moving=True))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
@@ -525,11 +536,11 @@ def test_undock_needs_the_robot_to_vouch_for_its_bumpers():
     is not a claim that they are good either."""
     for unproven in (False, None):
         reason = gates.undock_reason(
-            facts(charge_state="docked", motors_enabled=True, bumpers_valid=unproven))
+            facts(charge_state="charging", motors_enabled=True, bumpers_valid=unproven))
         assert reason is not None and "cannot confirm its bumper readings" in reason
 
     assert gates.undock_reason(
-        facts(charge_state="docked", motors_enabled=True, bumpers_valid=True)) is None
+        facts(charge_state="charging", motors_enabled=True, bumpers_valid=True)) is None
 
 
 def _nav_facts(**overrides) -> gates.StateFacts:
@@ -672,3 +683,64 @@ def test_motor_disable_admission_is_independent_of_stale_lidar_and_faults():
     assert gates.rejection_reason('motor_disable',facts(lidar_state='OFF',fault_flags=1,
         estop_pressed=True,stationary=False,hardware_state_valid=False,base_state_age=5)) is None
     assert gates.rejection_reason('motor_disable',facts(capabilities=())) is not None
+
+
+
+def test_age_only_localization_candidate_is_narrow_and_does_not_claim_localized():
+    from types import SimpleNamespace as NS
+    base = NS(map_id='floor1', map_revision='revision')
+    pose = NS(frame_id='map', localized=False, map_id='floor1', map_revision='revision',
+              planar_covariance=(.01,.02,.03), covariance_limit=.25,
+              localization_age_s=31., localization_max_age_s=30.)
+    caps = ['navigation_stationary_refresh_v1']
+    assert gates.age_only_refresh_eligible(base, pose, caps, .1)
+    assert pose.localized is False
+    assert not gates.age_only_refresh_eligible(base, pose, [], .1)
+    for age in (None, -1., 4., float('nan')):
+        assert not gates.age_only_refresh_eligible(base, pose, caps, age)
+    for field, value in (('planar_covariance', None), ('planar_covariance', (0.,.01,.01)),
+        ('planar_covariance', (.26,.01,.01)), ('planar_covariance', (.01,float('nan'),.01)),
+        ('covariance_limit', None), ('localization_age_s', 29.), ('localization_age_s', float('inf')),
+        ('localization_max_age_s', 0.), ('frame_id', 'odom'), ('map_revision', 'old')):
+        spoiled = NS(**dict(vars(pose), **{field:value}))
+        assert not gates.age_only_refresh_eligible(base, spoiled, caps, .1), field
+
+
+def test_age_only_candidate_keeps_all_other_navigation_prerequisites():
+    candidate = _nav_facts(localized=False, age_only_refresh_eligible=True)
+    assert gates.navigate_reason(candidate) is None
+    assert candidate.localized is False and candidate.allow_unlocalized is False
+    for field, value in (('motors_enabled', False), ('estop_pressed', True), ('fault_flags', 1),
+        ('odom_epoch_valid', False), ('localization_recovery_required', True),
+        ('localization_seed_stamp_ns', 0), ('pose_age', 4.), ('base_state_age', 4.)):
+        spoiled = _nav_facts(localized=False, age_only_refresh_eligible=True)
+        setattr(spoiled, field, value)
+        assert gates.navigate_reason(spoiled), field
+
+
+@pytest.mark.parametrize('verified,covariance,seed,accepted', [
+    (True, (.01,.02,.03), 1, True), (False, (.01,.02,.03), 1, False),
+    (True, (.26,.02,.03), 1, False), (True, (.01,.02,.03), 0, False),
+])
+def test_websocket_age_only_admission_requires_verified_native_and_retains_normal_goal(client, verified, covariance, seed, accepted):
+    caps = ALL_CAPS + (('navigation_stationary_refresh_v1',) if verified else ())
+    with client.websocket_connect('/ws/robot?token=test-token') as robot:
+        robot.send_text(hello_frame(caps)); robot.receive_text()
+        robot.send_text(base_state_frame(1, charge_state='idle', motors_enabled=True,
+                                       localization_seed_stamp_ns=seed))
+        pose = json.loads(pose_frame(2, localized=False))
+        pose['data'].update(frame_id='map', planar_covariance=covariance, covariance_limit=.25,
+                            localization_age_s=31., localization_max_age_s=30.)
+        robot.send_text(json.dumps(pose))
+        with client.websocket_connect('/ws/ui') as ui:
+            ui.receive_text()
+            goal = {k:pose['data'][k] for k in ('map_id','map_revision')}
+            goal.update(x=1.,y=2.)
+            command_id, frame = command_frame('navigate_to_pose', goal)
+            ui.send_text(frame)
+            if accepted:
+                forwarded = json.loads(robot.receive_text())['data']
+                assert forwarded['command_id'] == command_id
+                assert forwarded['allow_unlocalized'] is False
+            else:
+                assert recv_until(ui, 'command.ack')['data']['accepted'] is False

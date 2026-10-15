@@ -107,10 +107,19 @@ def test_paused_when_motors_off():
 
 
 def test_navigating_when_goal_and_moving():
-    path = PathData(points=[(0, 0), (1, 1)], goal=GoalData(x=1.0, y=1.0))
+    path = PathData(points=[(0, 0), (1, 1)], goal=GoalData(x=1.0, y=1.0),
+                    command_id="current", path_valid=True)
     result = derive_status(base_state_age_s=0.5, pose_age_s=0.5, connection="online", base_state=base_state(),
                            diagnostics=None, pose=pose(linear_velocity=0.3), path=path)
     assert result.status == "navigating"
+
+
+def test_untagged_path_does_not_authorize_navigating_status():
+    result = derive_status(base_state_age_s=0.5, pose_age_s=0.5, connection="online",
+                           base_state=base_state(), diagnostics=None,
+                           pose=pose(linear_velocity=0.3),
+                           path=PathData(points=[(0, 0)], goal=GoalData(x=1, y=1)))
+    assert result.status != "navigating"
 
 
 def test_ready_default():

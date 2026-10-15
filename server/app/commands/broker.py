@@ -8,9 +8,10 @@ Safety posture:
   command: the robot has no automatic dock-in path.
 - navigate_to_pose and the charging/motor/undock steps are additionally gated
   on live hardware telemetry by commands.gates before they are forwarded.
-- Fail-closed: any request this broker refuses gets a synthesized command.ack,
-  and an accepted one is never left open — missing acks and results are closed
-  out by server-side timeouts. A frame malformed enough to fail payload
+- Fail-closed: any request this broker refuses gets a synthesized command.ack.
+  Navigation and Undock silence request cancellation and stay pending until
+  the robot reports a terminal result; other commands retain their timeouts.
+  A frame malformed enough to fail payload
   validation never reaches here and is dropped by the gateway without a reply.
 - Every request is written to the command_audit table before it reaches
   the robot.
@@ -53,6 +54,7 @@ COMMAND_LABELS = {
     "set_lidar_power": "Change LiDAR power",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
+MOTION_ACTIONS = {"navigate_to_pose", "undock"}
 
 
 @dataclass
@@ -63,6 +65,9 @@ class ActiveCommand:
     initiator: Any = None
     acked: bool = False
     uncertain: bool = False
+    last_reply_mono: float = field(default_factory=time.monotonic)
+    cancel_requested: bool = False
+    cancel_sent: bool = False
     timers: list[asyncio.Task] = field(default_factory=list)
 
     def cancel_timers(self) -> None:
@@ -275,11 +280,24 @@ class CommandBroker:
 
         if isinstance(payload, CommandAckData):
             entry.acked = True
+            entry.last_reply_mono = time.monotonic()
+            if payload.accepted and entry.cancel_requested and not entry.cancel_sent:
+                await self._cancel_navigation(entry, "Waiting for the robot to confirm movement has stopped.")
             self.hub.publish("command.ack", session.robot_id, payload)
             if not payload.accepted:
                 await self._finish(entry, "rejected",
                                    payload.reason or "The robot declined the command.")
         elif isinstance(payload, CommandProgressData):
+            if entry.command in MOTION_ACTIONS:
+                if payload.stage != "unknown":
+                    entry.acked = True  # Actual action progress proves acceptance.
+                entry.last_reply_mono = time.monotonic()
+                if entry.cancel_requested:
+                    if not entry.cancel_sent:
+                        await self._cancel_navigation(entry, "Waiting for the robot to confirm movement has stopped.")
+                    payload = payload.model_copy(update={"stage": "stopping",
+                        "detail": "Waiting for the robot to confirm movement has stopped.",
+                        "path_valid": False, "distance_remaining": None})
             self.hub.publish("command.progress", session.robot_id, payload)
         elif isinstance(payload, CommandResultData):
             self.hub.publish("command.result", session.robot_id, payload)
@@ -391,6 +409,10 @@ class CommandBroker:
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)
         if not entry.acked:
+            if entry.command in MOTION_ACTIONS:
+                await self._cancel_navigation(entry,
+                    "Movement acceptance was not confirmed; cancellation requested. Waiting for the robot result.")
+                return
             if entry.command == "set_lidar_power":
                 await self._mark_uncertain(entry, "LiDAR power outcome is unknown: acceptance was not confirmed. Wait for its result; do not retry.")
                 return
@@ -402,6 +424,15 @@ class CommandBroker:
             await self._close_out(entry, "timeout", "The robot did not confirm the command in time.")
 
     async def _result_timeout(self, entry: ActiveCommand) -> None:
+        if entry.command in MOTION_ACTIONS:
+            while not entry.cancel_requested:
+                remaining = entry.last_reply_mono + self.result_timeout_s - time.monotonic()
+                if remaining <= 0:
+                    await self._cancel_navigation(entry,
+                        "Movement stopped reporting progress; cancellation requested. Waiting for the robot result.")
+                    return
+                await asyncio.sleep(remaining)
+            return
         await asyncio.sleep(self.result_timeout_s)
         if entry.command == "set_lidar_power":
             await self._mark_uncertain(entry, "LiDAR power outcome is unknown. Wait for the robot result; do not retry.")
@@ -426,10 +457,13 @@ class CommandBroker:
         """Synthesize a result for a command the robot never resolved."""
         if entry.command_id not in self.active:
             return
+        if entry.command in MOTION_ACTIONS:
+            await self._cancel_navigation(entry, detail + " Waiting for the robot result.")
+            return
         if entry.command == "set_lidar_power":
             await self._mark_uncertain(entry, "LiDAR power outcome is unknown. Wait for the robot result; do not retry.")
             return
-        await self._cancel_map(entry)
+        await self._cancel_robot(entry)
         self.hub.publish("command.result", entry.robot_id, CommandResultData(
             command_id=entry.command_id, outcome=outcome, detail=detail))
         await self._finish(entry, outcome, detail)
@@ -453,23 +487,36 @@ class CommandBroker:
             )
         log.info("command %s closed: %s", entry.command_id, outcome)
 
-    async def _cancel_map(self, entry: ActiveCommand) -> None:
-        if entry.command != "set_initial_pose":
+    async def _cancel_navigation(self, entry: ActiveCommand, detail: str) -> None:
+        if self.active.get(entry.command_id) is not entry or entry.cancel_sent:
             return
+        entry.cancel_requested = True
+        entry.cancel_sent = await self._cancel_robot(entry)
+        if self.active.get(entry.command_id) is not entry:
+            return
+        self.hub.publish("command.progress", entry.robot_id, CommandProgressData(
+            command_id=entry.command_id, stage="stopping", detail=detail,
+            path_valid=False, distance_remaining=None))
+
+    async def _cancel_robot(self, entry: ActiveCommand) -> bool:
+        if entry.command not in {"set_initial_pose", *MOTION_ACTIONS}:
+            return False
         session = self.hub.robots.get(entry.robot_id)
         if session is not None and session.websocket is not None:
             with contextlib.suppress(Exception):
                 await session.websocket.send_text(encode("command.cancel", entry.robot_id,
                     self.hub._next_seq(), {"command_id": entry.command_id}))
+                return True
+        return False
 
     async def cancel_for_client(self, client: Any) -> None:
         for entry in list(self.active.values()):
-            if entry.initiator is client:
-                await self._cancel_map(entry)
+            if entry.initiator is client and entry.command == "set_initial_pose":
+                await self._cancel_robot(entry)
 
     async def shutdown(self) -> None:
         for entry in list(self.active.values()):
-            await self._cancel_map(entry)
+            await self._cancel_robot(entry)
             entry.cancel_timers()
             for timer in entry.timers:
                 with contextlib.suppress(asyncio.CancelledError):

@@ -43,6 +43,27 @@ describe("localization uncertainty display", () => {
     expect(poseNeedsUncertaintyRing({ covariance_trace: 0.9 })).toBe(false);
   });
 });
+
+describe("planned path rendering", () => {
+  it.each(["current", "previous", "untagged"])("draws only valid current paths (%s)", command => {
+    const lineTo = vi.fn();
+    let canvas: HTMLCanvasElement;
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(() => new Proxy({}, {
+      get: (_target, key) => key === "canvas" ? canvas : key === "lineTo" ? lineTo : vi.fn(),
+      set: () => true,
+    }) as CanvasRenderingContext2D);
+    useCommandStore.setState({ pickMode: "none", active: { commandId: "current",
+      command: "navigate_to_pose", phase: "running", stage: null, distanceRemaining: null } });
+    useTelemetryStore.setState({ pose: null, lastKnownPose: null, lidar: null, trajectory: [],
+      path: { map_id: "cmuq-floor2", map_revision: "test-revision", points: [[-4, 8], [-3, 9]],
+        command_id: command, path_valid: command !== "untagged" } });
+    const view = render(<LiveMapWidget />);
+    canvas = view.container.querySelector("canvas")!;
+    Object.defineProperties(canvas, { clientWidth: { value: 400 }, clientHeight: { value: 400 } });
+    act(() => paint(0));
+    expect(lineTo).toHaveBeenCalledTimes(command === "current" ? 1 : 0);
+  });
+});
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); registerCommandSender(null); });
 function mount() {
   const { container } = render(<LiveMapWidget />);
@@ -78,6 +99,31 @@ describe("live map command boundary", () => {
     const data = JSON.parse(sender.mock.calls[0][0]).data;
     expect(data.seed_profile).toBe("measured");
     expect(data.goal.yaw).toBeCloseTo(Math.PI / 2, 3);
+  });
+  it.each(["down", "up"])("Ctrl on pointer %s sends the measured profile without clicking the checkbox", modifier => {
+    const canvas = mount();
+    fireEvent.pointerDown(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 150, ctrlKey: modifier === "down" });
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 100, ctrlKey: modifier === "up" });
+    const data = JSON.parse(sender.mock.calls[0][0]).data;
+    expect(data.seed_profile).toBe("measured");
+    expect(data.goal).toMatchObject({ map_id: "cmuq-floor2", x: -3.19, y: 10.19 });
+    expect(data.goal.yaw).toBeCloseTo(Math.PI / 2, 3);
+    act(() => { useCommandStore.setState({ active: null, pickMode: "initialpose" }); });
+    down(canvas, 2, "mouse"); up(canvas, 2, "mouse");
+    expect(JSON.parse(sender.mock.calls[1][0]).data.seed_profile).toBeUndefined();
+  });
+  it("does not add a measured profile to Ctrl-selected destinations", () => {
+    useTelemetryStore.setState({ pose: { frame_id: "map", x: 0, y: 0, yaw: 0,
+      linear_velocity: 0, angular_velocity: 0, localized: true }, poseReceivedAt: performance.now() });
+    act(() => useTelemetryStore.setState({ baseState: { ...useTelemetryStore.getState().baseState,
+      map_id: "cmuq-floor2", map_revision: "test-revision", odom_epoch_valid: true,
+      localization_recovery_required: false, localization_seed_stamp_ns: 1 } as BaseStateData }));
+    act(() => useCommandStore.setState({ pickMode: "goal" }));
+    const canvas = mount();
+    fireEvent.pointerDown(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 150, ctrlKey: true });
+    fireEvent.pointerUp(canvas, { pointerId: 1, pointerType: "mouse", clientX: 150, clientY: 150, ctrlKey: true });
+    expect(JSON.parse(sender.mock.calls[0][0]).data.seed_profile).toBeUndefined();
   });
   it("disables confirmation and explains when LiDAR turns off during a preview", () => {
     const canvas = mount(); down(canvas); up(canvas);

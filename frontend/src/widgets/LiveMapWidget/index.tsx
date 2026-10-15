@@ -138,6 +138,7 @@ interface PickArrow {
   ex: number;
   ey: number;
   mode: "goal" | "initialpose";
+  measured?: boolean;
 }
 
 /** RViz-style orientation arrow drawn while the user drags a pose pick. */
@@ -210,7 +211,10 @@ function drawScene(
   }
 
   // Planned path
-  const path = sameMap(state.path, map) ? state.path : null;
+  const active = useCommandStore.getState().active;
+  const path = sameMap(state.path, map) && state.path?.path_valid &&
+    (active?.command !== "navigate_to_pose" || state.path.command_id === active.commandId)
+    ? state.path : null;
   if (layers.plannedPath && path && path.points.length > 1) {
     ctx.beginPath();
     for (let i = 0; i < path.points.length; i++) {
@@ -321,14 +325,14 @@ export function LiveMapWidget() {
   const gesture = useRef(new MapGesture());
   const fullscreen = useUiStore(state => state.fullscreenWidget === "liveMap");
   const [interacting, setInteracting] = useState(fullscreen);
-  const [pending, setPending] = useState<{ mode: "goal" | "initialpose"; goal: GoalData } | null>(null);
+  const [pending, setPending] = useState<{ mode: "goal" | "initialpose"; goal: GoalData; seedProfile?: "measured" } | null>(null);
   const pendingRef = useRef<typeof pending>(null);
   const [error, setError] = useState<string | null>(null);
   const online = useTelemetryStore(state => state.wsConnected && state.connection.state === "online");
   const user = useAuthStore(state => state.user);
   const baseSession = useTelemetryStore(state => state.baseState?.session_generation);
   const robotId = useTelemetryStore(state => state.robotId);
-  const pickArrowRef = useRef<{ ax: number; ay: number; ex: number; ey: number; mode: "goal" | "initialpose" } | null>(null);
+  const pickArrowRef = useRef<PickArrow | null>(null);
   const pickHoverRef = useRef<[number, number] | null>(null);
   const pickMode = useCommandStore((state) => state.pickMode);
   const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
@@ -379,6 +383,7 @@ export function LiveMapWidget() {
       const pick = pickArrowRef.current;
       const signature = [
         telemetry.frameCount, theme, canvas.width, canvas.height,
+        useCommandStore.getState().active?.commandId,
         view.zoom, view.panX, view.panY,
         ui.mapLayers.lidar, ui.mapLayers.plannedPath,
         ui.mapLayers.trajectory, ui.mapLayers.goal,
@@ -438,7 +443,8 @@ export function LiveMapWidget() {
     if (gesture.current.multi) { pickArrowRef.current = null; setPanning(true); return; }
     const mode = useCommandStore.getState().pickMode;
     if (mode !== "none") {
-      pickArrowRef.current = { ax: p.x, ay: p.y, ex: p.x, ey: p.y, mode };
+      pickArrowRef.current = { ax: p.x, ay: p.y, ex: p.x, ey: p.y, mode,
+        measured: mode === "initialpose" && event.ctrlKey };
     } else { setPanning(true); }
   };
   const onPointerMove = (event: React.PointerEvent) => {
@@ -461,7 +467,7 @@ export function LiveMapWidget() {
     const reason = mapCommandReason(selection.mode);
     if (reason) { setError(reason); return; }
     clear(); // Consume before sending: repeated taps cannot resubmit.
-    useCommandStore.getState().send(selection.mode === "goal" ? "navigate_to_pose" : "set_initial_pose", selection.goal, false, undefined, selection.mode === "initialpose" && measuredPose ? "measured" : undefined);
+    useCommandStore.getState().send(selection.mode === "goal" ? "navigate_to_pose" : "set_initial_pose", selection.goal, false, undefined, selection.mode === "initialpose" ? selection.seedProfile ?? (measuredPose ? "measured" : undefined) : undefined);
     setMeasuredPose(false);
   };
   const onPointerUp = (event: React.PointerEvent) => {
@@ -471,7 +477,9 @@ export function LiveMapWidget() {
     if (!selectable || !pick || !viewRef.current) return;
     const [x, y] = screenToWorld(viewRef.current, pick.ax, pick.ay);
     const dragged = Math.hypot(pick.ex - pick.ax, pick.ey - pick.ay) > 8;
-    const selection = { mode: pick.mode, goal: { map_id: map?.map_id, map_revision: map?.map_revision, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100,
+    const selection = { mode: pick.mode,
+      seedProfile: pick.mode === "initialpose" && (pick.measured || event.ctrlKey) ? "measured" as const : undefined,
+      goal: { map_id: map?.map_id, map_revision: map?.map_revision, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100,
       yaw: dragged ? Math.round(Math.atan2(-(pick.ey - pick.ay), pick.ex - pick.ax) * 1000) / 1000 : null } };
     pickHoverRef.current = null;
     if (event.pointerType === "mouse") { pickArrowRef.current = null; submit(selection); }
@@ -541,7 +549,7 @@ export function LiveMapWidget() {
         onChange={event => setMeasuredPose(event.target.checked)} /> Measured position and heading
         <span> — use only after physically measuring both.</span></label>}
       <button className="btn" onClick={() => interacting ? done() : setInteracting(true)}>{interacting ? "Done" : "Interact with map"}</button>
-        {pickMode !== "none" && !pending && <p className="map-pick-help">Touch: tap, adjust heading, then confirm. Mouse: release to send.</p>}
+        {pickMode !== "none" && !pending && <p className="map-pick-help">Touch: tap, adjust heading, then confirm. Mouse: release to send.{pickMode === "initialpose" && " Hold Ctrl while placing the pose to use measured position and heading."}</p>}
       </div>
       {pending && <div className="map-confirm" role="region" aria-label="Confirm map selection">
         <div>Position: {pending.goal.x}, {pending.goal.y} m</div>

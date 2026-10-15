@@ -168,7 +168,7 @@ def test_ack_timeout_synthesizes_result(client):
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             client.app.state.hub.commands.ack_timeout_s = 0.2
-            command_id, frame = request_frame()
+            command_id, frame = request_frame(command="stop", goal=None)
             ui.send_text(frame)
             result = recv_until(ui, "command.result")
             assert result["data"]["command_id"] == command_id
@@ -186,7 +186,7 @@ def test_late_reply_after_close_is_dropped(client):
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             client.app.state.hub.commands.ack_timeout_s = 0.2
-            command_id, frame = request_frame()
+            command_id, frame = request_frame(command="stop", goal=None)
             ui.send_text(frame)
             recv_until(ui, "command.result")  # timeout closed it
             # Late robot result must not reach browsers or reopen the command.
@@ -200,6 +200,176 @@ def test_late_reply_after_close_is_dropped(client):
                 assert frame_in["type"] != "command.result"
                 if frame_in["type"] == "telemetry.pose":
                     break
+
+
+def test_navigation_ack_silence_requests_cancel_and_waits_for_robot_result(client):
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        make_drivable(robot)
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            broker = client.app.state.hub.commands
+            broker.ack_timeout_s = 0.05
+            command_id, frame = request_frame()
+            ui.send_text(frame)
+            assert json.loads(robot.receive_text())["type"] == "command.request"
+            cancel = json.loads(robot.receive_text())
+            assert cancel["type"] == "command.cancel"
+            assert cancel["data"] == {"command_id": command_id}
+            progress = recv_until(ui, "command.progress")
+            assert progress["data"]["stage"] == "stopping"
+            assert command_id in broker.active
+            row = client.get("/api/commands").json()[0]
+            assert row["outcome"] is None and row["completed_at"] is None
+
+            robot.send_text(encode("command.result", "patrolbot-01", 3, {
+                "command_id": command_id, "outcome": "canceled"}))
+            assert recv_until(ui, "command.result")["data"]["outcome"] == "canceled"
+            assert command_id not in broker.active
+    assert client.get("/api/commands").json()[0]["outcome"] == "canceled"
+
+
+def test_undock_ack_silence_cancels_original_request_and_waits_for_actual_result(client):
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(encode("robot.hello", "patrolbot-01", 0, {
+            "protocol_version": 1, "capabilities": ["undock"], "map_version": 0,
+            "software_version": "test"}))
+        robot.receive_text()
+        robot.send_text(encode("telemetry.base_state", "patrolbot-01", 1, {
+            "lidar_state": "READY", "lidar_scan_age": 0.1, "session_generation": 1,
+            "link_connected": True, "telemetry_age": 0.1, "hardware_state_valid": True,
+            "charge_state": "charging", "motors_enabled": False, "estop_pressed": False,
+            "fault_flags": 0, "stall_value": 0, "bumpers_front": False,
+            "bumpers_rear": False, "bumpers_valid": True,
+            "dock_state": "DOCKED_CONFIRMED", "dock_state_valid": True,
+            "undock_profile_commissioned": True}))
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            broker = client.app.state.hub.commands; broker.ack_timeout_s = 0.05
+            command_id, frame = request_frame(command="undock", goal=None)
+            ui.send_text(frame)
+            assert json.loads(robot.receive_text())["type"] == "command.request"
+            for _ in range(50):
+                progress = json.loads(ui.receive_text())
+                assert progress["type"] != "command.result", "Silence must not close the Undock command"
+                if progress["type"] == "command.progress":
+                    break
+            else:
+                raise AssertionError("Undock silence did not request cancellation")
+            assert progress["data"]["stage"] == "stopping"
+            cancel = json.loads(robot.receive_text())
+            assert cancel["type"] == "command.cancel"
+            assert cancel["data"] == {"command_id": command_id}
+            assert command_id in broker.active
+            row = client.get("/api/commands").json()[0]
+            assert row["outcome"] is None and row["completed_at"] is None
+            robot.send_text(encode("command.result", "patrolbot-01", 2, {
+                "command_id": command_id, "outcome": "canceled"}))
+            assert recv_until(ui, "command.result")["data"]["outcome"] == "canceled"
+            assert command_id not in broker.active
+    assert client.get("/api/commands").json()[0]["outcome"] == "canceled"
+
+
+@pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
+async def test_navigation_deadline_tracks_ack_and_progress_then_cancels_silence(monkeypatch, command):
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock, Mock
+
+    from app.commands import broker as module
+    from app.commands.broker import ActiveCommand, CommandBroker
+    from app.protocol.messages import CommandAckData, CommandProgressData, CommandResultData
+
+    socket = NS(send_text=AsyncMock())
+    session = NS(robot_id="robot", websocket=socket)
+    hub = NS(settings=Settings(), robots={"robot": session}, _next_seq=lambda: 1,
+             publish=Mock(), db=NS(complete_command_audit=AsyncMock()), emit_event=AsyncMock())
+    broker = CommandBroker(hub)
+    entry = ActiveCommand("destination", command, "robot", last_reply_mono=0.)
+    broker.active[entry.command_id] = entry
+    clock = [0.]
+    waits = []
+
+    async def sleep(delay):
+        waits.append(delay)
+        if len(waits) == 1:
+            clock[0] = 100.
+            await broker.handle_robot_reply(session, NS(type="command.ack"),
+                CommandAckData(command_id=entry.command_id, accepted=True))
+            clock[0] = 120.
+        elif len(waits) == 2:
+            clock[0] = 210.
+            await broker.handle_robot_reply(session, NS(type="command.progress"),
+                CommandProgressData(command_id=entry.command_id, stage="navigating"))
+            clock[0] = 220.
+        else:
+            clock[0] += delay
+
+    monkeypatch.setattr(module, "time", NS(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(module, "asyncio", NS(sleep=sleep))
+    await broker._result_timeout(entry)
+    assert waits == [120., 100., 110.]
+    cancel = json.loads(socket.send_text.call_args.args[0])
+    assert cancel["type"] == "command.cancel"
+    assert cancel["data"] == {"command_id": entry.command_id}
+    assert broker.active[entry.command_id] is entry
+    hub.db.complete_command_audit.assert_not_awaited()
+    assert not any(call.args[0] == "command.result" for call in hub.publish.call_args_list)
+
+    await broker.handle_robot_reply(session, NS(type="command.result"),
+        CommandResultData(command_id=entry.command_id, outcome="succeeded"))
+    hub.db.complete_command_audit.assert_awaited_once_with(entry.command_id, "succeeded", "")
+    assert entry.command_id not in broker.active
+
+
+@pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
+async def test_navigation_cancel_delivery_retries_after_connection_recovers(command):
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock, Mock
+    from app.commands.broker import ActiveCommand, CommandBroker
+    from app.protocol.messages import CommandProgressData
+
+    socket = NS(send_text=AsyncMock(side_effect=RuntimeError("disconnected")))
+    session = NS(robot_id="robot", websocket=socket)
+    hub = NS(settings=Settings(), robots={"robot": session}, _next_seq=lambda: 1, publish=Mock())
+    broker = CommandBroker(hub)
+    entry = ActiveCommand("destination", command, "robot")
+    broker.active[entry.command_id] = entry
+    await broker._cancel_navigation(entry, "Navigation is silent.")
+    assert entry.cancel_requested and not entry.cancel_sent
+
+    socket.send_text.side_effect = None
+    progress = CommandProgressData(command_id=entry.command_id, stage="navigating")
+    await broker.handle_robot_reply(session, NS(type="command.progress"), progress)
+    assert entry.cancel_sent
+    assert json.loads(socket.send_text.call_args.args[0])["data"] == {"command_id": entry.command_id}
+    assert hub.publish.call_args.args[2].stage == "stopping"
+    await broker.handle_robot_reply(session, NS(type="command.progress"), progress)
+    assert socket.send_text.await_count == 2
+    assert broker.active[entry.command_id] is entry
+
+
+async def test_unknown_undock_progress_does_not_claim_action_acceptance(monkeypatch):
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock, Mock
+    from app.commands import broker as module
+    from app.commands.broker import ActiveCommand, CommandBroker
+    from app.protocol.messages import CommandProgressData
+
+    session = NS(robot_id="robot", websocket=NS(send_text=AsyncMock()))
+    hub = NS(settings=Settings(), robots={"robot": session}, _next_seq=lambda: 1,
+             publish=Mock())
+    broker = CommandBroker(hub); entry = ActiveCommand("undock", "undock", "robot")
+    broker.active[entry.command_id] = entry
+    await broker.handle_robot_reply(session, NS(type="command.progress"),
+        CommandProgressData(command_id=entry.command_id, stage="unknown",
+                            detail="Undock acceptance is unknown."))
+    assert not entry.acked
+    monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
+    await broker._ack_timeout(entry)
+    assert entry.cancel_requested and entry.cancel_sent
+    assert json.loads(session.websocket.send_text.call_args.args[0])["data"] == {"command_id": entry.command_id}
+    assert entry.command_id in broker.active
 
 
 # -- Roles & single-operator lease -----------------------------------------

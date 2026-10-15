@@ -85,6 +85,7 @@ class StateFacts:
     undock_active: bool = False
     undock_profile_commissioned: bool | None = None
     localized: bool = False
+    age_only_refresh_eligible: bool = False
     # Set from the operator's per-command override, not from telemetry.
     allow_unlocalized: bool = False
     stationary: bool = False
@@ -185,9 +186,34 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
             facts.localization_seed_stamp_ns = 0
     if pose is not None:
         facts.localized = bool(getattr(pose, "localized", False))
+        facts.age_only_refresh_eligible = age_only_refresh_eligible(
+            base_state, pose, capabilities or (), pose_age)
         facts.stationary = (abs(pose.linear_velocity) <= STATIONARY_LINEAR_MS
                             and abs(pose.angular_velocity) <= STATIONARY_ANGULAR_RPS)
     return facts
+
+
+def age_only_refresh_eligible(base: Any, pose: Any, capabilities: Any,
+                              pose_age: float | None) -> bool:
+    """Admission to the verified native stationary guard; never a localized verdict."""
+    if ("navigation_stationary_refresh_v1" not in capabilities or base is None or pose is None
+            or getattr(pose, "localized", False) or getattr(pose, "frame_id", "") != "map"
+            or pose_age is None or not math.isfinite(pose_age)
+            or not 0 <= pose_age <= MAX_RECEIPT_AGE_S
+            or not getattr(base, "map_id", None) or not getattr(base, "map_revision", None)
+            or any(getattr(base, k, None) != getattr(pose, k, None) for k in ("map_id", "map_revision"))):
+        return False
+    try:
+        covariance = pose.planar_covariance
+        limit = float(pose.covariance_limit)
+        age = float(pose.localization_age_s)
+        max_age = float(pose.localization_max_age_s)
+        return (len(covariance) == 3 and math.isfinite(limit) and limit > 0
+                and all(math.isfinite(value) and 0 < value <= limit for value in covariance)
+                and math.isfinite(age) and age > max_age
+                and math.isfinite(max_age) and max_age > 0)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
 
 
 # -- shared clauses ---------------------------------------------------------
@@ -301,7 +327,7 @@ def navigate_reason(facts: StateFacts) -> str | None:
     if not facts.pose_fresh:
         return ("The dashboard has not had a recent position update from the "
                 "robot — wait for fresh data before sending it anywhere.")
-    if not facts.localized and not facts.allow_unlocalized:
+    if not facts.localized and not facts.allow_unlocalized and not facts.age_only_refresh_eligible:
         return "The robot does not know where it is. Set its location first."
     return None
 
@@ -359,8 +385,8 @@ def undock_reason(facts: StateFacts) -> str | None:
         return ("The robot's guarded undock profile has not been commissioned.")
     if facts.undock_active:
         return "The robot is already undocking."
-    if not facts.on_dock:
-        return "The robot is not on its dock."
+    if not facts.charging:
+        return "The robot is not charging, so it cannot start undocking."
     if facts.estop_pressed:
         return "The emergency stop is pressed. Release it on the robot first."
     if facts.bumpers_valid is not True:
@@ -377,7 +403,8 @@ def undock_reason(facts: StateFacts) -> str | None:
     if facts.navigating:
         return ("The robot is still driving to a destination. Stop it before "
                 "backing it off the dock.")
-    return _stationary_reason(facts)
+    # Missing map velocity is checked against fresh raw odometry by the robot.
+    return _stationary_reason(facts) if facts.pose_fresh else None
 
 
 def software_reset_reason(facts: StateFacts) -> str | None:

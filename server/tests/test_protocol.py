@@ -28,6 +28,30 @@ def test_unknown_type_rejected():
         decode(frame)
 
 
+def test_navigation_path_progress_and_error_details_round_trip():
+    _, legacy = decode(encode("telemetry.path", "r", 1, {"points": [[0, 0]]}))
+    assert legacy.path_valid is False and legacy.command_id is None
+    _, progress = decode(encode("command.progress", "r", 2, {
+        "command_id": "current", "stage": "navigating", "path_valid": True,
+        "distance_remaining": 0,
+    }))
+    assert progress.path_valid is True and progress.distance_remaining == 0
+    _, result = decode(encode("command.result", "r", 3, {
+        "command_id": "current", "outcome": "failed", "error_code": 208,
+        "error_message": "No valid path found",
+    }))
+    assert result.error_code == 208 and result.error_message == "No valid path found"
+
+
+@pytest.mark.parametrize("distance", [float("nan"), float("inf"), -1])
+def test_navigation_progress_rejects_invalid_distance(distance):
+    with pytest.raises(ProtocolError):
+        decode(encode("command.progress", "r", 1, {
+            "command_id": "current", "stage": "navigating", "path_valid": True,
+            "distance_remaining": distance,
+        }))
+
+
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 def test_pose_rejects_non_finite(bad):
     frame = encode("telemetry.pose", "patrolbot-01", 1, {

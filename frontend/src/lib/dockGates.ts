@@ -42,7 +42,7 @@ export interface StateFacts {
   undockActive: boolean;
   undockProfileCommissioned: boolean | null;
   localized: boolean;
-  stationary: boolean;
+  stationary: boolean | null;
   capabilities: string[];
   /**
    * A navigate_to_pose still in flight. `stationary` does not cover it: a goal
@@ -77,8 +77,7 @@ export function factsFrom(
     undockActive: baseState?.undock_active ?? false,
     undockProfileCommissioned: baseState?.undock_profile_commissioned ?? null,
     localized: pose?.localized ?? false,
-    stationary:
-      pose != null &&
+    stationary: pose == null ? null :
       Math.abs(pose.linear_velocity) <= STATIONARY_LINEAR_MS &&
       Math.abs(pose.angular_velocity) <= STATIONARY_ANGULAR_RPS,
     capabilities,
@@ -168,7 +167,7 @@ export function undockReason(facts: StateFacts): string | null {
     return "The robot's guarded undock profile has not been commissioned.";
   }
   if (facts.undockActive) return "The robot is already undocking.";
-  if (!isOnDock(facts)) return "The robot is not on its dock.";
+  if (!isCharging(facts)) return "The robot is not charging, so it cannot start undocking.";
   if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
   if (facts.bumpersValid !== true) {
     return "The robot cannot confirm its bumper readings, so it cannot tell whether anything is behind it. Check the robot before undocking.";
@@ -179,7 +178,8 @@ export function undockReason(facts: StateFacts): string | null {
   if (facts.navigating) {
     return "The robot is still driving to a destination. Stop it before backing it off the dock.";
   }
-  return stationaryReason(facts);
+  // Missing map velocity is checked against fresh raw odometry by the robot.
+  return facts.stationary === false ? stationaryReason(facts) : null;
 }
 
 /** Emergency reset has no robot-state prerequisites. */
@@ -206,11 +206,11 @@ export function rejectionReason(command: CommandType, facts: StateFacts): string
 /**
  * Is there anything to undock from? There is no matching Dock control: the
  * robot has no automatic dock-in path, so it is driven onto its charger by
- * hand. The button appears only when the robot is on the dock.
+ * hand. The button appears while charging or during an active undock.
  */
 export function showsUndock(facts: StateFacts): boolean {
-  // isOnDock already falls back to the raw charge signal when the observer is
+  // isCharging falls back to the raw charge signal when the observer is
   // unusable, so a robot visibly on charge behind a broken observer still gets
   // the control — disabled, carrying the observer error.
-  return facts.undockActive || isOnDock(facts);
+  return facts.undockActive || isCharging(facts);
 }
