@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "deployment_utc": "2026-10-15T20:43:49.069436+00:00",
+  "source_repository": "cmu-impactlab/patrolbot-dashboard",
+  "source_ref": "main",
+  "source_sha": "6b3b78521d1976bb073d31db7cafc2448dccbd26",
+  "image": "sha256:d2a78dc3a8812b48ea7de9037c7322708af89518b419c4b78269ba95471e3509",
+  "image_tag": "patrolbot-dashboard-server:latest",
+  "public_entry_asset": "/assets/index-UJo_ha2_.js",
+  "public_entry_sha256": "8299aab51de57519e19ac86b94e1c3b878052216f95ced92a0d6cf27e20b029e",
+  "health": {
+    "status": "healthy",
+    "robot_connected": true,
+    "writes_zero": true
+  },
+  "scope": "Full main rebuild (uncertainty display, independent motor-disable, plus all previously merged main content). No database migration; SQLite volume preserved; nginx untouched.",
+  "postflight": [
+    "container healthy",
+    "health endpoint healthy/robot online",
+    "served entry bundle byte-identical to accepted 8299aab5",
+    "uncertainty text present in bundle",
+    "no motor/pose/goal/undock command sent"
+  ],
+  "rollback": "Previous image 04a464df was superseded at rebuild and is no longer on the host. Rollback: rebuild from review/dashboard-device-checkout-20261015 (cf301e6), or load workstation archive backups/20261015T145435Z-ui-restoration/production-base-04a464df.tar (SHA 81595f03...). Historical tagged images also retained on host.",
+  "sbc": "Operator-reported down at deploy time; robot_connected=true reflects the Pi web-bridge link, not SBC telemetry.",
+  "physical_acceptance": false
+}
