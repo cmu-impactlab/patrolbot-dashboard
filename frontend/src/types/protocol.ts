@@ -76,6 +76,9 @@ export interface BatteryData {
 }
 
 export interface BaseStateData extends MapContext {
+  lidar_state?: "UNKNOWN" | "OFF" | "STARTING" | "READY" | "FAULT";
+  lidar_power_supported?: boolean;
+  lidar_scan_age?: number;
   map_activated_stamp_ns?: number;
   odom_epoch_valid?: boolean;
   localization_recovery_required?: boolean;
@@ -210,10 +213,12 @@ export type CommandType =
   // The guarded UI sends `undock` as one action. The two service-level
   // commands remain in the protocol for robot-side diagnostics and recovery.
   // There is no `dock`: the robot has no automatic dock-in path.
-  | "charge_release" | "motor_enable" | "undock" | "software_reset";
+  | "charge_release" | "motor_enable" | "motor_disable" | "undock" | "software_reset" | "set_lidar_power";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {
+  seed_profile?: "measured";
+  enabled?: boolean;
   command_id: string;
   command: CommandType;
   goal?: GoalData | null;

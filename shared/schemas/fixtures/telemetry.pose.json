@@ -12,6 +12,10 @@
     "linear_velocity": 0.24,
     "angular_velocity": 0.02,
     "covariance_trace": 0.08,
+    "planar_covariance": [0.03, 0.04, 0.01],
+    "covariance_limit": 0.25,
+    "localization_age_s": 0.1,
+    "localization_max_age_s": 30.0,
     "localized": true,
     "map_id": "cmuq-floor2",
     "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1"

@@ -15,11 +15,12 @@ pressed e-stop, an obstructed rear bumper, a robot already moving, or a base
 that never claimed the capability at all.
 
 `charge_release` remains available for robot-side and diagnostic paths but the
-dashboard UI does not send it. `motor_enable` is exposed only under the
-dashboard's Advanced disclosure and keeps these authoritative gates.
+dashboard UI does not send it. Motor-power requests are available without a
+map pose; the drive base checks physical enable interlocks and confirms disable.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,9 @@ DOCK_OBSERVER_DOCKED = {"DOCKED_CONFIRMED"}
 class StateFacts:
     """Everything the gates need, flattened out of base_state/pose/connection."""
 
+    lidar_state: str = "UNKNOWN"
+    lidar_power_supported: bool = False
+    lidar_scan_age: float = -1.0
     online: bool = False
     link_connected: bool = False
     telemetry_age: float = 999.0
@@ -99,6 +103,9 @@ class StateFacts:
 
     @property
     def charging(self) -> bool:
+        # µARCS can retain float charge after a proven physical departure.
+        if self.dock_state_valid and (self.dock_state or "").strip().upper() in {"CLEAR_CONFIRMED", "DEPARTING"}:
+            return False
         return self.charge_state.strip().lower() in CHARGING_STATES
 
     @property
@@ -147,6 +154,9 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
                        pose_age=pose_age,
                        allow_unlocalized=allow_unlocalized)
     if base_state is not None:
+        facts.lidar_state = getattr(base_state, "lidar_state", "UNKNOWN")
+        facts.lidar_power_supported = getattr(base_state, "lidar_power_supported", False)
+        facts.lidar_scan_age = getattr(base_state, "lidar_scan_age", -1.0)
         facts.link_connected = bool(base_state.link_connected)
         facts.telemetry_age = float(base_state.telemetry_age)
         facts.hardware_state_valid = bool(base_state.hardware_state_valid)
@@ -219,6 +229,37 @@ def _stationary_reason(facts: StateFacts) -> str | None:
     return None
 
 
+def lidar_reason(facts: StateFacts) -> str | None:
+    age = facts.lidar_scan_age
+    receipt = facts.base_state_age
+    if (not facts.online or not facts.link_connected or not facts.hardware_state_valid
+            or not math.isfinite(facts.telemetry_age) or facts.telemetry_age < 0
+            or receipt is None or facts.telemetry_age + receipt > .5
+            or facts.lidar_state != "READY"
+            or not math.isfinite(age) or not math.isfinite(receipt)
+            or age < 0 or receipt < 0 or age + receipt > 0.5):
+        return "LiDAR is off, starting, stale or unavailable — wait for fresh scans."
+    return None
+
+
+def lidar_power_reason(facts: StateFacts) -> str | None:
+    reason = _hardware_reason(facts)
+    if reason:
+        return reason
+    if not facts.lidar_power_supported or "set_lidar_power" not in facts.capabilities:
+        return "LiDAR power control is not commissioned on this robot."
+    if facts.lidar_state not in {"OFF", "READY", "FAULT"}:
+        return "LiDAR power state is unknown or starting — wait for a fresh state."
+    if (facts.base_state_age is None or not 0 <= facts.base_state_age <= .5
+            or not math.isfinite(facts.telemetry_age) or facts.telemetry_age < 0
+            or facts.telemetry_age + facts.base_state_age > .5):
+        return "LiDAR power state is stale — wait for a fresh state."
+    if facts.navigating or facts.undock_active:
+        return "A navigation, map or undock operation is active. Stop it before changing LiDAR power."
+    # The robot checks fresh measured velocity; a map pose cannot gate LiDAR recovery.
+    return None
+
+
 # -- per-command gates ------------------------------------------------------
 
 def navigate_reason(facts: StateFacts) -> str | None:
@@ -286,23 +327,20 @@ def charge_release_reason(facts: StateFacts) -> str | None:
 
 
 def motor_enable_reason(facts: StateFacts) -> str | None:
-    """Explicit, separate step: after this the robot can drive."""
-    reason = _hardware_reason(facts)
-    if reason is not None:
-        return reason
+    """Admit the request; the base checks physical enable interlocks."""
+    if not facts.online:
+        return "The robot is not connected right now."
     if "motor_enable" not in facts.capabilities:
         return "Motor enable is not available on this robot."
-    if facts.charging:
-        return ("The robot is still on charge. Release charging before "
-                "enabling the motors.")
-    if facts.estop_pressed:
-        return "The emergency stop is pressed. Release it on the robot first."
-    if facts.motors_enabled:
-        return "The motors are already on."
-    if facts.navigating:
-        return ("The robot is still driving to a destination. Stop it before "
-                "enabling the motors.")
-    return _stationary_reason(facts)
+    return None
+
+
+def motor_disable_reason(facts: StateFacts) -> str | None:
+    if not facts.online:
+        return "The robot is not connected right now."
+    if "motor_disable" not in facts.capabilities:
+        return "Motor disable is not available on this robot. Update its bridge first."
+    return None
 
 
 def undock_reason(facts: StateFacts) -> str | None:
@@ -343,26 +381,12 @@ def undock_reason(facts: StateFacts) -> str | None:
 
 
 def software_reset_reason(facts: StateFacts) -> str | None:
-    """Restart robot software only while it is safely parked on its dock.
-
-    Localization is intentionally not checked: reset is a recovery path for
-    an unhealthy localization stack. Fresh pose and stationary odometry are
-    still required so missing telemetry cannot look safe.
-    """
-    reason = _hardware_reason(facts)
-    if reason is not None:
-        return reason
+    """Admit emergency reset without robot-state prerequisites."""
+    if not facts.online:
+        return "The robot is not connected right now."
     if "software_reset" not in facts.capabilities:
         return "Software reset is not available on this robot."
-    if facts.dock_state_valid is not True:
-        return "The robot's dock observer is not reporting valid data. Check the robot before resetting software."
-    if (facts.dock_state or "").strip().upper() != "DOCKED_CONFIRMED":
-        return "Software reset is available only while the robot is confirmed on its dock."
-    if facts.motors_enabled:
-        return "The motors are on. Turn them off on the robot before resetting software."
-    if facts.navigating or facts.undock_active:
-        return "A navigation or undock operation is active. Stop it before resetting software."
-    return _stationary_reason(facts)
+    return None
 
 
 # There is no dock gate because there is no dock command: the robot has no
@@ -370,9 +394,12 @@ def software_reset_reason(facts: StateFacts) -> str | None:
 # is done by hand, and `navigate_to_pose` refuses to drive off it.
 
 GATES = {
+    "set_initial_pose": lidar_reason,
+    "set_lidar_power": lidar_power_reason,
     "navigate_to_pose": navigate_reason,
     "charge_release": charge_release_reason,
     "motor_enable": motor_enable_reason,
+    "motor_disable": motor_disable_reason,
     "undock": undock_reason,
     "software_reset": software_reset_reason,
 }
@@ -380,7 +407,10 @@ GATES = {
 
 def rejection_reason(command: str, facts: StateFacts) -> str | None:
     """Plain-language refusal for `command`, or None when it may proceed.
-    Commands without a gate here (stop, set_initial_pose — neither of which
-    drives the robot) return None."""
+    Stop remains available regardless of LiDAR or localization state."""
+    if command in {"navigate_to_pose", "set_initial_pose", "undock", "charge_release"}:
+        reason = lidar_reason(facts)
+        if reason:
+            return reason
     gate = GATES.get(command)
     return gate(facts) if gate is not None else None

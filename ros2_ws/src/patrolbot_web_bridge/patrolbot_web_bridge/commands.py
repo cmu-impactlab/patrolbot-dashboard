@@ -4,7 +4,7 @@ Only constructed when WEB_BRIDGE_ENABLE_COMMANDS=1; otherwise the node stays
 strictly subscribe-only and every command.request is declined. Commands are
 goal-based only (Nav2 NavigateToPose, /initialpose, goal cancel) plus the
 guarded dock-manager operations (the /patrolbot/undock action and the
-/patrolbot/charge_release and /patrolbot/motor_enable services) — there is
+/patrolbot/charge_release, /patrolbot/motor_enable and /patrolbot/motor_disable services) — there is
 deliberately no /cmd_vel path, and nothing here talks to the SBC directly.
 
 Undock is an *action on the robot*: this bridge asks for it and reports what
@@ -268,6 +268,18 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
     """
     if command in ("navigate_to_pose", "set_initial_pose") and goal is None:
         return "This command needs a destination."
+    if command in {"navigate_to_pose", "set_initial_pose", "undock", "charge_release"}:
+        try:
+            age = float((base_state or {}).get("lidar_scan_age", -1))
+            hardware_age = float((base_state or {}).get("telemetry_age", -1))
+            receipt = float(base_state_age) if base_state_age is not None else -1.0
+        except (TypeError, ValueError, OverflowError):
+            age = receipt = hardware_age = -1.0
+        if (not (base_state or {}).get("link_connected") or not (base_state or {}).get("hardware_state_valid")
+                or not math.isfinite(hardware_age) or hardware_age < 0 or hardware_age + receipt > .5
+                or (base_state or {}).get("lidar_state") != "READY" or not math.isfinite(age)
+                or not math.isfinite(receipt) or age < 0 or receipt < 0 or age + receipt > .5):
+            return "LiDAR is off, starting, stale or unavailable — wait for fresh scans."
     if command == "navigate_to_pose":
         if base_state is None:
             return "The robot's drive base has not reported in yet — cannot navigate."
@@ -375,6 +387,8 @@ class CommandExecutor:
         self._undock_client = None
         self._release_client = None
         self._motor_client = None
+        self._motor_disable_client = None
+        self._motor_disable_generation = 0
         self._undock_active: dict | None = None  # {command_id, goal_handle, started}
         self._last_undock_progress_mono = 0.0
         self._undock_server_misses = 0
@@ -383,6 +397,24 @@ class CommandExecutor:
         self._undock_timeout_s = float(
             (undock_config or {}).get("timeout_s", 180.0))
         self._dock_pose_client = None
+        self._lidar_client = None
+        self._lidar_pending = None
+        self._lidar_recovery_required = False
+        self._lidar_completed_mono = None
+        try:
+            from patrolbot_interfaces.srv import MotorDisable
+        except ImportError:
+            node.get_logger().warning("MotorDisable interface unavailable — motor disable commands disabled")
+        else:
+            self._MotorDisable = MotorDisable
+            self._motor_disable_client = node.create_client(MotorDisable, "/patrolbot/motor_disable")
+        try:
+            from patrolbot_interfaces.srv import SetLidarPower
+        except ImportError:
+            node.get_logger().warning("SetLidarPower interface unavailable — LiDAR power commands disabled")
+        else:
+            self._SetLidarPower = SetLidarPower
+            self._lidar_client = node.create_client(SetLidarPower, "/patrolbot/set_lidar_power")
         try:
             from patrolbot_interfaces.action import Undock
             from patrolbot_interfaces.srv import (
@@ -495,6 +527,10 @@ class CommandExecutor:
             capabilities.append("charge_release")
         if self._motor_client is not None and self._motor_client.service_is_ready():
             capabilities.append("motor_enable")
+        if getattr(self, "_motor_disable_client", None) is not None and self._motor_disable_client.service_is_ready():
+            capabilities.append("motor_disable")
+        if getattr(self, "_lidar_client", None) is not None and self._lidar_client.service_is_ready():
+            capabilities.append("set_lidar_power")
         return capabilities
 
     # -- replies ---------------------------------------------------------------
@@ -515,11 +551,35 @@ class CommandExecutor:
         command_id = str(data.get("command_id", ""))
         command = data.get("command")
         goal = data.get("goal")
+        seed_profile = data.get("seed_profile")
+        if seed_profile is not None and (command != "set_initial_pose" or seed_profile != "measured"):
+            self._ack(command_id, False, "Invalid measured seed profile.")
+            return
         if command == "cancel_map":
             if self._map_active and self._map_active["command_id"] == command_id:
                 self._check_map_connection(cancel=True)
             return
 
+        if command in {"motor_enable", "motor_disable"}:
+            if data.get("operator_authorized") is not True:
+                self._ack(command_id, False, "Motor power requires operator authorization.")
+                return
+            if command == "motor_disable":
+                self._motor_disable(command_id)
+            else:
+                self._motor_enable(command_id)
+            return
+        if getattr(self, "_lidar_pending", None) is not None and command not in {"stop", "motor_enable"}:
+            self._ack(command_id, False, "LiDAR power is pending or its outcome is unknown. Wait for its result.")
+            return
+        if getattr(self, "_lidar_recovery_required", False) and command in {"navigate_to_pose", "set_initial_pose", "undock", "charge_release"}:
+            self._ack(command_id, False, "LiDAR power recovery is required. Make a new explicit power request first.")
+            return
+        completed = getattr(self, "_lidar_completed_mono", None)
+        if completed is not None and command not in {"stop", "motor_enable"}:
+            if base_state_age is None or time.monotonic() - base_state_age <= completed:
+                self._ack(command_id, False, "Waiting for fresh LiDAR state after the power command.")
+                return
         if command in ("navigate_to_pose", "set_initial_pose"):
             if not goal or not goal.get("map_id") or not goal.get("map_revision"):
                 self._ack(command_id, False, "Explicit map identity and revision required.")
@@ -556,8 +616,10 @@ class CommandExecutor:
             self._navigate(command_id, goal, current_yaw)
         elif command == "stop":
             self._stop(command_id)
+        elif command == "set_lidar_power":
+            self._set_lidar_power(command_id, data, base_state, base_state_age, odom_age)
         elif command == "set_initial_pose":
-            self._set_initial_pose(command_id, goal, operator_authorized)
+            self._set_initial_pose(command_id, goal, operator_authorized, seed_profile)
         elif command == "undock":
             # operator_authorized is set by the dashboard server from the
             # verified session role — never by the browser (see
@@ -601,11 +663,12 @@ class CommandExecutor:
         nav_goal.pose.pose.orientation.z = qz
         nav_goal.pose.pose.orientation.w = qw
 
+        generation = getattr(self, "_motor_disable_generation", 0)
         future = self._nav_client.send_goal_async(
             nav_goal, feedback_callback=lambda fb: self._on_feedback(command_id, fb))
-        future.add_done_callback(lambda f: self._on_goal_response(command_id, f))
+        future.add_done_callback(lambda f: self._on_goal_response(command_id, f, generation))
 
-    def _on_goal_response(self, command_id: str, future) -> None:
+    def _on_goal_response(self, command_id: str, future, generation: int | None = None) -> None:
         try:
             goal_handle = future.result()
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator
@@ -613,6 +676,10 @@ class CommandExecutor:
             return
         if not goal_handle.accepted:
             self._ack(command_id, False, "Navigation declined the destination.")
+            return
+        if generation is not None and generation != getattr(self, "_motor_disable_generation", 0):
+            goal_handle.cancel_goal_async()
+            self._ack(command_id, False, "Destination canceled by motor disable.")
             return
         # Nav2 preempts a prior goal itself; close ours out for the UI.
         if self._active is not None:
@@ -779,11 +846,12 @@ class CommandExecutor:
         goal.validation_mode = bool(self._undock_config.get("validation_mode", False))
         goal.operator_authorized = True
 
+        generation = getattr(self, "_motor_disable_generation", 0)
         future = self._undock_client.send_goal_async(
             goal, feedback_callback=lambda fb: self._on_undock_feedback(command_id, fb))
-        future.add_done_callback(lambda f: self._on_undock_response(command_id, f))
+        future.add_done_callback(lambda f: self._on_undock_response(command_id, f, generation))
 
-    def _on_undock_response(self, command_id: str, future) -> None:
+    def _on_undock_response(self, command_id: str, future, generation: int | None = None) -> None:
         try:
             goal_handle = future.result()
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator
@@ -803,6 +871,10 @@ class CommandExecutor:
                       f"{float(config.get('reverse_speed', 0)):.2f} m/s"
                       f"{', validation mode' if config.get('validation_mode') else ''}). "
                       "The robot's dock manager log has the exact reason.")
+            return
+        if generation is not None and generation != getattr(self, "_motor_disable_generation", 0):
+            goal_handle.cancel_goal_async()
+            self._ack(command_id, False, "Undock canceled by motor disable.")
             return
         self._undock_active = {"command_id": command_id, "goal_handle": goal_handle,
                                "started": time.monotonic()}
@@ -851,7 +923,26 @@ class CommandExecutor:
         self._call_dock_service(command_id, self._release_client, self._ChargeRelease,
                                 "release charging")
 
+    def _motor_disable(self, command_id: str) -> None:
+        self._motor_disable_generation = getattr(self, "_motor_disable_generation", 0) + 1
+        self._call_dock_service(command_id, getattr(self, "_motor_disable_client", None),
+                                getattr(self, "_MotorDisable", None), "turn the motors off")
+        if self._map_active is not None:
+            try:
+                self._check_map_connection(cancel=True)
+            except Exception as exc:
+                self._node.get_logger().warning(f"Motor disable map cancellation failed: {exc}")
+        for active in (self._active, self._undock_active):
+            if active is not None:
+                try:
+                    active["goal_handle"].cancel_goal_async()
+                except Exception as exc:
+                    self._node.get_logger().warning(f"Motor disable action cancellation failed: {exc}")
+
     def _motor_enable(self, command_id: str) -> None:
+        if self._active is not None or self._undock_active is not None:
+            self._ack(command_id, False, "Previous movement has not finished canceling. Stop it before enabling motors.")
+            return
         self._call_dock_service(command_id, self._motor_client, self._MotorEnable,
                                 "turn the motors on")
 
@@ -869,9 +960,9 @@ class CommandExecutor:
         request = srv_type.Request()
         request.request_id = command_id
         future = client.call_async(request)
-        future.add_done_callback(lambda f: self._on_dock_service_result(command_id, f))
+        future.add_done_callback(lambda f: self._on_dock_service_result(command_id, f, what))
 
-    def _on_dock_service_result(self, command_id: str, future) -> None:
+    def _on_dock_service_result(self, command_id: str, future, what: str = "") -> None:
         try:
             response = future.result()
         except Exception as exc:  # noqa: BLE001
@@ -882,14 +973,79 @@ class CommandExecutor:
                       service_detail(int(getattr(response, "code", 1)),
                                      getattr(response, "message", "")))
             return
+        if getattr(response, "request_id", command_id) != command_id:
+            self._ack(command_id, False, "The drive-base reply did not match this request.")
+            return
         self._ack(command_id, True)
         code = int(getattr(response, "code", 0))
+        if what == "turn the motors off" and response.success and getattr(response, "motors_enabled", True):
+            self._result(command_id, "failed", "The drive base still reports motors enabled.")
+            return
         self._result(command_id, "succeeded" if response.success else "failed",
                      service_detail(code, getattr(response, "message", "")))
 
+    def _set_lidar_power(self, command_id, data, base, receipt_age, odom_age):
+        if data.get("operator_authorized") is not True or type(data.get("enabled")) is not bool:
+            self._ack(command_id, False, "LiDAR power requires operator authorization and an explicit boolean target.")
+            return
+        base = base or {}
+        try:
+            hardware_age = float(base.get("telemetry_age", -1))
+        except (TypeError, ValueError, OverflowError):
+            hardware_age = -1.0
+        if (not base.get("lidar_power_supported") or not base.get("hardware_state_valid")
+                or not base.get("link_connected") or base.get("fault_flags")
+                or receipt_age is None or not 0 <= receipt_age <= .5
+                or not math.isfinite(hardware_age) or hardware_age < 0
+                or hardware_age + receipt_age > .5
+                or base.get("lidar_state") not in {"OFF", "READY", "FAULT"}):
+            self._ack(command_id, False, "LiDAR power control is unavailable, uncommissioned or stale.")
+            return
+        if self._active or self._undock_active or base.get("undock_active"):
+            self._ack(command_id, False, "Stop the active operation before changing LiDAR power.")
+            return
+        client = getattr(self, "_lidar_client", None)
+        if client is None or not client.service_is_ready():
+            self._ack(command_id, False, "The robot's LiDAR power service is not running.")
+            return
+        # The typed robot service owns the measured-stationary check and motion hold.
+        request = self._SetLidarPower.Request()
+        request.request_id = command_id
+        request.enabled = data["enabled"]
+        self._lidar_pending = command_id
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            self._result(command_id, "timeout", f"LiDAR power outcome is unknown: {exc}")
+            return
+        future.add_done_callback(lambda future: self._on_lidar_result(command_id, future))
+
+    def _on_lidar_result(self, command_id, future):
+        if self._lidar_pending != command_id:
+            return
+        try:
+            response = future.result()
+            if response.request_id != command_id:
+                raise ValueError("LiDAR response belongs to a different request")
+        except Exception as exc:
+            self._result(command_id, "timeout", f"LiDAR power outcome is unknown: {exc}")
+            return
+        self._lidar_pending = None
+        self._lidar_completed_mono = time.monotonic()
+        if int(response.code) == 5:
+            self._lidar_recovery_required = True
+            self._ack(command_id, True)
+            self._result(command_id, "failed", response.message or "LiDAR power timed out; explicit recovery is required.")
+            return
+        if response.accepted:
+            self._lidar_recovery_required = not response.success
+        self._ack(command_id, bool(response.accepted), response.message or None)
+        if response.accepted:
+            self._result(command_id, "succeeded" if response.success else "failed", response.message)
+
     # -- set_initial_pose ------------------------------------------------------
 
-    def _set_initial_pose(self, command_id: str, goal: dict, operator_authorized: bool = False) -> None:
+    def _set_initial_pose(self, command_id: str, goal: dict, operator_authorized: bool = False, seed_profile: str | None = None) -> None:
         msg = self._PoseWithCovarianceStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self._node.get_clock().now().to_msg()
@@ -901,10 +1057,10 @@ class CommandExecutor:
         msg.pose.pose.orientation.y = qy
         msg.pose.pose.orientation.z = qz
         msg.pose.pose.orientation.w = qw
-        # Same uncertainty RViz's "2D Pose Estimate" uses.
-        msg.pose.covariance[0] = 0.25
-        msg.pose.covariance[7] = 0.25
-        msg.pose.covariance[35] = 0.0685
+        measured = seed_profile == "measured"
+        msg.pose.covariance[0] = 0.0009 if measured else 0.25
+        msg.pose.covariance[7] = 0.0009 if measured else 0.25
+        msg.pose.covariance[35] = 0.00030461742 if measured else 0.0685
         if not operator_authorized or self._active is not None or not self._map_client.server_is_ready():
             self._ack(command_id, False, "Map localization requires authorization, an idle robot and its action server.")
             return
@@ -914,6 +1070,7 @@ class CommandExecutor:
         request.map_revision = goal["map_revision"]
         request.pose = msg.pose
         request.operator_authorized = operator_authorized
+        request.measured_pose = measured
         self._map_active = {"command_id": command_id, "handle": None, "cancel": False}
         future = self._map_client.send_goal_async(request, feedback_callback=self._map_feedback)
         active = self._map_active
