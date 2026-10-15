@@ -1,0 +1,541 @@
+{
+  "schema_version": 1,
+  "description": "Exact observed dashboard backend, maps and Pi web bridge; frontend source matches existing host, build verification recorded separately.",
+  "branch": "deployed/dashboard-20261015",
+  "observed_utc": "2026-10-15",
+  "physical_acceptance": false,
+  "files": [
+    {
+      "repository_path": "server/app/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/__init__.py"
+    },
+    {
+      "repository_path": "server/app/api/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/__init__.py"
+    },
+    {
+      "repository_path": "server/app/api/health.py",
+      "sha256": "32ed73897f23ae95f15c214d74255bf251140bd9ecb161b1897a878c9f465bb6",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/health.py"
+    },
+    {
+      "repository_path": "server/app/api/help_guide.py",
+      "sha256": "6a46b1958322e6f23165bad746575978fbd002b286b95aab70ccabf50cf21fda",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/help_guide.py"
+    },
+    {
+      "repository_path": "server/app/api/history.py",
+      "sha256": "b991bc45b4b5db968d5c393667a9c7c08b0b45ae34d9cbe1d1a5d0dc3fdca43b",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/history.py"
+    },
+    {
+      "repository_path": "server/app/api/layouts.py",
+      "sha256": "e5f782b5e1963e9ff05a3ee1d5ec01ec89bc1e53181eba5cfb68edacbb6de90b",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/layouts.py"
+    },
+    {
+      "repository_path": "server/app/api/recordings.py",
+      "sha256": "68550c75097bd1b8c63dce083c822caffa132a20a52f6d45b6d814764d7b1275",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/recordings.py"
+    },
+    {
+      "repository_path": "server/app/api/snapshot.py",
+      "sha256": "36833eaa50b78760decc841b3d484a48ead115051204489d76585dbc373b8efd",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/api/snapshot.py"
+    },
+    {
+      "repository_path": "server/app/authentication/__init__.py",
+      "sha256": "d84af8f094213c51dee42341a8946bb0b9438bbd565e3c945b5cc55c4fb29003",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/authentication/__init__.py"
+    },
+    {
+      "repository_path": "server/app/authentication/local.py",
+      "sha256": "a4ef50bf138c890be7450384ce346ac45a4a1e2a2df3d4e0c1af9002de56e0e3",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/authentication/local.py"
+    },
+    {
+      "repository_path": "server/app/authentication/oidc.py",
+      "sha256": "fdbed923bc085ea5d0ceacd973d42a5c047b3840c3f24f87153e97a4c656d196",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/authentication/oidc.py"
+    },
+    {
+      "repository_path": "server/app/authentication/sessions.py",
+      "sha256": "1534b8b6cf99f565ebf2721130ce80f6372fdd010c05c4dc03da3c59313fe127",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/authentication/sessions.py"
+    },
+    {
+      "repository_path": "server/app/commands/__init__.py",
+      "sha256": "ab20e3193ab92afb1265c23e383b023632747222fef6e860e5151364241449c6",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/commands/__init__.py"
+    },
+    {
+      "repository_path": "server/app/commands/broker.py",
+      "sha256": "978db87ad23c1c7e13e54f15e1ff7cc66936107bf4fec6894f18eef35a1f9ff8",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/commands/broker.py"
+    },
+    {
+      "repository_path": "server/app/commands/gates.py",
+      "sha256": "071e3dd2fee268bcc37d3dffa7d357fa035412d2e9064509e71af803d753d24b",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/commands/gates.py"
+    },
+    {
+      "repository_path": "server/app/commands/lease.py",
+      "sha256": "27763c912ed49350a4cf68c7f7b419c69fc397cdae39892f545b479a5dc76c17",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/commands/lease.py"
+    },
+    {
+      "repository_path": "server/app/database/__init__.py",
+      "sha256": "9e114cf580f9f3da2b1f85814258b7e7d5dedf002dd66668f990b69f328d54d2",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/database/__init__.py"
+    },
+    {
+      "repository_path": "server/app/database/pg.py",
+      "sha256": "89c822e4f61d955fc787bb6af8019244cf45aa313f0478d644ef668f9f7bd084",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/database/pg.py"
+    },
+    {
+      "repository_path": "server/app/database/presets.py",
+      "sha256": "47ea5eb96c1909064ff84aaa067c6c1617afbc2145abdf082dbe3e37fc18107f",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/database/presets.py"
+    },
+    {
+      "repository_path": "server/app/database/repo.py",
+      "sha256": "cdbb80f9e631102e1f68521c946cd5359c75725dba00b049ff236a5e44657a8e",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/database/repo.py"
+    },
+    {
+      "repository_path": "server/app/database/writer.py",
+      "sha256": "254dd6dc42bad7aa7a29367e715d349a2253452ef374d55f8361d456d9e6479e",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/database/writer.py"
+    },
+    {
+      "repository_path": "server/app/help_guide.py",
+      "sha256": "05a0b0ebbc6d895953cc8096c2d4256c74b5e51327521fd5de6c9a9cfc420ea7",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/help_guide.py"
+    },
+    {
+      "repository_path": "server/app/main.py",
+      "sha256": "2d96defe040dc946632b75eec4abd74c5fe6a5ff454fd9810aaef47a4162dff1",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/main.py"
+    },
+    {
+      "repository_path": "server/app/protocol/__init__.py",
+      "sha256": "eddfe68ee47ac475a99d796973089d74afa59d8bb47fd4b413e31460db51498c",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/protocol/__init__.py"
+    },
+    {
+      "repository_path": "server/app/protocol/envelope.py",
+      "sha256": "dfd1a4fc896440690708f5dbac5844bc2368ab07fe51579fa79544ed25ba9cf7",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/protocol/envelope.py"
+    },
+    {
+      "repository_path": "server/app/protocol/messages.py",
+      "sha256": "33274d911117a84d5f864de84f8d66443d47f759a4a35cc58f06621f6ab2ee5e",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/protocol/messages.py"
+    },
+    {
+      "repository_path": "server/app/recordings/__init__.py",
+      "sha256": "e8edc90d60155ea9d106843484ddd8606a4cb2484a7809e9ad3eca971290c135",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/recordings/__init__.py"
+    },
+    {
+      "repository_path": "server/app/recordings/export.py",
+      "sha256": "cf9515bcc261b28c32f86d54b3a82508541e1d7d40f736680b8ab25604615e60",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/recordings/export.py"
+    },
+    {
+      "repository_path": "server/app/recordings/recorder.py",
+      "sha256": "1fefed99167aab11672d99fd5f00ae50723edde2929d29e0cce902253fe0c06a",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/recordings/recorder.py"
+    },
+    {
+      "repository_path": "server/app/settings.py",
+      "sha256": "3e21d887107995bb34dedf9d38d48f3f022550519b6258637be4dd92a927ad1e",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/settings.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/__init__.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/battery_estimator.py",
+      "sha256": "2e71dfc10e7b789b2042c9705d5a64307dacbd6c6f92c6bea85c005bc4914dbc",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/battery_estimator.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/hub.py",
+      "sha256": "9cc9f521fdb7eaafeda94c6fd0c95935980c823bc57ccf31db0be7464c6bd5eb",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/hub.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/map_catalog.py",
+      "sha256": "eb1d531380f82b4eaf5bd8038e29817b10d33163c75cf0113aec73c03e502532",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/map_catalog.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/static_map.py",
+      "sha256": "af822519a05041fbf75e13ed83c473681325655beaaa316b9766084d4e74a254",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/static_map.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/status.py",
+      "sha256": "a5e7c98b4d96a9f89d77e455595bbf10f6dc535bf71f19ee76f02c565ec45da1",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/status.py"
+    },
+    {
+      "repository_path": "server/app/telemetry/store.py",
+      "sha256": "33e5b7cb1d292bbe16919c2f8ae63f46f0c662ee0e2bfdab5806e5655fa68997",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/telemetry/store.py"
+    },
+    {
+      "repository_path": "server/app/websocket/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/websocket/__init__.py"
+    },
+    {
+      "repository_path": "server/app/websocket/robot_gateway.py",
+      "sha256": "d68af161dae95071c90fb4448ff5aae0967c9f4bc46ef3c9720099fdaf9cc402",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/websocket/robot_gateway.py"
+    },
+    {
+      "repository_path": "server/app/websocket/ui_gateway.py",
+      "sha256": "60a1fba143ceaf90b12c85184b9a8642568dc50c8a5e41c64d0e85c7c0c67da8",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/app/app/websocket/ui_gateway.py"
+    },
+    {
+      "repository_path": "server/maps/catalog/catalog.json",
+      "sha256": "0d1fa4d162aea354cab0de43418de925a4090b213e454de8b720392b89da10bb",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/catalog/catalog.json"
+    },
+    {
+      "repository_path": "server/maps/catalog/cmuq_1st_floor.pgm",
+      "sha256": "aee11890f547486d989fbdc7af124fd1fd6ef010d4999d365aa59d66893965d6",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/catalog/cmuq_1st_floor.pgm"
+    },
+    {
+      "repository_path": "server/maps/catalog/cmuq_1st_floor.yaml",
+      "sha256": "5d259b9b9cf72315f906086917fa603eaa9af1dfba919f2b86287cdc06751865",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/catalog/cmuq_1st_floor.yaml"
+    },
+    {
+      "repository_path": "server/maps/catalog/second_map.pgm",
+      "sha256": "7c97ad255d4dcdf54e23dff9dd12b9d7cb2b6c3b2373afa400f9a6081b065dcd",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/catalog/second_map.pgm"
+    },
+    {
+      "repository_path": "server/maps/catalog/second_map.yaml",
+      "sha256": "e995cc4fc298f95dae3831a0c24c743769462ac6b00ae9ff0fc7e64cc890b38a",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/catalog/second_map.yaml"
+    },
+    {
+      "repository_path": "server/maps/cmuq-floor1/first_map.pgm",
+      "sha256": "aee11890f547486d989fbdc7af124fd1fd6ef010d4999d365aa59d66893965d6",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/cmuq-floor1/first_map.pgm"
+    },
+    {
+      "repository_path": "server/maps/cmuq-floor1/first_map.yaml",
+      "sha256": "8de0a20aacf332414142d73f0266db37df7a7ff1125eef4dd18b03bbbcd035d0",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/cmuq-floor1/first_map.yaml"
+    },
+    {
+      "repository_path": "server/maps/cmuq-floor2/second_map.pgm",
+      "sha256": "7c97ad255d4dcdf54e23dff9dd12b9d7cb2b6c3b2373afa400f9a6081b065dcd",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/cmuq-floor2/second_map.pgm"
+    },
+    {
+      "repository_path": "server/maps/cmuq-floor2/second_map.yaml",
+      "sha256": "e995cc4fc298f95dae3831a0c24c743769462ac6b00ae9ff0fc7e64cc890b38a",
+      "host": "robot-dashboard",
+      "container": "patrolbot-dashboard-server-1",
+      "remote_path": "/maps/cmuq-floor2/second_map.yaml"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/config/web_bridge.yaml",
+      "sha256": "a63a29b428e0201508bd7a3c42a09acbd3e5e0d24e7d44f3356d00c74887f865",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/config/web_bridge.yaml"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/package.xml",
+      "sha256": "3f457667cb2e4487033cd900ec1340f233bdc5f113ab22c56bc31493d34974fb",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/package.xml"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/__init__.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/bridge_node.py",
+      "sha256": "a2da56f0b2ea18a5c58ab67de87ea4d687f0c1b07739aabd2c163cfa6eacb7b5",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/bridge_node.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/commands.py",
+      "sha256": "e87887b1455f3519988163af3cc63713b2242d54ce2e310d7ab98fb33a2852d8",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/commands.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/normalizers.py",
+      "sha256": "50f628e066b52d1ed56c5c5e352adcf79a85ece3c945ec98c1c875c99b2d5c7b",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/normalizers.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/resources.py",
+      "sha256": "f38084eb303eab27e4b8dcf737a22b3a8b845247017f210268f8a61c91d9ae65",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/resources.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/system_reset.py",
+      "sha256": "37f5d56b85fb05c9befcee21ab5afd64d1c30b1a9517b54283d7165c6919db7c",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/system_reset.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/throttle.py",
+      "sha256": "0324b2b877becf7220d11929c480d2e20aa6338e7040ebf4f873fd41575b30d0",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/throttle.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/patrolbot_web_bridge/ws_client.py",
+      "sha256": "0164105d2c39b2cf83fc1185dd6b3082de83e57f24915d588b7bc511374bd0ad",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/patrolbot_web_bridge/ws_client.py"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/resource/patrolbot_web_bridge",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/resource/patrolbot_web_bridge"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/setup.cfg",
+      "sha256": "e1780df260718a524c2f28ac2bf57cff076b345c1a468504aa249cf3773f259c",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/setup.cfg"
+    },
+    {
+      "repository_path": "ros2_ws/src/patrolbot_web_bridge/setup.py",
+      "sha256": "cb781b07537d511a0fbbe6e734afe87911733786e0bcaa1adeb72abbf7f0e5a8",
+      "host": "robot-pi2",
+      "container": "patrolbot-web-bridge",
+      "remote_path": "/opt/web_bridge/setup.py"
+    }
+  ],
+  "containers": [
+    {
+      "host": "robot-dashboard",
+      "name": "patrolbot-dashboard-server-1",
+      "image": "sha256:04a464df6668b2197795ed965f4c1704f180a7b08bf733dcd2086af47e9240bc"
+    },
+    {
+      "host": "robot-pi2",
+      "name": "patrolbot-web-bridge",
+      "image": "sha256:0da4b7b6810de6b96ce17defc1e5c20dc698e704f2a9c33085522f40b873e4b6"
+    }
+  ],
+  "assets": [
+    {
+      "path": "/.vite/manifest.json",
+      "sha256": "8170304b180c9a50fd48f4f7c05776e09b0f572756237528238b37c897ab6f87"
+    },
+    {
+      "path": "/assets/BatteryWidget-C676sHEH.js",
+      "sha256": "397c478810eebed61ae5cfb40f2d8e1455693d532e5a6a8d56d6f11904f8007e"
+    },
+    {
+      "path": "/assets/PiStatsWidget-Bpf-2DGt.js",
+      "sha256": "93ad762b8fbf1564842e2bcccebb30a37866cb8c97daaa53796725eba3cb19d2"
+    },
+    {
+      "path": "/assets/ReplayPage-CM3gMZgC.js",
+      "sha256": "442abefb5e956aac8ac7cccfe4ef9147a2a4086fa13c4482387d4a49ed882206"
+    },
+    {
+      "path": "/assets/charts-YOWUxDd6.js",
+      "sha256": "50be15b7040ac33d4e86a0311a648d0d23f6df8967cfc7d924b02a3d34ae6344"
+    },
+    {
+      "path": "/assets/cmuq-logo-DnPkAzOp.png",
+      "sha256": "856f1f798319067e481c2c83e198884233d43223b4576bed4eef9da61bfd398e"
+    },
+    {
+      "path": "/assets/grid-BOltB2Hq.css",
+      "sha256": "78fd1b4741a9c03bc5b9eeafa9cc02e52022f5d4d36b4c257b3678386f1b09e5"
+    },
+    {
+      "path": "/assets/grid-BpirG-2p.js",
+      "sha256": "513bdd761496ed623486140dc7e8993af4e76b29c483d6c51e007b602fdae9fb"
+    },
+    {
+      "path": "/assets/index-BgJTmLfc.js",
+      "sha256": "92453189385baeb86d01b5100a1fbc9a0b5ad7af9dc6d950405591cbaf1aa664"
+    },
+    {
+      "path": "/assets/index-bd00mmmq.css",
+      "sha256": "292dd6b4e9f7c20cd0559b525887745cdadadb885e7dd5d9001c568907e83da8"
+    },
+    {
+      "path": "/assets/query-Bu3rHtS9.js",
+      "sha256": "f68643ec84441fe5d8f17aba7bcf015c7aed8d12c28dce1359aa74f6c8e1d7ac"
+    },
+    {
+      "path": "/assets/react-B9d5PHkA.js",
+      "sha256": "3085508179c5d47d05a0e88700dcb911458b2fd201e7f63c51cf467246957f10"
+    },
+    {
+      "path": "/assets/ui-CPwTA00r.js",
+      "sha256": "29d5feeae79e75f993bb9cbec5b31dcdb6fc96c6bfd36eb3666ea5ebe7320485"
+    },
+    {
+      "path": "/assets/useChartInspection-BkuEJKzZ.js",
+      "sha256": "f538e370b99cbe72c59dcc7ec52df511b4a4d388ed5484bd04d1153cc046fdd1"
+    },
+    {
+      "path": "/index.html",
+      "sha256": "85a77fcb9d0c0aa560d05662803c425340dbfbf5e4374f1ed8aa81c880d5aa13"
+    }
+  ],
+  "peer": {
+    "repository": "cmu-impactlab/patrolbot",
+    "branch": "deployed/robot-20261015"
+  },
+  "known_gaps": [
+    "Deployed Floor1 catalog f5e10f78 differs from robot22872ec1; preserved rather than silently deployed a map fix.",
+    "Uncertainty and separate always-visible motor-disable UI regressions preserved for explicit reviewed restoration.",
+    "Existing image has no commit/source labels."
+  ],
+  "docker_commands": {
+    "robot-dashboard": [
+      "sudo",
+      "-n",
+      "docker"
+    ]
+  },
+  "public_url": "https://patrolbot-dashboard.qatar.cmu.edu",
+  "frontend_rebuild": {
+    "matched_files": 15,
+    "command": "npm run build",
+    "vite": "7.3.6",
+    "entry_sha256": "92453189385baeb86d01b5100a1fbc9a0b5ad7af9dc6d950405591cbaf1aa664",
+    "source_revision": "deployed/dashboard-20261015"
+  }
+}

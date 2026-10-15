@@ -41,3 +41,6 @@ audit/
 frontend/test-results/
 frontend/playwright-report/
 frontend/test-results-mock/
+
+# Private source snapshots, credentials and deployment rollback archives.
+/backups/

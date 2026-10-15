@@ -103,6 +103,14 @@ socket is not exposed to the nginx or Certbot containers.
 
 ## Updating
 
+October 15 correction: current running code is captured on a dedicated
+`deployed/*` branch and is not identical to main. See
+[`../releases/README.md`](../releases/README.md). Do not run the historical
+unqualified rebuild below to reconcile this mixed release: first review a clean
+commit, record both repository/image/map identities, verify off-device rollback,
+then activate only the explicitly approved services. Private snapshots no longer
+belong durably on the device.
+
 Deploy only a reviewed commit from `main`:
 
 ```bash

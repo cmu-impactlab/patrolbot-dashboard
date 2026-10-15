@@ -59,7 +59,7 @@
     # manager's hard caps (patrolbot_dock_manager/contracts.py::validate_goal)
     # are 0.70 m and 0.10 m/s. Commissioned 2026-07-26 on the real robot:
     # full reverse, validation mode off.
-    undock_reverse_distance: 0.60
+    undock_reverse_distance: 0.53
     undock_reverse_speed: 0.10
     undock_validation_mode: false
 
