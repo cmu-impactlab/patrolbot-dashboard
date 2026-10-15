@@ -6,7 +6,8 @@ from patrolbot_web_bridge.commands import CommandExecutor
 
 def executor():
     e = CommandExecutor.__new__(CommandExecutor)
-    e._map_active = None; e._active = {"goal_handle": Mock()}; e._undock_active = None
+    e._map_active = None; e._active = {"command_id": "old-navigation", "goal_handle": Mock()}; e._undock_active = None
+    e._ws = Mock()
     e._ack = Mock(); e._result = Mock(); e._node = Mock()
     e._motor_disable_client = Mock(service_is_ready=Mock(return_value=True))
     e._MotorDisable = NS(Request=lambda: NS())

@@ -321,7 +321,7 @@ def test_stopping_an_undock_waits_for_the_dock_manager():
     assert executor._ws.results("stop-1") == []
 
     executor._on_undock_result("goal-1", _Future(SimpleNamespace(
-        result=SimpleNamespace(success=False, code=9, message=""))))
+        status=5, result=SimpleNamespace(success=False, code=9, message=""))))
     assert executor._ws.results("goal-1")[0]["outcome"] == "canceled"
     assert executor._ws.results("stop-1")[0]["outcome"] == "succeeded"
 
@@ -629,11 +629,14 @@ def test_authorized_override_reports_correlated_navigation_result_without_logger
     e = CommandExecutor.__new__(CommandExecutor)
     e._ws = _Ws()
     e._active = e._undock_active = e._map_active = None
+    e._nav_pending = None
+    e._navigation_context = ("floor", "r1", 1, 1, True, False, 1)
     e._node = SimpleNamespace(get_logger=lambda: SimpleNamespace(warning=lambda message: None),
         get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: 1)))
     e._NavigateToPose = SimpleNamespace(Goal=lambda: SimpleNamespace(pose=SimpleNamespace(
         header=SimpleNamespace(), pose=SimpleNamespace(position=SimpleNamespace(), orientation=SimpleNamespace()))))
-    goal_handle = SimpleNamespace(accepted=True, get_result_async=lambda: _Future(SimpleNamespace(status=4)))
+    goal_handle = SimpleNamespace(accepted=True, goal_id=SimpleNamespace(uuid=list(range(16))),
+        get_result_async=lambda: _Future(SimpleNamespace(status=4)))
     e._nav_client = SimpleNamespace(server_is_ready=lambda: True,
         send_goal_async=Mock(return_value=_Future(goal_handle)))
     goal = {"map_id": "floor", "map_revision": "r1", "x": -3.25, "y": 8.5, "yaw": 1.2}
@@ -642,7 +645,7 @@ def test_authorized_override_reports_correlated_navigation_result_without_logger
         dict(_navigable_base_state(), map_id="floor", map_revision="r1"),
         current_yaw=0.0, localized=False, base_state_age=0.1, odom_age=0.1)
     assert e._ws.results("override-result") == [{"command_id": "override-result", "outcome": "succeeded",
-        "detail": "Arrived at the destination."}]
+        "detail": "Arrived at the destination.", "error_code": None, "error_message": None}]
     assert e._active is None
     sent_goal = e._nav_client.send_goal_async.call_args.args[0]
     assert (sent_goal.pose.pose.position.x, sent_goal.pose.pose.position.y) == (-3.25, 8.5)
