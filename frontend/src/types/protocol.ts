@@ -40,6 +40,13 @@ export interface PoseData extends MapContext {
   linear_velocity: number;
   angular_velocity: number;
   covariance_trace?: number | null;
+  /** Unrounded AMCL xx, yy (m²), yaw variance (rad²); null entries are invalid. */
+  planar_covariance?: [number | null, number | null, number | null] | null;
+  /** Effective dashboard bridge threshold, applied separately per axis. */
+  covariance_limit?: number | null;
+  /** Seconds since the bridge last received AMCL, not measured pose accuracy. */
+  localization_age_s?: number | null;
+  localization_max_age_s?: number | null;
   localized?: boolean;
 }
 

@@ -1,0 +1,16 @@
+# Build from a separately verified immutable production image. The context is a
+# private staging directory containing ONLY the reviewed built `static/` tree.
+# No source, dependencies, map data, configuration or runtime database is copied.
+ARG PATROLBOT_DASHBOARD_BASE_IMAGE
+FROM ${PATROLBOT_DASHBOARD_BASE_IMAGE}
+ARG PATROLBOT_DASHBOARD_BASE_IMAGE
+ARG PATROLBOT_REVISION
+ARG PATROLBOT_FRONTEND_SHA256
+LABEL org.opencontainers.image.revision="${PATROLBOT_REVISION}" \
+      io.patrolbot.ui-only="true" \
+      io.patrolbot.dashboard-base-image="${PATROLBOT_DASHBOARD_BASE_IMAGE}" \
+      io.patrolbot.frontend-tree-sha256="${PATROLBOT_FRONTEND_SHA256}"
+# Image-build filesystem only: remove superseded assets rather than retaining
+# stale bundles under old URLs. No command touches the running server.
+RUN rm -rf /app/static
+COPY static/ /app/static/

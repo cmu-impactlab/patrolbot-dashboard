@@ -6,6 +6,7 @@ import { LOCALIZATION_RECOVERY_COPY, STATUS_COPY } from "../lib/plainLanguage";
 import { formatAge, formatSpeed } from "../lib/format";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useIsFresh } from "../lib/freshness";
+import { localizationUncertainty } from "../lib/localizationUncertainty";
 
 export function RobotStatusWidget() {
   const status = useTelemetryStore((state) => state.status);
@@ -18,7 +19,12 @@ export function RobotStatusWidget() {
   // socket alive and these read "Enabled" and "Clear" from whatever it last
   // said — for days, in the case that prompted this.
   const baseFresh = useIsFresh(baseStateAt);
-  const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
+  const poseReceivedAt = useTelemetryStore((state) => state.poseReceivedAt);
+  const poseFresh = useIsFresh(poseReceivedAt);
+  const amclReceivedAt = pose?.localization_age_s != null && Number.isFinite(pose.localization_age_s)
+    ? poseReceivedAt - pose.localization_age_s * 1000 : null;
+  const amclFresh = useIsFresh(amclReceivedAt, (pose?.localization_max_age_s ?? 0) * 1000);
+  const uncertainty = localizationUncertainty(pose, poseFresh && amclFresh ? poseReceivedAt : null);
   const base = baseFresh ? baseState : null;
 
   const active = useCommandStore(state => state.active);
@@ -65,8 +71,26 @@ export function RobotStatusWidget() {
         </div>
         <div className="kv">
           <span className="k">Location known</span>
-          <span className="v">{poseFresh && pose ? (pose.localized === false ? "Uncertain" : "Yes") : "Unknown"}</span>
+          <span className="v">{poseFresh && (pose?.localization_age_s == null || amclFresh) && pose ? (pose.localized === false ? "Uncertain" : "Yes") : "Unknown"}</span>
         </div>
+        {uncertainty.state === "usable" ? <>
+          <div className="kv">
+            <span className="k">Largest map-axis spread (1σ)</span>
+            <span className="v">{uncertainty.positionSpreadM.toFixed(3)} m</span>
+          </div>
+          <div className="kv">
+            <span className="k">Heading spread (1σ)</span>
+            <span className="v">{uncertainty.headingSpreadDeg.toFixed(1)}°</span>
+          </div>
+          <div className="kv">
+            <span className="k">Dashboard variance margin</span>
+            <span className="v">{uncertainty.positionMarginPercent !== null && uncertainty.headingMarginPercent !== null
+              ? `XY ${uncertainty.positionMarginPercent >= 0 ? "+" : ""}${uncertainty.positionMarginPercent.toFixed(1)}% · heading ${uncertainty.headingMarginPercent >= 0 ? "+" : ""}${uncertainty.headingMarginPercent.toFixed(1)}%`
+              : "Unavailable: threshold not usable"}</span>
+          </div>
+        </> : <div className="kv">
+          <span className="k">Filter estimate</span><span className="v">{uncertainty.detail}</span>
+        </div>}
         <div className="kv">
           <span className="k">Speed</span>
           <span className="v">
@@ -86,6 +110,11 @@ export function RobotStatusWidget() {
           <span className="v">{formatAge(lastFrameAt)}</span>
         </div>
       </div>
+      <p className="subtext">Filter estimate, not measured pose accuracy. Positive margin does not mean navigation is ready.
+        {uncertainty.state === "usable" && uncertainty.varianceLimit !== null
+          && ` Dashboard bridge limits: XY ${uncertainty.varianceLimit} m² · heading ${uncertainty.varianceLimit} rad².`}
+        {" "}Refresh age is time since the bridge received a location estimate; docking has a separate freshness check.
+      </p>
       <button className="btn" disabled={powerReason !== null || busy} aria-busy={busy}
         title={powerReason ?? "Change LiDAR power"}
         onClick={() => { if (!powerReason) send("set_lidar_power", undefined, false, target); }}>
