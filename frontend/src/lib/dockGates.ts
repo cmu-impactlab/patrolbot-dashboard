@@ -87,6 +87,8 @@ export function factsFrom(
 }
 
 export function isCharging(facts: StateFacts): boolean {
+  // µARCS can retain float charge after a proven physical departure.
+  if (facts.dockStateValid && ["CLEAR_CONFIRMED", "DEPARTING"].includes((facts.dockState ?? "").trim().toUpperCase())) return false;
   return CHARGING_STATES.has(facts.chargeState.trim().toLowerCase());
 }
 
@@ -140,18 +142,15 @@ export function chargeReleaseReason(facts: StateFacts): string | null {
 }
 
 export function motorEnableReason(facts: StateFacts): string | null {
-  const reason = hardwareReason(facts);
-  if (reason !== null) return reason;
-  if (!facts.capabilities.includes("motor_enable")) {
-    return "Motor enable is not available on this robot.";
-  }
-  if (isCharging(facts)) return "The robot is still on charge. Release charging before enabling the motors.";
-  if (facts.estopPressed) return "The emergency stop is pressed. Release it on the robot first.";
-  if (facts.motorsEnabled) return "The motors are already on.";
-  if (facts.navigating) {
-    return "The robot is still driving to a destination. Stop it before enabling the motors.";
-  }
-  return stationaryReason(facts);
+  if (!facts.online) return "The robot is not connected right now.";
+  if (!facts.capabilities.includes("motor_enable")) return "Motor enable is not available on this robot.";
+  return null;
+}
+
+export function motorDisableReason(facts: StateFacts): string | null {
+  if (!facts.online) return "The robot is not connected right now.";
+  if (!facts.capabilities.includes("motor_disable")) return "Motor disable is not available on this robot. Update its bridge first.";
+  return null;
 }
 
 /** Back off the dock. The robot releases its own charger and powers its own
@@ -183,31 +182,19 @@ export function undockReason(facts: StateFacts): string | null {
   return stationaryReason(facts);
 }
 
-/** Software-only recovery; localization is intentionally irrelevant. */
+/** Emergency reset has no robot-state prerequisites. */
 export function softwareResetReason(facts: StateFacts): string | null {
-  const reason = hardwareReason(facts);
-  if (reason !== null) return reason;
+  if (!facts.online) return "The robot is not connected right now.";
   if (!facts.capabilities.includes("software_reset")) {
     return "Software reset is not available on this robot.";
   }
-  if (facts.dockStateValid !== true) {
-    return "The robot's dock observer is not reporting valid data. Check the robot before resetting software.";
-  }
-  if ((facts.dockState ?? "").trim().toUpperCase() !== "DOCKED_CONFIRMED") {
-    return "Software reset is available only while the robot is confirmed on its dock.";
-  }
-  if (facts.motorsEnabled) {
-    return "The motors are on. Turn them off on the robot before resetting software.";
-  }
-  if (facts.navigating || facts.undockActive) {
-    return "A navigation or undock operation is active. Stop it before resetting software.";
-  }
-  return facts.stationary ? null : "The dashboard has not had a recent position update or the robot is still moving — wait for fresh stationary data before resetting software.";
+  return null;
 }
 
 const GATES: Partial<Record<CommandType, (facts: StateFacts) => string | null>> = {
   charge_release: chargeReleaseReason,
   motor_enable: motorEnableReason,
+  motor_disable: motorDisableReason,
   undock: undockReason,
   software_reset: softwareResetReason,
 };

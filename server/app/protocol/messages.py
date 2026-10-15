@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 DiagLevel = Literal["OK", "WARN", "ERROR", "STALE"]
 ConnectionState = Literal["online", "stale", "offline"]
@@ -48,6 +48,12 @@ class PoseData(MapContext):
     linear_velocity: float
     angular_velocity: float
     covariance_trace: float | None = None
+    # AMCL xx, yy (m²), yaw variance (rad²). Null entries retain invalidity
+    # without putting NaN/Inf in JSON or rounding a small variance to zero.
+    planar_covariance: tuple[float | None, float | None, float | None] | None = None
+    covariance_limit: float | None = None
+    localization_age_s: float | None = None
+    localization_max_age_s: float | None = None
     # Absent means "the robot did not say", which the motion gates must read as
     # "not localized" — every real producer sends it explicitly.
     localized: bool = False
@@ -94,6 +100,9 @@ class BatteryData(BaseModel):
 
 
 class BaseStateData(MapContext):
+    lidar_state: Literal["UNKNOWN", "OFF", "STARTING", "READY", "FAULT"] = "UNKNOWN"
+    lidar_power_supported: bool = False
+    lidar_scan_age: float = Field(default=-1.0, ge=-1.0, allow_inf_nan=False)
     map_activated_stamp_ns: int = Field(default=0, ge=0)
     session_generation: int
     link_connected: bool
@@ -184,7 +193,7 @@ CommandType = Literal[
     # the command anyway meant the dashboard offered a control the real
     # executor would reject as unknown, and only the mock made it look
     # implemented. Reinstate it when a real dock-in path is commissioned.
-    "charge_release", "motor_enable", "undock", "software_reset",
+    "charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power",
 ]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 
@@ -192,6 +201,17 @@ CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout
 class CommandRequestData(BaseModel):
     command_id: str  # UUID minted by the browser; correlates the whole lifecycle
     command: CommandType
+    seed_profile: Literal["measured"] | None = None
+    enabled: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def require_lidar_target(self):
+        if self.seed_profile is not None and self.command != "set_initial_pose":
+            raise ValueError("seed_profile is only valid for set_initial_pose")
+        if self.command == "set_lidar_power" and self.enabled is None:
+            raise ValueError("LiDAR power requires an explicit boolean enabled target")
+        return self
+
     goal: GoalData | None = None  # required for navigate_to_pose / set_initial_pose
     # Set only when the operator has explicitly confirmed taking control away
     # from whoever currently holds the single-operator lease.

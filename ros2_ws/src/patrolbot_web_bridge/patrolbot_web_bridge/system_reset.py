@@ -42,6 +42,10 @@ class SystemResetClient:
         self._last_status = None
         self._thread = threading.Thread(target=self._run, daemon=True, name='system-reset-status')
 
+    @property
+    def commands_blocked(self):
+        return self.busy or self._uncertain
+
     def start(self):
         self._thread.start()
 
@@ -61,10 +65,11 @@ class SystemResetClient:
                 reason = 'Operator authorization is required.'
             elif not self.available or not self.path:
                 reason = 'Software reset is not commissioned or the supervisor is unavailable.'
-            elif self.busy:
-                reason = 'A reset is pending or its outcome is unknown. Inspect it before retrying.'
+            elif self.busy and not self._uncertain:
+                reason = 'A software reset is already running. Wait for it to finish.'
             else:
                 self.busy = True
+                self._uncertain = False
                 self._pending_id = command_id
                 self._requests.put_nowait(command_id)
                 return
@@ -94,7 +99,7 @@ class SystemResetClient:
             self.available = False
             self._uncertain = True
             self.ws.send('command.progress', dict(command_id=command_id,
-                stage='reset_outcome_unknown', detail='Reset outcome unknown. Inspect system status before retrying.'))
+                stage='reset_outcome_unknown', detail='Reset outcome unknown. No automatic retry; confirm a new reset to try again.'))
 
     def _report(self, reply):
         state = reply.get('state')
@@ -113,7 +118,7 @@ class SystemResetClient:
         with self._lock:
             if self._pending_id is not None and command_id != self._pending_id:
                 return
-            self.busy = state not in {'succeeded', 'failed'}
+            self.busy = state not in TERMINAL
             self._uncertain = state == 'uncertain'
             if not self.busy:
                 self._pending_id = None
@@ -123,7 +128,7 @@ class SystemResetClient:
         if key == self._last_status or not self.ws.connected.is_set():
             return
         self._last_status = key
-        detail = str(reply.get('message') or 'Software reset in progress. A fresh pose will be required.')[:1024]
+        detail = str(reply.get('message') or 'Software reset in progress.')[:1024]
         if state in TERMINAL:
             self.ws.send('command.result', dict(command_id=command_id,
                 outcome='timeout' if state == 'uncertain' else state, detail=detail))

@@ -661,3 +661,16 @@ def test_spatial_commands_require_coordinated_map_interface(client, command, cas
             ack = recv_until(ui, 'command.ack')['data']
             assert not ack['accepted']
             assert fragment in ack['reason']
+
+
+@pytest.mark.parametrize("charge", ["float", "bulk", "overcharge"])
+def test_confirmed_clear_dock_overrides_latched_charger_value(charge):
+    clear = facts(charge_state=charge, dock_state="CLEAR_CONFIRMED", dock_state_valid=True)
+    assert not clear.charging
+    assert gates.motor_enable_reason(clear) is None
+    assert "nothing to release" in gates.charge_release_reason(clear)
+
+
+@pytest.mark.parametrize("valid", [False, None])
+def test_invalid_dock_observer_does_not_clear_charge_inhibit(valid):
+    assert facts(charge_state="float", dock_state="CLEAR_CONFIRMED", dock_state_valid=valid).charging

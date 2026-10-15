@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -46,8 +47,10 @@ COMMAND_LABELS = {
     "stop": "Stop the robot",
     "charge_release": "Release charging",
     "motor_enable": "Enable motors",
+    "motor_disable": "Disable motors",
     "undock": "Move robot off its charging dock",
     "software_reset": "Restart robot software",
+    "set_lidar_power": "Change LiDAR power",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
 
@@ -59,6 +62,7 @@ class ActiveCommand:
     robot_id: str
     initiator: Any = None
     acked: bool = False
+    uncertain: bool = False
     timers: list[asyncio.Task] = field(default_factory=list)
 
     def cancel_timers(self) -> None:
@@ -75,9 +79,13 @@ class CommandBroker:
         self.ack_timeout_s = ack_timeout_s
         self.result_timeout_s = result_timeout_s
         self.active: dict[str, ActiveCommand] = {}
+        self._admission_locks: dict[str, asyncio.Lock] = {}
         # A reset remains a command barrier until the supervisor reports a
         # terminal result. A disconnect or timeout cannot resolve the outcome.
         self.reset_pending: dict[str, str] = {}
+        self.lidar_pending: dict[str, str] = {}
+        self.lidar_recovery_required: set[str] = set()
+        self.lidar_state_after: dict[str, float] = {}
         # Every command_id ever seen (bounded) — duplicate protection must
         # cover finished commands too, or a replayed frame re-runs them.
         self._seen: OrderedDict[str, None] = OrderedDict()
@@ -88,14 +96,29 @@ class CommandBroker:
 
     async def handle_browser_request(self, client: Any, envelope: Envelope,
                                      payload: CommandRequestData) -> None:
+        if payload.command in {"stop", "motor_disable"}:
+            await self._handle_browser_request(client, envelope, payload)
+            return
+        lock = self._admission_locks.setdefault(envelope.robot_id, asyncio.Lock())
+        async with lock:
+            await self._handle_browser_request(client, envelope, payload)
+
+    async def _handle_browser_request(self, client, envelope, payload):
         command_id = payload.command_id
         robot_id = envelope.robot_id
         user = getattr(client, "user", None)
 
         command = payload.command
 
+        if robot_id in self.lidar_pending and command not in {"stop", "software_reset", "motor_disable", "motor_enable"}:
+            await self._reject_audited(client, robot_id, command_id, command,
+                "LiDAR power is pending or its outcome is unknown. Wait for the robot result before sending another command.")
+            return
+
         pending_reset = self.reset_pending.get(robot_id)
-        if pending_reset and command != "stop":
+        previous_reset = self.active.get(pending_reset) if pending_reset else None
+        explicit_retry = command == "software_reset" and previous_reset is not None and previous_reset.uncertain
+        if pending_reset and command not in {"stop", "motor_disable"} and not explicit_retry:
             await self._reject_audited(
                 client, robot_id, command_id, command,
                 "A software reset is still pending or its outcome is unknown. "
@@ -113,7 +136,7 @@ class CommandBroker:
 
         # 2. Per-operator rate limit — a stuck or hostile client cannot flood
         #    the robot with commands.
-        if not self.rate.allow(user.id):
+        if command not in {"software_reset", "motor_disable"} and not self.rate.allow(user.id):
             await self._reject_audited(client, robot_id, command_id, command,
                                        "Too many commands too quickly — "
                                        "wait a moment and try again.")
@@ -121,17 +144,18 @@ class CommandBroker:
 
         # 3. Single-operator lease: a different operator must explicitly take
         #    over before they can send, stop, resume, or cancel.
-        if not self.lease.can_command(robot_id, user.id):
-            holder = self.lease.holder(robot_id)
-            if not payload.takeover:
-                who = holder.username if holder else "another operator"
-                await self._reject_audited(client, robot_id, command_id, command,
-                                           f"{who} is currently in control of the robot. "
-                                           "Take over to send commands.")
-                return
-            log.info("operator %s took over control of %s from %s", user.username,
-                     robot_id, holder.username if holder else "-")
-        self.lease.acquire(robot_id, user.id, user.username, client)
+        if command not in {"software_reset", "motor_disable"}:
+            if not self.lease.can_command(robot_id, user.id):
+                holder = self.lease.holder(robot_id)
+                if not payload.takeover:
+                    who = holder.username if holder else "another operator"
+                    await self._reject_audited(client, robot_id, command_id, command,
+                                               f"{who} is currently in control of the robot. "
+                                               "Take over to send commands.")
+                    return
+                log.info("operator %s took over control of %s from %s", user.username,
+                         robot_id, holder.username if holder else "-")
+            self.lease.acquire(robot_id, user.id, user.username, client)
 
         # 4. Duplicate protection — in-memory fast path plus a DB lookup so a
         #    replayed command_id is caught even after a server restart.
@@ -191,15 +215,28 @@ class CommandBroker:
         if self.hub.db is not None:
             await self.hub.db.add_command_audit(
                 envelope.robot_id, command_id, command,
-                payload.goal.model_dump() if payload.goal else None,
+                ({"enabled": payload.enabled} if command == "set_lidar_power"
+                 else dict(payload.goal.model_dump(), **({"seed_profile": payload.seed_profile} if payload.seed_profile else {})) if payload.goal else None),
                 **self._identity(client, robot_id),
             )
+
+        if command == "software_reset":
+            # Retire old intents; the fixed host restart stops their publishers.
+            for old in list(self.active.values()):
+                if old.robot_id == robot_id:
+                    if old.command == "set_lidar_power":
+                        self.lidar_recovery_required.add(robot_id)
+                    await self._finish(old, "timeout" if old.uncertain else "canceled",
+                        "Previous outcome unknown; superseded by an explicit software reset." if old.uncertain
+                        else "Superseded by an explicit software reset; this command will not resume.")
 
         entry = ActiveCommand(command_id=command_id, command=payload.command,
                               robot_id=envelope.robot_id, initiator=client)
         self.active[command_id] = entry
         if command == "software_reset":
             self.reset_pending[robot_id] = command_id
+        if command == "set_lidar_power":
+            self.lidar_pending[robot_id] = command_id
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
 
@@ -212,10 +249,12 @@ class CommandBroker:
             await session.websocket.send_text(frame)
         except Exception as exc:  # socket died between the check and the send
             log.warning("failed to forward %s to robot: %s", command_id, exc)
-            if command == "software_reset":
-                await self._mark_reset_uncertain(entry,
+            if command == "set_lidar_power":
+                await self._mark_uncertain(entry, "LiDAR power outcome is unknown after the connection dropped. Wait for its result; do not retry.")
+            elif command == "software_reset":
+                await self._mark_uncertain(entry,
                     "The robot connection dropped while sending. The reset outcome is unknown; "
-                    "inspect the supervisor before retrying.")
+                    "confirm a new reset to try again.")
             else:
                 await self._close_out(entry, "failed", "The robot connection dropped while sending.")
             return
@@ -244,9 +283,15 @@ class CommandBroker:
             self.hub.publish("command.progress", session.robot_id, payload)
         elif isinstance(payload, CommandResultData):
             self.hub.publish("command.result", session.robot_id, payload)
-            if entry.command == "software_reset" and payload.outcome == "timeout":
-                await self._mark_reset_uncertain(entry, payload.detail or "Reset outcome unknown; inspect the supervisor.")
+            if entry.command in {"software_reset", "set_lidar_power"} and payload.outcome == "timeout":
+                await self._mark_uncertain(entry, payload.detail or "Reset outcome unknown; a new reset needs confirmation.")
                 return
+            if entry.command == "set_lidar_power":
+                self.lidar_state_after[entry.robot_id] = time.monotonic()
+                if payload.outcome == "succeeded":
+                    self.lidar_recovery_required.discard(entry.robot_id)
+                else:
+                    self.lidar_recovery_required.add(entry.robot_id)
             await self._finish(entry, payload.outcome, payload.detail or "")
 
     # -- internals ------------------------------------------------------------
@@ -287,8 +332,14 @@ class CommandBroker:
         """
         if command not in gates.GATES:
             return None
+        if session.robot_id in self.lidar_recovery_required and command in {"navigate_to_pose", "set_initial_pose", "undock", "charge_release"}:
+            return "LiDAR power recovery is required. Make a new explicit power request before commanding the robot."
         state = session.state
-        navigating = any(entry.command == "navigate_to_pose"
+        if session.robot_id in self.lidar_state_after and command not in {"software_reset", "motor_disable", "motor_enable"}:
+            received = getattr(state.base_state, "received_mono", None)
+            if received is None or received <= self.lidar_state_after[session.robot_id]:
+                return "Waiting for fresh LiDAR state after the power command."
+        navigating = any(entry.command in {"navigate_to_pose", "set_initial_pose"}
                          and entry.robot_id == session.robot_id
                          for entry in self.active.values())
         facts = gates.facts_from_state(state.connection, state.base_state.data,
@@ -332,33 +383,40 @@ class CommandBroker:
     async def _reject_audited(self, client: Any, robot_id: str, command_id: str,
                               command: str, reason: str) -> None:
         """Reject and record the attempt (who, from where, why) in the audit."""
-        self._reject(robot_id, command_id, reason)
         if self.hub.db is not None:
             await self.hub.db.add_command_rejection(
                 robot_id, command_id, command, reason, **self._identity(client, robot_id))
+        self._reject(robot_id, command_id, reason)
 
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)
         if not entry.acked:
+            if entry.command == "set_lidar_power":
+                await self._mark_uncertain(entry, "LiDAR power outcome is unknown: acceptance was not confirmed. Wait for its result; do not retry.")
+                return
             if entry.command == "software_reset":
-                await self._mark_reset_uncertain(entry,
+                await self._mark_uncertain(entry,
                     "The reset outcome is unknown because the robot did not confirm acceptance. "
-                    "Inspect the robot supervisor before retrying.")
+                    "No automatic retry; confirm a new reset to try again.")
                 return
             await self._close_out(entry, "timeout", "The robot did not confirm the command in time.")
 
     async def _result_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.result_timeout_s)
+        if entry.command == "set_lidar_power":
+            await self._mark_uncertain(entry, "LiDAR power outcome is unknown. Wait for the robot result; do not retry.")
+            return
         if entry.command == "software_reset":
-            await self._mark_reset_uncertain(entry,
-                "The reset outcome is unknown. Inspect the robot supervisor before retrying.")
+            await self._mark_uncertain(entry,
+                "The reset outcome is unknown. No automatic retry; confirm a new reset to try again.")
             return
         await self._close_out(entry, "timeout", "The command took too long and was abandoned.")
 
-    async def _mark_reset_uncertain(self, entry: ActiveCommand, detail: str) -> None:
-        """Publish uncertainty but keep the command open for supervisor replay."""
+    async def _mark_uncertain(self, entry: ActiveCommand, detail: str) -> None:
+        """Hold ordinary commands; an explicit reset may supersede an unknown result."""
         if entry.command_id not in self.active:
             return
+        entry.uncertain = True
         self.hub.publish("command.result", entry.robot_id, CommandResultData(
             command_id=entry.command_id, outcome="timeout", detail=detail))
         if self.hub.db is not None:
@@ -367,6 +425,9 @@ class CommandBroker:
     async def _close_out(self, entry: ActiveCommand, outcome: str, detail: str) -> None:
         """Synthesize a result for a command the robot never resolved."""
         if entry.command_id not in self.active:
+            return
+        if entry.command == "set_lidar_power":
+            await self._mark_uncertain(entry, "LiDAR power outcome is unknown. Wait for the robot result; do not retry.")
             return
         await self._cancel_map(entry)
         self.hub.publish("command.result", entry.robot_id, CommandResultData(
@@ -378,6 +439,8 @@ class CommandBroker:
             return
         if entry.command == "software_reset":
             self.reset_pending.pop(entry.robot_id, None)
+        if entry.command == "set_lidar_power":
+            self.lidar_pending.pop(entry.robot_id, None)
         entry.cancel_timers()
         if self.hub.db is not None:
             await self.hub.db.complete_command_audit(entry.command_id, outcome, detail)

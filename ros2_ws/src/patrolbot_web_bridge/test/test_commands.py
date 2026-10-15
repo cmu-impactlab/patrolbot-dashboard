@@ -28,9 +28,10 @@ def test_goal_status_mapping():
     assert map_goal_status(0) == "failed"  # unknown codes fail closed
 
 
-GOOD_BASE = {"estop_pressed": False, "motors_enabled": True,
+GOOD_BASE = {"lidar_state": "READY", "lidar_scan_age": 0.1, "estop_pressed": False, "motors_enabled": True,
              "hardware_state_valid": True, "link_connected": True,
-             "telemetry_age": 0.1, "fault_flags": 0,
+             "lidar_state": "READY", "lidar_scan_age": 0.1,
+        "telemetry_age": 0.1, "fault_flags": 0,
              "odom_epoch_valid": True,
              "localization_recovery_required": False,
              "localization_seed_stamp_ns": 100}
@@ -56,7 +57,7 @@ def test_precheck_fails_closed_without_base_state():
     assert nav(None) is not None
     # stop and set_initial_pose don't move the robot — allowed regardless.
     assert precheck("stop", None, None) is None
-    assert precheck("set_initial_pose", {"x": 1, "y": 2}, None) is None
+    assert precheck("set_initial_pose", {"x": 1, "y": 2}, None) is not None
 
 
 def test_precheck_refuses_navigate_without_localization():
@@ -104,7 +105,7 @@ def test_set_initial_pose_keeps_existing_independent_guards():
                  localization_recovery_required=True,
                  localization_seed_stamp_ns=0)
     assert precheck("set_initial_pose", {"x": 1, "y": 2}, stale,
-                    localized=False, base_state_age=99.0) is None
+                    localized=False, base_state_age=.1) is None
 
 
 def test_precheck_refuses_navigate_on_stale_or_faulted_base():
@@ -465,6 +466,7 @@ def _navigable_base_state() -> dict:
     """Off the charger, motors live, telemetry fresh and valid."""
     return {
         "link_connected": True,
+        "lidar_state": "READY", "lidar_scan_age": 0.1,
         "telemetry_age": 0.1,
         "hardware_state_valid": True,
         "fault_flags": 0,

@@ -4,6 +4,7 @@ import { LiveMapWidget, poseNeedsUncertaintyRing } from ".";
 import { registerCommandSender, useCommandStore } from "../../stores/commandStore";
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useAuthStore } from "../../stores/authStore";
+import type { BaseStateData } from "../../types/protocol";
 import { useUiStore } from "../../stores/uiStore";
 
 vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string) => ({ data: {
@@ -28,9 +29,10 @@ beforeEach(() => {
   }) as CanvasRenderingContext2D);
   Element.prototype.setPointerCapture = vi.fn();
   sender.mockClear(); registerCommandSender(sender);
-  useTelemetryStore.setState({ wsConnected: true, connection: { state: "online" }, pose: null, poseSetThisSession: true });
+  useTelemetryStore.setState({ wsConnected: true, connection: { state: "online" }, pose: null, poseSetThisSession: true, baseStateAt: performance.now(),
+    baseState: { lidar_state: "READY", lidar_scan_age: .1, link_connected:true, hardware_state_valid:true, telemetry_age:.1 } as BaseStateData });
   useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
-  useCommandStore.setState({ active: null, pickMode: "initialpose", lastResult: null });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "initialpose", lastResult: null });
   useUiStore.setState({ fullscreenWidget: null, followRobot: false });
 });
 
@@ -52,6 +54,15 @@ function mount() {
 const down = (canvas: Element, id = 1, pointerType = "touch") => fireEvent.pointerDown(canvas, { pointerId: id, pointerType, clientX: 150, clientY: 150 });
 const up = (canvas: Element, id = 1, pointerType = "touch") => fireEvent.pointerUp(canvas, { pointerId: id, pointerType, clientX: 150, clientY: 150 });
 describe("live map command boundary", () => {
+  it("disables confirmation and explains when LiDAR turns off during a preview", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    act(() => useTelemetryStore.setState({ baseState: { lidar_state: "OFF", lidar_scan_age: -1 } as BaseStateData }));
+    const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(screen.getByText(/LiDAR is off/)).toBeTruthy();
+    fireEvent.click(confirm);
+    expect(sender).not.toHaveBeenCalled();
+  });
   it("previews a touch tap and sends only after explicit confirmation", () => {
     const canvas = mount(); down(canvas); up(canvas);
     expect(sender).not.toHaveBeenCalled();

@@ -1,3 +1,4 @@
+import { useLidarReadyReason } from "../lib/lidar";
 import { localizationRecoveryReason, RECOVERY_RECEIPT_MAX_MS } from "../lib/localizationRecovery";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -8,7 +9,7 @@ import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import {
-  factsFrom, motorEnableReason, showsUndock, softwareResetReason, undockReason,
+  factsFrom, motorEnableReason, motorDisableReason, showsUndock, softwareResetReason, undockReason,
 } from "../lib/dockGates";
 import { useIsFresh } from "../lib/freshness";
 
@@ -23,7 +24,7 @@ const OUTCOME_COPY: Record<string, string> = {
 /**
  * Navigation plus explicitly gated hardware actions. There is deliberately no
  * joystick/velocity control — undock is an action the robot executes rather
- * than velocity published from a browser, and Advanced motor enable changes
+ * than velocity published from a browser, and explicit motor power changes
  * drive power without sending motion.
  *
  * There is no Dock control to pair with Undock: the robot has no automatic
@@ -67,8 +68,13 @@ export function NavControlsWidget() {
   const recoveryAt = useTelemetryStore(state => state.baseStateAt);
   const recoveryFresh = useIsFresh(recoveryAt, RECOVERY_RECEIPT_MAX_MS);
   const recoveryReason = localizationRecoveryReason(recoveryFresh ? baseState : null, recoveryAt);
-  const canNavigate = online && recoveryReason === null && (poseSetThisSession || allowUnlocalized);
-  const gateHint = recoveryReason ?? "Set the robot's 2D location before sending it anywhere.";
+  const lidarPending = useCommandStore(state => state.lidarPending);
+  const lidarRecoveryRequired = useCommandStore(state => state.lidarRecoveryRequired);
+  const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
+  const waitingForState = lidarStateAfter !== null && (recoveryAt === null || recoveryAt <= lidarStateAfter);
+  const lidarReason = useLidarReadyReason(baseState, recoveryAt) ?? (lidarPending !== null ? "LiDAR power is pending — wait for its result." : lidarRecoveryRequired ? "LiDAR power recovery is required. Make a new explicit power request first." : waitingForState ? "Waiting for fresh LiDAR state after the power command." : null);
+  const canNavigate = online && lidarReason === null && recoveryReason === null && (poseSetThisSession || allowUnlocalized);
+  const gateHint = lidarReason ?? recoveryReason ?? "Set the robot's 2D location before sending it anywhere.";
 
   // Undock is offered only when the robot is on its charger; there is no Dock
   // control, because the robot has no automatic dock-in path — it is driven
@@ -84,18 +90,17 @@ export function NavControlsWidget() {
     poseFresh ? pose : null, capabilities,
     active?.command === "navigate_to_pose");
   const onDock = showsUndock(facts);
-  const undockBlockedReason = undockReason(facts);
+  const undockBlockedReason = lidarReason ?? undockReason(facts);
   const undockBusy = active?.command === "undock" || facts.undockActive;
+  const motorsEnabled = baseState?.motors_enabled === true;
   const motorEnableBusy = active?.command === "motor_enable";
-  const motorEnableBlockedReason = motorEnableReason(facts);
-  const motorEnableUiReason = motorEnableBlockedReason ?? (active
-    ? "Wait for the current command to finish before enabling the motors."
-    : null);
+  const motorDisableBusy = active?.command === "motor_disable";
+  const motorEnableUiReason = !wsConnected ? "The robot is not connected right now." : motorEnableReason(facts);
+  const motorUiReason = motorsEnabled ? (!wsConnected ? "The robot is not connected right now." : motorDisableReason(facts)) : motorEnableUiReason;
   const softwareResetBlockedReason = softwareResetReason(facts);
-  const softwareResetUiReason = softwareResetBlockedReason ?? (active
+  const softwareResetUiReason = softwareResetBlockedReason ?? (active?.command === "software_reset"
     ? "Wait for the current command to finish before resetting software."
     : null);
-  const softwareResetAvailable = capabilities.includes("software_reset");
 
   return (
     <div>
@@ -170,49 +175,40 @@ export function NavControlsWidget() {
           raised or the e-stop pressed is still refused. Clears itself after
           one destination, and on reconnect.
         </p>
-        <div className="nav-advanced-motor">
-          <button
-            className="btn danger"
-            disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy)}
-            onClick={() => setMotorEnableConfirmOpen(true)}
-            title={motorEnableUiReason
-              ?? "Enable drive power without commanding the robot to move"}
-          >
-            <Power size={15} />
-            {motorEnableBusy ? "Turning motors on…" : "Turn motors on"}
-          </button>
-          <p className="nav-advanced-note">
-            Enables drive power only; it does not command movement. The robot
-            must be connected, released from charging, stopped, fault-free,
-            and clear of the emergency stop.
-          </p>
-          {motorEnableUiReason && (
-            <p className="nav-advanced-note nav-motor-reason">
-              Motor enable — {motorEnableUiReason}
-            </p>
-          )}
-        </div>
-        {softwareResetAvailable && (
-          <div className="nav-advanced-motor">
-            <button
-              className="btn danger"
-              disabled={!mayCommand || softwareResetUiReason !== null}
-              onClick={() => setSoftwareResetConfirmOpen(true)}
-              title={softwareResetUiReason ?? "Restart robot software while safely docked"}
-            >
-              <Power size={15} />
-              {active?.command === "software_reset" ? "Reset pending…" : "Restart robot software"}
-            </button>
-            <p className="nav-advanced-note">
-              Restarts robot software only; it does not reboot either computer. The dashboard will disconnect.
-              Wait for the supervisor result, then confirm a new robot pose before sending any destination.
-            </p>
-            {softwareResetUiReason && (
-              <p className="nav-advanced-note nav-motor-reason">Software reset — {softwareResetUiReason}</p>
-            )}
-          </div>
-        )}
       </details>
+      <div className="nav-advanced-motor">
+        <button
+          className={`btn ${motorsEnabled ? "danger" : "success"}`}
+          disabled={!mayCommand || motorUiReason !== null || (motorsEnabled ? motorDisableBusy : motorEnableBusy)}
+          onClick={() => motorsEnabled ? send("motor_disable") : setMotorEnableConfirmOpen(true)}
+          title={motorUiReason ?? (motorsEnabled ? "Disable drive power" : "Request drive power without commanding movement")}
+        >
+          <Power size={15} />
+          {motorsEnabled ? (motorDisableBusy ? "Turning motors off…" : "Turn motors off") : (motorEnableBusy ? "Turning motors on…" : "Turn motors on")}
+        </button>
+        <p className="nav-advanced-note">
+          Motor power is separate from movement and localization. The robot checks physical safety before enabling; turning motors off remains available during movement and faults.
+        </p>
+        {motorUiReason && <p className="nav-advanced-note nav-motor-reason">Motor power — {motorUiReason}</p>}
+      </div>
+      <div className="nav-advanced-motor">
+        <button
+          className="btn danger"
+          disabled={!mayCommand || softwareResetUiReason !== null}
+          onClick={() => setSoftwareResetConfirmOpen(true)}
+          title={softwareResetUiReason ?? "Restart robot software from a clean state"}
+        >
+          <Power size={15} />
+          {active?.command === "software_reset" ? "Reset pending…" : "Restart robot software"}
+        </button>
+        <p className="nav-advanced-note">
+          Restarts robot software from a clean state without dock, pose or telemetry checks.
+          The dashboard will disconnect. Navigation readiness is checked separately.
+        </p>
+        {softwareResetUiReason && (
+          <p className="nav-advanced-note nav-motor-reason">Software reset — {softwareResetUiReason}</p>
+        )}
+      </div>
       <Dialog.Root open={motorEnableConfirmOpen} onOpenChange={setMotorEnableConfirmOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -237,7 +233,10 @@ export function NavControlsWidget() {
                 className="btn danger"
                 disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy)}
                 onClick={() => {
-                  if (!canCommand(useAuthStore.getState().user) || motorEnableUiReason !== null || motorEnableBusy) return;
+                  const live = useTelemetryStore.getState();
+                  if (!canCommand(useAuthStore.getState().user) || !live.wsConnected || live.baseState?.motors_enabled === true ||
+                      useCommandStore.getState().active?.command === "motor_enable" ||
+                      motorEnableReason(factsFrom(live.connection.state, null, null, live.capabilities)) !== null) return;
                   setMotorEnableConfirmOpen(false);
                   send("motor_enable");
                 }}
@@ -255,10 +254,10 @@ export function NavControlsWidget() {
           <Dialog.Content className="dialog-content" style={{ maxWidth: 440 }}>
             <Dialog.Title asChild><h2>Restart robot software?</h2></Dialog.Title>
             <Dialog.Description className="subtext">
-              This restarts robot software only, not either computer. The dashboard will disconnect. The reset may
-              take the robot's position estimate offline; wait for the supervisor's result and confirm a fresh
-              pose before sending a destination. If the connection drops before a result arrives, the outcome is
-              unknown and the command will not be resent automatically.
+              This stops the old robot software and restarts it without requiring dock contact,
+              a pose or working telemetry. Neither computer is rebooted. Old commands will not resume.
+              The dashboard will disconnect. The result reports restart operations, not navigation readiness.
+              An unknown result is never retried automatically; another reset requires a new confirmation.
             </Dialog.Description>
             {softwareResetUiReason && (
               <p className="nav-advanced-note nav-motor-reason">Software reset — {softwareResetUiReason}</p>
@@ -271,14 +270,9 @@ export function NavControlsWidget() {
                 onClick={() => {
                   const live = useTelemetryStore.getState();
                   const command = useCommandStore.getState().active;
-                  const now = performance.now();
-                  const fresh = (at: number | null) => at !== null && Number.isFinite(at) && now >= at && now - at <= 3000;
-                  const liveFacts = factsFrom(live.connection.state,
-                    fresh(live.baseStateAt) ? live.baseState : null,
-                    fresh(live.poseReceivedAt) ? live.pose : null, live.capabilities,
-                    command?.command === "navigate_to_pose");
-                  if (!canCommand(useAuthStore.getState().user) || !live.wsConnected || command ||
-                      softwareResetReason(liveFacts) !== null) return;
+                  const liveFacts = factsFrom(live.connection.state, null, null, live.capabilities);
+                  if (!canCommand(useAuthStore.getState().user) || !live.wsConnected ||
+                      command?.command === "software_reset" || softwareResetReason(liveFacts) !== null) return;
                   setSoftwareResetConfirmOpen(false);
                   send("software_reset");
                 }}
@@ -300,9 +294,9 @@ export function NavControlsWidget() {
         </button>
         <button
           className={`btn ${pickMode === "initialpose" ? "active" : ""}`}
-          disabled={!mayCommand || (!online)}
+          disabled={!mayCommand || !online || lidarReason !== null}
           onClick={() => setPickMode(pickMode === "initialpose" ? "none" : "initialpose")}
-          title="Tell the robot where it actually is on the map"
+          title={lidarReason ?? "Tell the robot where it actually is on the map"}
         >
           <Crosshair size={15} /> Set Robot Location
         </button>
