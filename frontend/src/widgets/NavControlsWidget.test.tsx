@@ -255,14 +255,22 @@ describe("NavControlsWidget advanced motor enable", () => {
 
 describe("localization recovery controls", () => {
   afterEach(cleanup);
-it("blocks destinations during recovery but leaves operator pose initialization available", () => {
+it("blocks destinations during recovery without the override but leaves operator pose initialization available", () => {
   setState(baseState({ odom_epoch_valid: true, localization_recovery_required: true,
     localization_seed_stamp_ns: 1 }));
-  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "none", allowUnlocalized: true });
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "none", allowUnlocalized: false });
   render(<NavControlsWidget />);
   expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "Set Robot Location" }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.getByText(/recovering its location/)).toBeTruthy();
+});
+
+it("override waives recovery and offers destinations", () => {
+  setState(baseState({ odom_epoch_valid: false, localization_recovery_required: true,
+    localization_seed_stamp_ns: 0 }));
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, pickMode: "none", allowUnlocalized: true });
+  render(<NavControlsWidget />);
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("offers destinations after recovery with an operator-confirmed pose", () => {

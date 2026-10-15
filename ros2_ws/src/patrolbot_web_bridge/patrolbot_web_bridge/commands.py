@@ -314,26 +314,31 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
                     "sending it anywhere.")
         if not base_state.get("motors_enabled"):
             return "The robot's motors are off. Enable them on the robot first."
-        if not base_state.get("odom_epoch_valid", False):
-            return ("The robot's odometry epoch is not valid — wait for its "
-                    "localization to recover before sending it anywhere.")
-        if base_state.get("localization_recovery_required", True):
-            stage = str(base_state.get("localization_recovery_stage", "")).strip()
-            suffix = f" ({stage})" if stage else ""
-            return ("The robot is recovering localization"
-                    f"{suffix} — wait before sending it anywhere.")
-        try:
-            seed_stamp_ns = int(base_state.get("localization_seed_stamp_ns", 0))
-        except (TypeError, ValueError, OverflowError):
-            seed_stamp_ns = 0
-        if seed_stamp_ns <= 0:
-            return ("The robot has no valid localization seed barrier — wait "
-                    "for localization to recover before sending it anywhere.")
         # An exceptional flag needs the server's verified-role stamp, the same
         # way the guarded undock does. A browser cannot authorize itself past a
         # safety gate; anything arriving here unstamped is treated as if the
         # override had not been asked for.
         override = allow_unlocalized and operator_authorized
+        # The override waives the localization questions together (unconfident
+        # fix plus epoch / recovery / seed barrier) — the operator accepts
+        # planning from an untrusted fix, matching RViz/Nav2 parity. Receipt
+        # freshness, LiDAR, dock, motors, e-stop and faults still refuse.
+        if not override:
+            if not base_state.get("odom_epoch_valid", False):
+                return ("The robot's odometry epoch is not valid — wait for its "
+                        "localization to recover before sending it anywhere.")
+            if base_state.get("localization_recovery_required", True):
+                stage = str(base_state.get("localization_recovery_stage", "")).strip()
+                suffix = f" ({stage})" if stage else ""
+                return ("The robot is recovering localization"
+                        f"{suffix} — wait before sending it anywhere.")
+            try:
+                seed_stamp_ns = int(base_state.get("localization_seed_stamp_ns", 0))
+            except (TypeError, ValueError, OverflowError):
+                seed_stamp_ns = 0
+            if seed_stamp_ns <= 0:
+                return ("The robot has no valid localization seed barrier — wait "
+                        "for localization to recover before sending it anywhere.")
         # Bound to the override only, so the ordinary path keeps exactly the
         # behaviour it had. On that path `localized` already implies a recent
         # AMCL pose; the override is precisely what removes that implication,
@@ -349,7 +354,8 @@ def precheck(command: str, goal: dict | None, base_state: Any | None,
             return "The robot does not know where it is. Set its location first."
         # RViz has always been able to send a goal on a bad fix -- Nav2 has no
         # localization gate of its own -- so the override restores parity
-        # rather than granting anything new. Every check above still applies.
+        # rather than granting anything new. Every non-localization check
+        # above still applies.
     return None
 
 

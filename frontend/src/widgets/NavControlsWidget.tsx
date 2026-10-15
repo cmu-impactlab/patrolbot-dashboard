@@ -67,7 +67,7 @@ export function NavControlsWidget() {
   // unconfirmed pose.
   const recoveryAt = useTelemetryStore(state => state.baseStateAt);
   const recoveryFresh = useIsFresh(recoveryAt, RECOVERY_RECEIPT_MAX_MS);
-  const recoveryReason = localizationRecoveryReason(recoveryFresh ? baseState : null, recoveryAt);
+  const recoveryReason = localizationRecoveryReason(recoveryFresh ? baseState : null, recoveryAt, performance.now(), allowUnlocalized);
   const lidarPending = useCommandStore(state => state.lidarPending);
   const lidarRecoveryRequired = useCommandStore(state => state.lidarRecoveryRequired);
   const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
@@ -171,8 +171,9 @@ export function NavControlsWidget() {
           The robot will plan from a position it does not trust, so it may take
           a wrong route or collide. RViz has always allowed this — Nav2 has no
           localization check of its own — so this only gives the dashboard the
-          same reach. It waives that one question and nothing else: a robot
-          that has stopped reporting its position, has its motors off, a fault
+          same reach. It waives the localization questions together (unconfident
+          fix plus recovery / seed / epoch) and nothing else: a robot with stale
+          telemetry or LiDAR unavailable, on its charger, motors off, a fault
           raised or the e-stop pressed is still refused. Clears itself after
           one destination, and on reconnect.
         </p>

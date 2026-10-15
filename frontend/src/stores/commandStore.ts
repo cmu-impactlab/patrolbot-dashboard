@@ -179,7 +179,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
     }
     if (command === "navigate_to_pose") {
       const telemetry = useTelemetryStore.getState();
-      const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt);
+      const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt, performance.now(), get().allowUnlocalized);
       if (reason) {
         set({ pickMode: "none", lastResult: {
           commandId: crypto.randomUUID(), command, outcome: "rejected", at: Date.now(), detail: reason,

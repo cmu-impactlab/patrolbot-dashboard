@@ -18,7 +18,7 @@ export function mapCommandReason(mode: PickMode): string | null {
   if (lidarReason) return lidarReason;
   if (commands.active?.phase === "sending" || (commands.active && commands.active.command !== "navigate_to_pose")) return "Wait for the current command to finish.";
   if (mode === "goal") {
-    const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt);
+    const reason = localizationRecoveryReason(telemetry.baseState, telemetry.baseStateAt, performance.now(), commands.allowUnlocalized);
     if (reason) return reason;
   }
   if (mode === "goal" && !telemetry.poseSetThisSession && !commands.allowUnlocalized)

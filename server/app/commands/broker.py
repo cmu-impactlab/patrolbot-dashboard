@@ -327,8 +327,8 @@ class CommandBroker:
 
         `allow_unlocalized` is the operator's per-command override, carried
         from the request rather than read from telemetry. Every other fact here
-        still applies: it waives exactly one check, the one asking whether the
-        robot currently knows where it is.
+        still applies: it waives the localization questions together
+        (unconfident fix plus epoch / recovery / seed barrier), nothing else.
         """
         if command not in gates.GATES:
             return None

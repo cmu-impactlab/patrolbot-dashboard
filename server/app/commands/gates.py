@@ -272,6 +272,13 @@ def navigate_reason(facts: StateFacts) -> str | None:
     telemetry: is the drive base healthy and fresh, are the motors actually
     powered, and does the robot currently know where it is.
 
+    The Advanced per-command override waives the localization questions
+    together (unconfident fix plus epoch / recovery / seed barrier) — the
+    operator accepts planning from an untrusted fix, matching RViz/Nav2
+    parity. Receipt freshness, LiDAR, dock, motors, e-stop and faults still
+    refuse: "unsure where it is" is waivable, "no longer saying where it
+    is" is not.
+
     Deliberately not gated on being stationary: replacing a destination while
     the robot drives is a supported operation, and Nav2 preempts the running
     goal itself.
@@ -292,7 +299,8 @@ def navigate_reason(facts: StateFacts) -> str | None:
                 "sending it anywhere.")
     if not facts.motors_enabled:
         return "The robot's motors are off. Enable them on the robot first."
-    if (not facts.odom_epoch_valid or facts.localization_recovery_required
+    if not facts.allow_unlocalized and (
+            not facts.odom_epoch_valid or facts.localization_recovery_required
             or facts.localization_seed_stamp_ns <= 0):
         return ("The robot is recovering its location — wait for recovery "
                 "before sending it anywhere.")

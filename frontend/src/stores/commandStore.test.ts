@@ -195,14 +195,25 @@ describe("localization recovery", () => {
   it.each([
     { odom_epoch_valid: undefined }, { odom_epoch_valid: false },
     { localization_recovery_required: true }, { localization_seed_stamp_ns: 0 },
-  ])("blocks direct navigation and override during recovery: %o", fields => {
+  ])("blocks direct navigation during recovery without override: %o", fields => {
+    const sender = vi.fn(() => true);
+    registerCommandSender(sender);
+    useCommandStore.setState({ allowUnlocalized: false, active: null });
+    useTelemetryStore.setState({ baseState: { map_id: "cmuq-floor2", map_revision: "test-revision",  ...readyBase, ...fields } });
+    useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
+    expect(sender).not.toHaveBeenCalled();
+    expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
+  });
+  it.each([
+    { odom_epoch_valid: false },
+    { localization_recovery_required: true }, { localization_seed_stamp_ns: 0 },
+  ])("override waives recovery and sends: %o", fields => {
     const sender = vi.fn(() => true);
     registerCommandSender(sender);
     useCommandStore.setState({ allowUnlocalized: true, active: null });
     useTelemetryStore.setState({ baseState: { map_id: "cmuq-floor2", map_revision: "test-revision",  ...readyBase, ...fields } });
     useCommandStore.getState().send("navigate_to_pose", { map_id: "cmuq-floor2", map_revision: "test-revision", x: 1, y: 2 });
-    expect(sender).not.toHaveBeenCalled();
-    expect(useCommandStore.getState().lastResult?.outcome).toBe("rejected");
+    expect(sender).toHaveBeenCalledTimes(1);
   });
   it("keeps pose initialization available and accepts navigation after recovery", () => {
     const sender = vi.fn(() => true);

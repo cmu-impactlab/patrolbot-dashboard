@@ -217,7 +217,8 @@ class CommandRequestData(BaseModel):
     # from whoever currently holds the single-operator lease.
     takeover: bool = False
     # Operator override for one command only, never persisted: send the goal
-    # even though the robot reports it does not know where it is. RViz has
+    # even though the robot reports it does not know where it is, including
+    # epoch / recovery / seed barrier. RViz has
     # always been able to do this -- Nav2 has no localization gate of its own --
     # so this restores parity for the dashboard rather than granting anything
     # new. It is deliberately per-command so it cannot be left switched on.

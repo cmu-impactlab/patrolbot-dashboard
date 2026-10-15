@@ -69,7 +69,7 @@ def test_precheck_refuses_navigate_without_localization():
     assert precheck("navigate_to_pose", {"x": 1, "y": 2}, GOOD_BASE) is not None
 
 
-def test_precheck_epoch_and_recovery_gates_run_before_override():
+def test_precheck_epoch_and_recovery_gates_run_without_override():
     goal = {"x": 1, "y": 2}
     for spoiled in (
         dict(GOOD_BASE, odom_epoch_valid=False),
@@ -78,10 +78,23 @@ def test_precheck_epoch_and_recovery_gates_run_before_override():
         dict(GOOD_BASE, localization_seed_stamp_ns=0),
     ):
         reason = precheck("navigate_to_pose", goal, spoiled, localized=False,
-                          base_state_age=0.1, allow_unlocalized=True,
-                          odom_age=0.1, operator_authorized=True)
+                          base_state_age=0.1, odom_age=0.1)
         assert reason is not None
         assert "localization" in reason.lower() or "odometry" in reason.lower()
+
+
+def test_precheck_override_waives_epoch_and_recovery():
+    goal = {"x": 1, "y": 2}
+    for spoiled in (
+        dict(GOOD_BASE, odom_epoch_valid=False),
+        dict(GOOD_BASE, localization_recovery_required=True,
+             localization_recovery_stage="WAIT_FOR_AMCL"),
+        dict(GOOD_BASE, localization_seed_stamp_ns=0),
+    ):
+        allowed = precheck("navigate_to_pose", goal, spoiled, localized=False,
+                           base_state_age=0.1, allow_unlocalized=True,
+                           odom_age=0.1, operator_authorized=True)
+        assert allowed is None
 
 
 def test_localization_epoch_requires_fresh_post_seed_amcl_stamp():
@@ -435,8 +448,8 @@ def test_the_localization_override_is_honoured_on_the_robot_too():
     assert allowed is None
 
 
-def test_the_robot_side_override_waives_only_localization():
-    """One waiver, not a master key."""
+def test_the_robot_side_override_waives_localization_but_nothing_else():
+    """Localization together, not a master key."""
     from patrolbot_web_bridge.commands import precheck
 
     goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
@@ -450,6 +463,25 @@ def test_the_robot_side_override_waives_only_localization():
                           base_state_age=0.1, allow_unlocalized=True,
                           odom_age=0.1, operator_authorized=True)
         assert reason is not None, field
+
+
+def test_the_robot_side_override_waives_epoch_recovery_seed():
+    """Authorized override skips the epoch / recovery / seed barrier."""
+    from patrolbot_web_bridge.commands import precheck
+
+    goal = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    for field, value in (("odom_epoch_valid", False),
+                         ("localization_recovery_required", True),
+                         ("localization_seed_stamp_ns", 0)):
+        base = _navigable_base_state()
+        base[field] = value
+        blocked = precheck("navigate_to_pose", goal, base, localized=False,
+                           base_state_age=0.1, odom_age=0.1)
+        assert blocked is not None, field
+        allowed = precheck("navigate_to_pose", goal, base, localized=False,
+                           base_state_age=0.1, allow_unlocalized=True,
+                           odom_age=0.1, operator_authorized=True)
+        assert allowed is None, field
 
 
 def test_the_robot_side_override_defaults_off():

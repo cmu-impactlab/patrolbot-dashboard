@@ -553,17 +553,17 @@ def test_the_localization_override_lets_a_goal_through():
     assert gates.navigate_reason(overridden) is None
 
 
-def test_localization_epoch_and_recovery_cannot_be_overridden():
+def test_localization_epoch_and_recovery_are_waived_by_override():
     for overrides in (
         {"odom_epoch_valid": False},
         {"localization_recovery_required": True,
          "localization_recovery_stage": "WAIT_FOR_AMCL"},
         {"localization_seed_stamp_ns": 0},
     ):
-        blocked = _nav_facts(localized=False, allow_unlocalized=True, **overrides)
-        reason = gates.navigate_reason(blocked)
-        assert reason is not None
-        assert "recovering its location" in reason.lower()
+        blocked = _nav_facts(localized=False, **overrides)
+        assert gates.navigate_reason(blocked) is not None
+        waived = _nav_facts(localized=False, allow_unlocalized=True, **overrides)
+        assert gates.navigate_reason(waived) is None
 
 
 def test_set_initial_pose_remains_ungated_by_epoch_recovery():
@@ -573,11 +573,12 @@ def test_set_initial_pose_remains_ungated_by_epoch_recovery():
     assert gates.rejection_reason("set_initial_pose", blocked) is None
 
 
-def test_the_override_waives_only_the_localization_check():
-    """Every other navigation gate still refuses with the override armed.
+def test_the_override_waives_localization_but_nothing_else():
+    """The override waives localization together, not a master key.
 
-    It is one waiver, not a master key: a robot with its motors off, a fault
-    raised, an e-stop pressed or stale telemetry must still be refused.
+    Epoch / recovery / seed plus the unconfident fix are waived; a robot
+    with its motors off, a fault raised, an e-stop pressed or stale
+    telemetry must still be refused.
     """
     from app.commands import gates
 
@@ -609,7 +610,7 @@ def test_the_override_defaults_off():
     {"odom_epoch_valid": True, "localization_recovery_required": False,
      "localization_seed_stamp_ns": 0},
 ])
-def test_websocket_navigation_override_cannot_bypass_recovery(client, state):
+def test_websocket_navigation_recovery_blocks_without_override(client, state):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
@@ -623,9 +624,7 @@ def test_websocket_navigation_override_cannot_bypass_recovery(client, state):
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             _, frame = command_frame("navigate_to_pose", goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 2.0})
-            request = json.loads(frame)
-            request["data"]["allow_unlocalized"] = True
-            ui.send_text(json.dumps(request))
+            ui.send_text(frame)
             ack = recv_until(ui, "command.ack")
             assert ack["data"]["accepted"] is False
             assert "recovering its location" in ack["data"]["reason"]
