@@ -81,6 +81,14 @@ def test_detail_carries_the_manager_message_on_failure():
     assert "amcl covariance 0.9" in detail
 
 
+def test_hardware_goal_rejection_does_not_claim_motion_started():
+    detail = undock_detail(REJECTED, "hardware undock goal rejected", manual_recovery=True)
+    assert "refused the undock request" in detail
+    assert "hardware undock goal rejected" in detail
+    assert "started backing up" not in detail
+    assert "check the robot at the dock" in detail
+
+
 def test_detail_omits_the_message_on_success():
     # Nothing useful to add, and the success sentence should stay clean.
     assert undock_detail(OK, "state=COMPLETE") == UNDOCK_CODE_TEXT[OK]
