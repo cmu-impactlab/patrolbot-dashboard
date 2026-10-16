@@ -21,6 +21,23 @@ def test_local_catalog_endpoints_and_revisions(tmp_path):
         assert client.get("/api/map").status_code == 200
 
 
+# Canonical floor identities must equal the robot's catalog
+# (patrolbot-repo ros2_ws/src/patrolbot_navigation/maps/catalog.json). A change
+# here means a coordinated robot + dashboard map release: run
+# `python3 scripts/verify_floor_maps.py --robot-root <patrolbot-repo>` and
+# rebuild the robot navigation leaf before merging. See
+# docs/operations/source-and-release-state.md in the robot repository.
+EXPECTED_REVISIONS = {
+    "cmuq-floor1": "sha256:22872ec191b62a9562a2a74b63cbd62da5f5f6ba0e6fb567be2c3926f5b9ae0d",
+    "cmuq-floor2": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1",
+}
+
+
+def test_packaged_revisions_match_canonical_robot_identity():
+    catalog = MapCatalog(Path(__file__).resolve().parents[1] / "maps/catalog")
+    assert {key: entry["revision"] for key, entry in catalog.maps.items()} == EXPECTED_REVISIONS
+
+
 async def test_browser_disconnect_cancels_only_its_map_transaction():
     import json
     from types import SimpleNamespace as NS
