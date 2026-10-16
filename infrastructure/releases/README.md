@@ -21,7 +21,10 @@ host source must not be assumed identical to baked image contents.
 
 Floor 1 map identity now matches the robot catalog: the packaged raster is the
 canonical robot bytes (`411c5647…`, revision `sha256:22872ec1…`), so operator
-seeds are no longer refused by the bridge map-identity gate. Any map change must
+seeds are no longer refused by the bridge map-identity gate. The rollout is
+recorded in `deployed-20261016-floor1-map-parity.json` (image `549599a2…` from
+main `5dc06d7`; rollback image `d2a78dc3…` kept as
+`patrolbot-dashboard-server:pre-map-parity-20261017`). Any map change must
 keep both catalogs equal — run `python3 scripts/verify_floor_maps.py` against a
 patrolbot-repo checkout and update the pinned `EXPECTED_REVISIONS` in
 `server/tests/test_map_catalog.py` together with the robot navigation leaf.

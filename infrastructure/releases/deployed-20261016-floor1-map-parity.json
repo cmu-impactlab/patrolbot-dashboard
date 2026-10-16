@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "deployment_utc": "2026-10-16T22:19:36+00:00",
+  "source_repository": "cmu-impactlab/patrolbot-dashboard",
+  "source_ref": "main",
+  "source_sha": "5dc06d76d64042e2f5b022b0c376f6d5ba3fe962",
+  "image": "sha256:549599a2d2ef039d9d283a25e2d6d793358e73a584fecf6c15f8d1a7cb79ca4f",
+  "image_tag": "patrolbot-dashboard-server:latest",
+  "public_entry_asset": "/assets/index-UJo_ha2_.js",
+  "public_entry_sha256": "8299aab51de57519e19ac86b94e1c3b878052216f95ced92a0d6cf27e20b029e",
+  "health": {
+    "status": "healthy",
+    "robot_connected": true,
+    "writes_zero": true
+  },
+  "scope": "Floor 1 map identity parity (PR #33). Packaged Floor 1 raster replaced with the canonical robot bytes (image 411c5647..., revision sha256:22872ec1...), the shared map_catalog validator synced byte-for-byte with patrolbot_bridge, mock identities updated, and both floor revisions pinned in server/tests/test_map_catalog.py. Maps are baked into the server image, so only the server container was rebuilt/recreated; nginx untouched; SQLite volume preserved; no database migration; frontend bundle unchanged.",
+  "postflight": [
+    "container healthy",
+    "health endpoint healthy/robot online",
+    "baked raster /maps/catalog/cmuq_1st_floor.pgm sha256 == 411c5647a0761326a27a60743b8a8d6068c8a136db22e36a702c6d5294e66f15",
+    "baked catalog Floor1 revision == sha256:22872ec191b62a9562a2a74b63cbd62da5f5f6ba0e6fb567be2c3926f5b9ae0d",
+    "served entry bundle byte-identical to accepted 8299aab5",
+    "no motor/pose/goal/undock command sent"
+  ],
+  "rollback": "Previous image sha256:d2a78dc3a8812b48ea7de9037c7322708af89518b419c4b78269ba95471e3509 retained on the host as patrolbot-dashboard-server:pre-map-parity-20261017. Rollback: retag latest to that image and recreate the server service, or rebuild from 6b3b785.",
+  "sbc": "Operator-reported down at deploy time; robot_connected=true reflects the Pi web-bridge link, not SBC telemetry.",
+  "physical_acceptance": false
+}
