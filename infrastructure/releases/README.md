@@ -19,10 +19,18 @@ Original unmerged work is preserved on `review/*` branches. The dashboard host
 source is separately recorded as `review/dashboard-device-checkout-20261015`;
 host source must not be assumed identical to baked image contents.
 
-Known gaps: current Floor1 map differs from the robot; merged uncertainty and
-separate always-visible motor-disable UI are absent; newer Pi path handling
-needs a matched dashboard contract. Override admission is not robot per-goal
-authority. Restore those only through reviewed/tested releases.
+Floor 1 map identity now matches the robot catalog: the packaged raster is the
+canonical robot bytes (`411c5647…`, revision `sha256:22872ec1…`), so operator
+seeds are no longer refused by the bridge map-identity gate. Any map change must
+keep both catalogs equal — run `python3 scripts/verify_floor_maps.py` against a
+patrolbot-repo checkout and update the pinned `EXPECTED_REVISIONS` in
+`server/tests/test_map_catalog.py` together with the robot navigation leaf.
+
+Known gaps: merged uncertainty and separate always-visible motor-disable UI were
+restored/deployed, but live AMCL/motor-response acceptance still waits on the SBC
+and operator authorization; newer Pi path handling needs a matched dashboard
+contract. Override admission is not robot per-goal authority. Restore those only
+through reviewed/tested releases.
 
 Durable device backups were migrated to private off-device archives on the
 workstation, not Git. Runtime SQLite/recordings, secrets/TLS and mounted release
