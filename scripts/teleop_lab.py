@@ -91,7 +91,13 @@ def main():
                      and idle_age is not None and 0 <= idle_age <= .4)
         return {"ready": ready, "physical_acceptance": False,
                 "has_amcl_pose": bool(robot and robot.state.pose.data is not None),
-                "idle_age": idle_age}
+                "idle_age": idle_age,
+                "detail": {"robot": robot is not None,
+                           "teleop": teleop is not None,
+                           "connection": None if robot is None else robot.state.connection,
+                           "has_base": base is not None,
+                           "raw_odom_age_s": None if base is None else getattr(base, "raw_odom_age_s", "<missing>"),
+                           "capabilities": None if robot is None else sorted(robot.state.capabilities)}}
 
     app.router.routes.extend(static_mounts)
 
@@ -222,6 +228,7 @@ def main():
                 time.sleep(.02)
             assert future.done() and future.result().success, "Native smoother activation failed"
         bridge = WebBridgeNode()
+        holder["bridge"] = bridge
         bridge_executor.add_node(bridge)
         bridge_worker = threading.Thread(target=bridge_executor.spin, daemon=True)
         bridge_worker.start()
