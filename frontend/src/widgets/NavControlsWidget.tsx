@@ -7,6 +7,7 @@ import {
 import { useState } from "react";
 import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
+import { useTeleopStore } from "../stores/teleopStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import {
   factsFrom, motorEnableReason, motorDisableReason, showsUndock, softwareResetReason, undockReason,
@@ -22,10 +23,8 @@ const OUTCOME_COPY: Record<string, string> = {
 };
 
 /**
- * Navigation plus explicitly gated hardware actions. There is deliberately no
- * joystick/velocity control — undock is an action the robot executes rather
- * than velocity published from a browser, and explicit motor power changes
- * drive power without sending motion.
+ * Navigation plus explicitly gated hardware actions. Manual drive lives in a
+ * separate Advanced controls tab, never in the saved dashboard layout.
  *
  * There is no Dock control to pair with Undock: the robot has no automatic
  * dock-in path, so it is driven onto its charger by hand. Undock appears only
@@ -44,6 +43,7 @@ export function NavControlsWidget() {
   const capabilities = useTelemetryStore((state) => state.capabilities);
   const send = useCommandStore((state) => state.send);
   const active = useCommandStore((state) => state.active);
+  const manualBusy = useTeleopStore(state => state.phase !== "idle" || state.externalBusy);
   const lastResult = useCommandStore((state) => state.lastResult);
   const pickMode = useCommandStore((state) => state.pickMode);
   const stoppedGoal = useCommandStore((state) => state.stoppedGoal);
@@ -61,7 +61,7 @@ export function NavControlsWidget() {
     active === null &&
     lastResult?.outcome === "rejected" &&
     (lastResult.detail ?? "").includes("in control of the robot");
-  const offerResume = stoppedGoal !== null && active === null;
+  const offerResume = stoppedGoal !== null && active === null && !manualBusy;
   // Navigation is hard-blocked until the operator has set the robot's 2D
   // location this session, so the robot is never sent anywhere from an
   // unconfirmed pose.
@@ -73,7 +73,7 @@ export function NavControlsWidget() {
   const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
   const waitingForState = lidarStateAfter !== null && (recoveryAt === null || recoveryAt <= lidarStateAfter);
   const lidarReason = useLidarReadyReason(baseState, recoveryAt) ?? (lidarPending !== null ? "LiDAR power is pending — wait for its result." : lidarRecoveryRequired ? "LiDAR power recovery is required. Make a new explicit power request first." : waitingForState ? "Waiting for fresh LiDAR state after the power command." : null);
-  const canNavigate = online && lidarReason === null && recoveryReason === null && (poseSetThisSession || allowUnlocalized);
+  const canNavigate = !manualBusy && online && lidarReason === null && recoveryReason === null && (poseSetThisSession || allowUnlocalized);
   const gateHint = lidarReason ?? recoveryReason ?? "Set the robot's 2D location before sending it anywhere.";
 
   // Undock is offered only when the robot is on its charger; there is no Dock
@@ -160,6 +160,7 @@ export function NavControlsWidget() {
         <label className="nav-advanced-row">
           <input
             type="checkbox"
+            disabled={manualBusy}
             checked={allowUnlocalized}
             onChange={(event) => setAllowUnlocalized(event.target.checked)}
           />
@@ -180,7 +181,7 @@ export function NavControlsWidget() {
       <div className="nav-advanced-motor">
         <button
           className={`btn ${motorsEnabled ? "danger" : "success"}`}
-          disabled={!mayCommand || motorUiReason !== null || (motorsEnabled ? motorDisableBusy : motorEnableBusy)}
+          disabled={!mayCommand || motorUiReason !== null || (motorsEnabled ? motorDisableBusy : motorEnableBusy || manualBusy)}
           onClick={() => motorsEnabled ? send("motor_disable") : setMotorEnableConfirmOpen(true)}
           title={motorUiReason ?? (motorsEnabled ? "Disable drive power" : "Request drive power without commanding movement")}
         >
@@ -240,10 +241,11 @@ export function NavControlsWidget() {
               </Dialog.Close>
               <button
                 className="btn danger"
-                disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy)}
+                disabled={!mayCommand || (motorEnableUiReason !== null || motorEnableBusy || manualBusy)}
                 onClick={() => {
                   const live = useTelemetryStore.getState();
                   if (!canCommand(useAuthStore.getState().user) || !live.wsConnected || live.baseState?.motors_enabled === true ||
+                      useTeleopStore.getState().phase !== "idle" ||
                       useCommandStore.getState().active?.command === "motor_enable" ||
                       motorEnableReason(factsFrom(live.connection.state, null, null, live.capabilities)) !== null) return;
                   setMotorEnableConfirmOpen(false);
@@ -303,7 +305,7 @@ export function NavControlsWidget() {
         </button>
         <button
           className={`btn ${pickMode === "initialpose" ? "active" : ""}`}
-          disabled={!mayCommand || !online || lidarReason !== null}
+          disabled={!mayCommand || !online || lidarReason !== null || manualBusy}
           onClick={() => setPickMode(pickMode === "initialpose" ? "none" : "initialpose")}
           title={lidarReason ?? "Tell the robot where it actually is on the map"}
         >
@@ -312,7 +314,7 @@ export function NavControlsWidget() {
         {onDock && (
           <button
             className="btn danger"
-            disabled={!mayCommand || (undockBlockedReason !== null || undockBusy)}
+            disabled={!mayCommand || (undockBlockedReason !== null || undockBusy || manualBusy)}
             onClick={() => send("undock")}
             title={undockBlockedReason
               ?? "Move the robot clear of its charging dock and turn it around"}

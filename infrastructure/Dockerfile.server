@@ -5,6 +5,9 @@ COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install --no-audit --no-fund
 COPY frontend/ ./
 COPY shared/ /shared/
+# frontend/src/lib/teleop.ts imports ../../../contracts/web-teleop.json at
+# build time; keep the path identical to the checkout layout.
+COPY contracts/ /contracts/
 RUN npx vite build
 
 FROM python:3.12-slim

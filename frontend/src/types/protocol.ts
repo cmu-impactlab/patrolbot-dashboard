@@ -83,6 +83,8 @@ export interface BatteryData {
 }
 
 export interface BaseStateData extends MapContext {
+  /** Real raw odometry evidence age; absence never falls back to AMCL. */
+  raw_odom_age_s?: number | null;
   lidar_state?: "UNKNOWN" | "OFF" | "STARTING" | "READY" | "FAULT";
   lidar_power_supported?: boolean;
   lidar_scan_age?: number;
@@ -220,7 +222,8 @@ export type CommandType =
   // The guarded UI sends `undock` as one action. The two service-level
   // commands remain in the protocol for robot-side diagnostics and recovery.
   // There is no `dock`: the robot has no automatic dock-in path.
-  | "charge_release" | "motor_enable" | "motor_disable" | "undock" | "software_reset" | "set_lidar_power";
+  | "charge_release" | "motor_enable" | "motor_disable" | "undock" | "software_reset" | "set_lidar_power"
+  | "teleop_start" | "teleop_stop";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {
@@ -247,6 +250,17 @@ export interface CommandAckData {
   accepted: boolean;
   reason?: string | null;
 }
+
+/** Browser samples latest input only; released frames must be exactly zero. */
+export interface TeleopVelocityData {
+  command_id: string;
+  seq: number;
+  linear: number;
+  angular: number;
+  deadman: boolean;
+}
+
+export type TeleopVelocityFrame = Envelope<"teleop.velocity", TeleopVelocityData>;
 
 export interface CommandProgressData {
   command_id: string;

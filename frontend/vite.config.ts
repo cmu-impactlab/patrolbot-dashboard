@@ -1,5 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
 
 // Override for an isolated mock backend when testing from LAN devices.
 const backend = process.env.PATROLBOT_DEV_BACKEND ?? "http://localhost:8000";
@@ -49,6 +50,7 @@ export default defineConfig({
     },
   },
   server: {
+    fs: { allow: [fileURLToPath(new URL(".", import.meta.url)), fileURLToPath(new URL("../contracts", import.meta.url))] },
     proxy: {
       "/api": backend,
       "/auth": backend,

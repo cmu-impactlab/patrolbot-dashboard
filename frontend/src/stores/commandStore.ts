@@ -3,6 +3,7 @@ import { sameMap } from "../lib/mapContext";
 import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
 import { useTelemetryStore } from "./telemetryStore";
+import { useTeleopStore } from "./teleopStore";
 import type {
   CommandAckData,
   CommandOutcome,
@@ -77,7 +78,17 @@ let sendFrame: ((frame: string) => boolean) | null = null;
 let sequence = 0;
 
 export function registerCommandSender(sender: ((frame: string) => boolean) | null): void {
+  if (!sender) useTeleopStore.getState().end("Connection lost — manual input ended.");
   sendFrame = sender;
+}
+
+/** Shared live sender: no offline queue, including for high-rate samples. */
+export function sendCommandFrame(frame: string): boolean {
+  return sendFrame?.(frame) ?? false;
+}
+
+export function nextCommandSequence(): number {
+  return ++sequence;
 }
 
 export const useCommandStore = create<CommandState>((set, get) => ({
@@ -109,6 +120,16 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   },
 
   stop: () => {
+    if (useTeleopStore.getState().externalBusy && useTeleopStore.getState().phase === "idle") {
+      set({ stoppedGoal: null, allowUnlocalized: false, pickMode: "none" });
+      get().send("stop");
+      return;
+    }
+    if (useTeleopStore.getState().phase !== "idle") {
+      useTeleopStore.getState().end();
+      set({ stoppedGoal: null, allowUnlocalized: false, pickMode: "none" });
+      return;
+    }
     // Remember the destination in effect right now so Resume can restore it.
     const active = get().active;
     const telemetry = useTelemetryStore.getState();
@@ -148,6 +169,11 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   },
 
   send: (command, goal, takeover = false, enabled, seedProfile) => {
+    const manual = useTeleopStore.getState();
+    if (manual.phase !== "idle" || manual.externalBusy) {
+      if (["stop", "motor_disable", "software_reset"].includes(command)) manual.end();
+      else return;
+    }
     const telemetry = useTelemetryStore.getState();
     const lidarCommands = ["navigate_to_pose", "set_initial_pose", "undock", "charge_release"];
     const reason = get().lidarPending !== null && command !== "stop" && command !== "software_reset" && command !== "motor_disable" && command !== "motor_enable"
@@ -208,7 +234,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       version: 1,
       type: "command.request",
       robot_id: useTelemetryStore.getState().robotId,
-      sequence: ++sequence,
+      sequence: nextCommandSequence(),
       timestamp: new Date().toISOString(),
       data: {
         command_id: commandId, command, goal: goal ?? null, takeover, enabled,

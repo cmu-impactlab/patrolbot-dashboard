@@ -2,24 +2,27 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { useTeleopStore } from "../stores/teleopStore";
 import { DashboardSocket, telemetryUrl } from "./client";
+import { startTeleopTabSync } from "./teleopTabSync";
 
 export function useTelemetrySocket(): void {
   const queryClient = useQueryClient();
   useEffect(() => {
     const store = useTelemetryStore.getState();
+    const stopTabSync = startTeleopTabSync();
     const socket = new DashboardSocket(telemetryUrl(), {
       onFrame: (frame) => {
         const commands = useCommandStore.getState();
         switch (frame.type) {
           case "command.ack":
-            commands.handleAck(frame.data);
+            if (!useTeleopStore.getState().handleAck(frame.data)) commands.handleAck(frame.data);
             break;
           case "command.progress":
             commands.handleProgress(frame.data);
             break;
           case "command.result":
-            commands.handleResult(frame.data);
+            if (!useTeleopStore.getState().handleResult(frame.data)) commands.handleResult(frame.data);
             break;
           case "server.snapshot":
             commands.setPickMode("none");
@@ -46,6 +49,7 @@ export function useTelemetrySocket(): void {
         useCommandStore.getState().resetOverrides();
       },
       onClose: () => {
+        useTeleopStore.getState().end("Connection lost — manual input ended.");
         useCommandStore.getState().connectionLost();
         useCommandStore.getState().setPickMode("none");
         useTelemetryStore.getState().setWsConnected(false);
@@ -54,6 +58,8 @@ export function useTelemetrySocket(): void {
     socket.connect();
     registerCommandSender((frame) => socket.send(frame));
     return () => {
+      useTeleopStore.getState().end();
+      stopTabSync();
       registerCommandSender(null);
       socket.close();
       store.setWsConnected(false);

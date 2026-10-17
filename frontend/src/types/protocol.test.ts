@@ -12,6 +12,7 @@ import {
   type AnyFrame,
   type Envelope,
   type MapData,
+  type TeleopVelocityFrame,
 } from "./protocol";
 
 const FIXTURES = join(
@@ -27,6 +28,7 @@ const KNOWN_TYPES = new Set([
   "telemetry.battery", "telemetry.base_state", "telemetry.diagnostics",
   "telemetry.resources", "telemetry.map",
   "command.request", "command.ack", "command.progress", "command.result",
+  "teleop.velocity",
 ]);
 
 describe("protocol fixtures", () => {
@@ -55,6 +57,15 @@ describe("protocol fixtures", () => {
     ) as Envelope<"telemetry.map", MapData>;
     const cells = decodeRle(frame.data.rle);
     expect(cells.length).toBe(frame.data.width * frame.data.height);
+  });
+
+  it("teleop golden frame has bounded velocity and a monotonic-session sequence", () => {
+    const frame = JSON.parse(readFileSync(join(FIXTURES, "teleop.velocity.json"), "utf-8")) as TeleopVelocityFrame;
+    expect(frame.data.command_id).toBeTypeOf("string");
+    expect(Number.isInteger(frame.data.seq) && frame.data.seq >= 0).toBe(true);
+    expect(Math.abs(frame.data.linear)).toBeLessThanOrEqual(.3);
+    expect(Math.abs(frame.data.angular)).toBeLessThanOrEqual(.7);
+    if (!frame.data.deadman) expect([frame.data.linear, frame.data.angular]).toEqual([0, 0]);
   });
 
   it("pose fixture satisfies the AnyFrame union", () => {

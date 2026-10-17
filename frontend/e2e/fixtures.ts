@@ -8,15 +8,18 @@ export const READY_BASE_STATE = {
   charge_state: "not_charging", motors_enabled: true, estop_pressed: false,
   fault_flags: 0, stall_value: 0, bumpers_front: false, bumpers_rear: false, bumpers_valid: true,
   odom_epoch_valid: true, localization_recovery_required: false, localization_seed_stamp_ns: 1,
+  raw_odom_age_s: .02,
 };
 
 export async function dashboardFixture(page: Page, role = "operator", preset = "Operator", largeMap = false) {
   const commands: { command: string; command_id: string; goal: unknown }[] = [];
+  const teleopFrames: { command_id: string; seq: number; linear: number; angular: number; deadman: boolean }[] = [];
   const saves: LayoutDoc[] = [];
   let current: LayoutDoc = structuredClone(presets[preset as keyof typeof presets]);
   let failSave = false;
   let socket: WebSocketRoute;
   let sequence = 0;
+  let activeTeleop: string | null = null;
   let baseState: unknown = { ...READY_BASE_STATE };
   let baseTimer: ReturnType<typeof setInterval> | undefined;
   page.on("close", () => clearInterval(baseTimer));
@@ -70,11 +73,17 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
     baseTimer = setInterval(() => send("telemetry.base_state", baseState), 100);
     ws.onMessage(message => {
       const frame = JSON.parse(String(message));
+      if (frame.type === "teleop.velocity") { teleopFrames.push(frame.data); return; }
       if (frame.type !== "command.request") return;
       commands.push(frame.data);
       send("command.ack", { command_id: frame.data.command_id, accepted: role !== "observer" });
-      if (role !== "observer") setTimeout(() => send("command.result", { command_id: frame.data.command_id, outcome: "succeeded", detail: "Mock command completed" }), 20);
+      if (role !== "observer" && frame.data.command === "teleop_start") activeTeleop = frame.data.command_id;
+      if (role !== "observer" && frame.data.command === "teleop_stop" && activeTeleop) {
+        send("command.result", { command_id: activeTeleop, outcome: "canceled", detail: "Mock manual session ended" });
+        activeTeleop = null;
+      }
+      if (role !== "observer" && frame.data.command !== "teleop_start") setTimeout(() => send("command.result", { command_id: frame.data.command_id, outcome: "succeeded", detail: "Mock command completed" }), 20);
     });
   });
-  return { commands, saves, send, stopBaseUpdates: () => clearInterval(baseTimer), setFailSave: (value: boolean) => { failSave = value; }, setCurrent: (doc: LayoutDoc) => { current = doc; } };
+  return { commands, teleopFrames, saves, send, stopBaseUpdates: () => clearInterval(baseTimer), setFailSave: (value: boolean) => { failSave = value; }, setCurrent: (doc: LayoutDoc) => { current = doc; } };
 }
