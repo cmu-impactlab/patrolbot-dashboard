@@ -86,7 +86,8 @@ frame carries a `command_id` (UUID minted by the browser) for correlation.
 
 | type | direction | data |
 |---|---|---|
-| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/motor_disable/undock/software_reset/set_lidar_power, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `command.request` | browser→robot | `command_id`, `command` ∈ navigate_to_pose/set_initial_pose/stop/charge_release/motor_enable/motor_disable/undock/software_reset/set_lidar_power/teleop_start/teleop_stop, `enabled?` (strict boolean for LiDAR power), `goal?` `{x, y, yaw?}`, `takeover?` (claim the single-operator lease from the current holder) |
+| `teleop.velocity` | browser→robot | `command_id`, `seq`, `linear`, `angular`, `deadman` — deadman teleop samples inside an open session; see below |
 | `command.ack` | robot→browser | `command_id`, `accepted`, `reason?` |
 | `command.progress` | robot→browser | `command_id`, `stage`, `detail?`, `distance_remaining?` |
 | `command.result` | robot→browser | `command_id`, `outcome` ∈ succeeded/failed/rejected/canceled/timeout, `detail?` |
@@ -100,12 +101,17 @@ Server-side broker rules:
 - Every request is written to the `command_audit` table before forwarding.
 - If no `command.ack` arrives within 5 s, or no `command.result` within 120 s,
   the server synthesizes `command.result` `outcome=timeout` and closes out the
-  command. Late robot replies for a closed command are dropped.
+  command. Late robot replies for a closed command are dropped. Manual drive,
+  reset and LiDAR-power uncertainty instead retain the command barrier until
+  an actual robot terminal result or an explicitly authorized software reset.
 - A new `navigate_to_pose` while one is active implicitly replaces it
   (Nav2 preemption semantics); `stop` cancels any active navigation.
-- There is **no velocity teleop command** — goal-based navigation only, by
-  design. The physical e-stop is the only emergency stop. `undock` included:
-  it is an action the robot executes, never browser-published velocity.
+- The one velocity path is the **dashboard deadman teleop** (below): bounded,
+  leased, and published through the existing final mux/manual safety path.
+  It joins after Nav2's collision monitor, not through it. Everything else is goal-based navigation by design — `undock`
+  included: it is an action the robot executes, never browser-published
+  velocity. The physical e-stop is the only emergency stop, and the F710
+  joystick on the robot always outranks this channel.
 - `navigate_to_pose`, `charge_release` and `undock` are
   additionally gated on live hardware telemetry
   (`server/app/commands/gates.py`) before they are forwarded: readings must be
@@ -133,6 +139,81 @@ Server-side broker rules:
   during motion or recovery and cancels outstanding movement.
 - The bridge executes commands only when `WEB_BRIDGE_ENABLE_COMMANDS=1`;
   otherwise it acks `accepted=false` with an explanatory reason.
+
+### Dashboard deadman teleop
+
+The joystick and keyboard in the separate Advanced browser tab use a leased,
+audited session, not a stream of anonymous commands. Opening a tab never
+starts a session or enables motors:
+
+- `command.request` `teleop_start` (UUID, audited, lease-checked, rate-limited
+  like every command) opens a session once the robot acks it. `teleop_stop`
+  closes it; it bypasses the lease and rate limit so a release is never
+  blocked — any operator who may command can end manual drive. Both are
+  forwarded to the robot, which acks/answers like any command.
+- Admission requires `web_teleop_v1`, an online robot, fresh valid connected
+  base state, fresh raw odometry (`raw_odom_age_s`) and LiDAR, a valid odometry
+  origin (`odom_epoch_valid`), motors already on, no faults/E-stop, valid clear
+  front/rear bumpers, confirmed
+  `CLEAR_CONFIRMED` dock clearance, and no active undock or owning command.
+  Each acquisition age plus server receipt age must be ≤0.5 s. Missing fields
+  fail closed. No map, localization, saved pose or commissioned undock profile
+  is required; software tests may supply explicit isolated fake evidence, never
+  production readiness. SBC-down production remains blocked.
+- `teleop.velocity` (`command_id` = the start UUID, monotonic `seq`,
+  `linear`/`angular` in m/s and rad/s, `deadman`) flows at ~10–15 Hz while
+  the deadman is held. The server forwards it only for an open session owned
+  by the exact sending browser connection, bound to the exact robot socket and
+  connection/base generation. Another tab, even of the same user and knowing
+  the UUID, cannot inject input or start a physical operation. The server drops
+  replayed or reordered `seq` values, and caps
+  the stream at `PATROLBOT_TELEOP_FRAMES_PER_S` (default 30/s, separate from
+  the discrete command rate limit).
+- Velocity bounds are the robot's own smoother ceiling (±0.3 m/s /
+  ±0.7 rad/s), pinned in `contracts/web-teleop.json` and compared byte for
+  byte in CI — never a browser choice. Server bounds, non-finite values,
+  unknown fields and malformed types are rejected, not silently clamped.
+- Envelope timestamps must include a timezone and be no older than 300 ms or
+  more than 50 ms in the future against aware UTC. Sequence is consumed only
+  after identity, freshness and rate admission. No nonzero send queue is kept;
+  robot sends are bounded to 100 ms (configurable, never above 300 ms). Reconnect
+  never replays input. `deadman=false` must contain zero velocities; a valid
+  owner release bypasses stream rate, ack and closing barriers, not identity,
+  lease, timestamp or sequence checks.
+- The server ends the session and sends an explicit zero (`deadman=false`)
+  plus an audited `teleop_stop` on lease takeover, browser disconnect, robot
+  disconnect/stale state, capability/hardware loss, or producer stream silence
+  of 300 ms. `PATROLBOT_TELEOP_SESSION_TTL_S` defaults to 20 s as an outer
+  permission cap without frames; it never extends the stricter 300 ms stream
+  timeout (a smaller setting shortens it). Pending starts are zero-only on the
+  robot while its single adapter drains prior autonomous output; they use the
+  existing 5 s acknowledgement deadline, not the active-stream timeout. The
+  300 ms producer clock starts at robot acceptance. The Pi web bridge independently
+  zeroes within 300 ms of the last frame regardless and stops
+  refreshing the `web_teleop_active` evidence the robot bridge requires for
+  manual `DRIVE`. Nothing resumes automatically.
+- At the mux the channel is `input/teleop` priority 7 — strictly below the
+  F710 (`input/joy`, 8), `undock_turn` (9) and the safety watchdog (10).
+  This input joins the **final mux after** Nav2 collision-monitor output
+  `/input/navi`, then uses the final smoother → bridge → SBC hardware guards.
+  LiDAR freshness is required, but collision-monitor coverage of web input,
+  reactive laser obstacle stopping and physical collision acceptance are not
+  proven or claimed; physical acceptance remains pending.
+  It outranks Nav2 (5), but **start rejects active navigation/map/undock
+  operations**: Stop navigation first and wait for its terminal result. There
+  is no old navigation to resume on release. F710 activity ends the Pi web
+  session permanently; its terminal result requires a fresh human start.
+- `stop`, `teleop_stop` and `motor_disable` bypass lease/rate barriers for any
+  authorized operator, including another tab, never observers. Reset also
+  safely revokes manual input. Other physical operations revoke/end manual
+  input and are rejected until its outcome resolves; nothing auto-resumes.
+  Start acceptance arriving after cancellation is relayed as refused to the
+  UI and cannot arm any browser. Pending/unknown ownership is retained until
+  the original robot terminal result and pending stop results resolve, or an
+  explicitly authorized reset. A zero sent, timeout or publication failure is
+  not proof of physical stopping.
+- Only `teleop_start`/`teleop_stop` are audited; per-frame samples are not —
+  at 10–15 Hz they would drown the command audit trail.
 
 ## Transport rules
 
