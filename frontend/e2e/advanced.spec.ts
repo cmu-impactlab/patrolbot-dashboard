@@ -31,6 +31,7 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   const fixture = await dashboardFixture(page);
   await page.goto("/?advanced=1");
   await expect(page.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
+  await fixture.wsReady;
   expect(fixture.commands).toHaveLength(0);
   fixture.send("state.capabilities", { capabilities: ["web_teleop_v1"] });
   fixture.send("telemetry.pose", { x: 0, y: 0, yaw: 0, localized: false, linear_velocity: 0, angular_velocity: 0 }); // No AMCL prerequisite.
@@ -65,6 +66,7 @@ test("a second advanced tab has no inherited intent and simulated focus loss end
   const first = await dashboardFixture(page);
   await page.goto("/?advanced=1");
   await expect(page.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
+  await first.wsReady;
   first.send("state.capabilities", { capabilities: ["web_teleop_v1"] });
   first.send("telemetry.base_state", TELEOP_BASE);
   await page.getByRole("button", { name: "Arm manual drive" }).click();
@@ -75,6 +77,7 @@ test("a second advanced tab has no inherited intent and simulated focus loss end
   const second = await dashboardFixture(secondPage);
   await secondPage.goto("/?advanced=1"); await secondPage.bringToFront();
   await expect(secondPage.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
+  await second.wsReady;
   // Headless Chromium does not model OS tab activation consistently. Deliver
   // the browser focus-loss event explicitly; both pages still use real WS APIs.
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));

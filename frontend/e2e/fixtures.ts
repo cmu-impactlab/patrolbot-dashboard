@@ -18,6 +18,8 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   let current: LayoutDoc = structuredClone(presets[preset as keyof typeof presets]);
   let failSave = false;
   let socket: WebSocketRoute;
+  let socketReady: () => void = () => {};
+  const wsReady = new Promise<void>(resolve => { socketReady = () => resolve(); });
   let sequence = 0;
   let activeTeleop: string | null = null;
   let baseState: unknown = { ...READY_BASE_STATE };
@@ -25,6 +27,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   page.on("close", () => clearInterval(baseTimer));
   let rows = [{ id: 1, robot_id: "mock", name: "Long recording name ".repeat(12), started_at: "2026-09-16T08:00:00Z", ended_at: "2026-09-16T08:10:00Z", status: "done", sample_count: 6000, channels: ["pose", "battery", "event"] }];
   const send = (type: string, data: unknown) => {
+    if (!socket) throw new Error("Fixture sent before the page opened /ws/ui; await the fixture wsReady promise first.");
     if (type === "telemetry.base_state") baseState = data;
     socket.send(JSON.stringify({ version: 1, type, robot_id: "mock", sequence: ++sequence, timestamp: new Date().toISOString(), data }));
   };
@@ -61,6 +64,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   });
   await page.routeWebSocket("**/ws/ui", ws => {
     socket = ws;
+    socketReady();
     send("server.snapshot", { connection: { state: "online" }, robot_status: { status: "ready", detail: "Ready" },
       system_health: { overall: "healthy", subsystems: [{ id: "computer", label: "Computer", level: "healthy", message: "Long network diagnostic ".repeat(15), updated_at: new Date().toISOString() }] },
       map_version: 1, pose: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
@@ -85,5 +89,5 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
       if (role !== "observer" && frame.data.command !== "teleop_start") setTimeout(() => send("command.result", { command_id: frame.data.command_id, outcome: "succeeded", detail: "Mock command completed" }), 20);
     });
   });
-  return { commands, teleopFrames, saves, send, stopBaseUpdates: () => clearInterval(baseTimer), setFailSave: (value: boolean) => { failSave = value; }, setCurrent: (doc: LayoutDoc) => { current = doc; } };
+  return { commands, teleopFrames, saves, send, wsReady, stopBaseUpdates: () => clearInterval(baseTimer), setFailSave: (value: boolean) => { failSave = value; }, setCurrent: (doc: LayoutDoc) => { current = doc; } };
 }
