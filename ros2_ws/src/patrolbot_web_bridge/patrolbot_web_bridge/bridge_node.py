@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from datetime import datetime, timezone
+import threading
+import time
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
@@ -37,6 +40,7 @@ from .commands import (CHARGING_STATES, DISABLED_REASON, CommandExecutor,
 from .throttle import Debounce, Throttle
 from .system_reset import SystemResetClient
 from .ws_client import WsClient
+from .teleop import CAPABILITY as TELEOP_CAPABILITY, RosTeleop
 
 try:
     from patrolbot_interfaces.msg import BaseState
@@ -141,10 +145,19 @@ class WebBridgeNode(Node):
         # ws thread. Starting the socket first left a window where the reply
         # beat these assignments and the thread died on AttributeError.
         self._command_queue: deque[dict] = deque(maxlen=16)
+        self._teleop_lock = threading.Lock()
+        self._latest_teleop_frame = None
+        self._teleop_release_frame = None
+        self._teleop_transport_invalidated = False
+        self._teleop_origin = None
+        self._teleop_map_context = None
+        self._teleop: RosTeleop | None = None
         self._latest_base_state: dict | None = None
         self._latest_base_state_at = 0.0
+        self._latest_base_state_mono = None
         self._latest_odom: Odometry | None = None
         self._latest_odom_at = 0.0
+        self._latest_odom_mono = None
         self._latest_amcl: PoseWithCovarianceStamped | None = None
         self._latest_amcl_at = 0.0
         self._latest_map: OccupancyGrid | None = None
@@ -153,7 +166,9 @@ class WebBridgeNode(Node):
 
         self.ws = WsClient(server_url, token, get["robot_id"],
                            on_map_wanted=self._resend_map,
-                           on_command=self._command_queue.append)
+                           on_command=self._enqueue_command,
+                           on_teleop=self._enqueue_teleop,
+                           on_disconnect=self._teleop_disconnected)
 
         self._system_reset = None
         self._commands: CommandExecutor | None = None
@@ -166,6 +181,13 @@ class WebBridgeNode(Node):
                 "reverse_speed": get["undock_reverse_speed"],
                 "validation_mode": get["undock_validation_mode"],
             })
+            try:
+                self._teleop = RosTeleop(self, self.ws,
+                    state=lambda: (self._latest_base_state, self._latest_base_state_mono,
+                                   self._latest_odom, self._latest_odom_mono),
+                    context=self._teleop_context)
+            except (OSError, ValueError, ImportError) as error:
+                self.get_logger().error(f"Web manual drive is unavailable: {error}")
             reset_socket = os.environ.get("PATROLBOT_RESET_SOCKET", "")
             if reset_socket:
                 self._system_reset = SystemResetClient(reset_socket, self.ws)
@@ -174,7 +196,7 @@ class WebBridgeNode(Node):
             # are what the dashboard gates its controls on, and the manager may
             # start after this node does.
             self.create_timer(2.0, self._refresh_capabilities)
-        self.create_timer(0.1, self._drain_commands)
+        self.create_timer(0.025, self._drain_commands)
 
         self._last_path_points: list | None = None
         self._start = self.get_clock().now()
@@ -222,6 +244,7 @@ class WebBridgeNode(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         self._latest_odom = msg
+        self._latest_odom_mono = time.monotonic()
         self._latest_odom_at = self.get_clock().now().nanoseconds / 1e9
         self._maybe_send_pose()
 
@@ -296,7 +319,12 @@ class WebBridgeNode(Node):
         self.ws.send("telemetry.diagnostics", normalizers.normalize_diagnostics(msg))
 
     def _on_base_state(self, msg) -> None:
+        self._teleop_origin = (getattr(msg, 'session_generation', None),
+                              getattr(msg, 'odom_epoch', None),
+                              getattr(msg, 'odom_epoch_generation', None),
+                              getattr(msg, 'odom_epoch_valid', False))
         payload = normalizers.normalize_base_state(msg)
+        payload["raw_odom_age_s"] = self._raw_odom_age()
         payload.update(map_id=getattr(msg, 'map_id', '') or None,
                        map_revision=getattr(msg, 'map_revision', '') or None,
                        map_activated_stamp_ns=getattr(msg, 'map_activated_stamp_ns', 0))
@@ -310,7 +338,10 @@ class WebBridgeNode(Node):
         if self._commands is not None:
             self._commands.update_navigation_context(payload)
         self._latest_base_state = payload
+        self._teleop_map_context = (payload.get("map_id"), payload.get("map_revision"),
+                                    payload.get("map_activated_stamp_ns"))
         self._latest_base_state_at = self.get_clock().now().nanoseconds / 1e9
+        self._latest_base_state_mono = time.monotonic()
         self.ws.send("telemetry.base_state", payload)
         self._maybe_seed_dock_pose(payload)
 
@@ -399,8 +430,37 @@ class WebBridgeNode(Node):
         self._send_map()
 
     def _drain_commands(self) -> None:
+        with self._teleop_lock:
+            invalidate = self._teleop_transport_invalidated
+            self._teleop_transport_invalidated = False
+            sample = self._latest_teleop_frame
+            self._latest_teleop_frame = None
+            release = self._teleop_release_frame
+            self._teleop_release_frame = None
+        if invalidate and self._teleop is not None:
+            self._teleop.session.end("Dashboard connection changed; manual input ended.", "failed")
         while self._command_queue:
             data = self._command_queue.popleft()
+            command = data.get("command")
+            if command in {"teleop_start", "teleop_stop"}:
+                generation = data.pop("_ws_generation", None)
+                received_at = data.pop("_received_at", None)
+                if self._teleop is None:
+                    self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
+                        "accepted": False, "reason": "Web manual input is not enabled on this bridge."})
+                elif generation != self.ws.connection_generation or not self.ws.connected.is_set():
+                    self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
+                        "accepted": False, "reason": "Connection changed; start manual input again explicitly."})
+                else:
+                    self._teleop.handle(data, received_at=received_at)
+                continue
+            if self._teleop is not None and self._teleop.session.active:
+                if command in {"stop", "motor_disable", "software_reset"}:
+                    self._teleop.session.end("Manual input ended by Stop, motor disable or software reset.")
+                else:
+                    self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
+                        "accepted": False, "reason": "End manual drive before sending another robot command."})
+                    continue
             if self._commands is None:
                 self.ws.send("command.ack", {
                     "command_id": str(data.get("command_id", "")),
@@ -432,7 +492,83 @@ class WebBridgeNode(Node):
                             - self._latest_odom_at)
             self._commands.handle(data, self._latest_base_state, current_yaw,
                                   self._localization_is_usable(), base_state_age,
-                                  odom_age)
+                                   odom_age)
+        if release is not None and self._teleop is not None:
+            data, received_at, generation = release
+            if generation == self.ws.connection_generation:
+                self._teleop.session.frame(data, self._teleop_context(), received_at=received_at)
+        if sample is not None and self._teleop is not None:
+            data, received_at, generation = sample
+            if generation == self.ws.connection_generation:
+                self._teleop.session.frame(data, self._teleop_context(), received_at=received_at)
+
+    def _teleop_context(self):
+        return (self.ws.connection_generation, self._teleop_origin, self._teleop_map_context)
+
+    def _raw_odom_age(self):
+        """Report actual raw data age without inventing a map-frame pose."""
+        message = self._latest_odom
+        if message is None or self._latest_odom_mono is None:
+            return None
+        try:
+            import math
+            p, q, v = message.pose.pose.position, message.pose.pose.orientation, message.twist.twist
+            values = (p.x, p.y, q.x, q.y, q.z, q.w, v.linear.x, v.angular.z)
+            receipt_age = time.monotonic() - self._latest_odom_mono
+            stamp_ns = message.header.stamp.sec * 10**9 + message.header.stamp.nanosec
+            stamp_age = (self.get_clock().now().nanoseconds - stamp_ns) / 1e9
+            if not all(math.isfinite(value) for value in (*values, receipt_age, stamp_age)):
+                return None
+            if receipt_age < 0 or stamp_age < 0:
+                return None
+            return max(receipt_age, stamp_age)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _enqueue_command(self, data):
+        if not isinstance(data, dict):
+            return
+        if data.get("command") in {"teleop_start", "teleop_stop"}:
+            data = dict(data, _ws_generation=self.ws.connection_generation,
+                        _received_at=time.monotonic())
+        self._command_queue.append(data)
+
+    def _enqueue_teleop(self, frame):
+        # Called by the WS thread: no ROS calls and no velocity backlog.
+        data = frame.get("data")
+        now = time.monotonic()
+        try:
+            stamp = datetime.fromisoformat(frame["timestamp"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                return
+            age = (datetime.now(timezone.utc) - stamp).total_seconds()
+            if not 0 <= age <= 0.3:
+                return
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return
+        if not isinstance(data, dict):
+            return
+        with self._teleop_lock:
+            sample = (data, now - age, self.ws.connection_generation)
+            if data.get("deadman") is False:
+                self._teleop_release_frame = sample
+                self._latest_teleop_frame = None
+                return
+            if (self._teleop_release_frame is not None and
+                    self._teleop_release_frame[0].get("command_id") == data.get("command_id")):
+                return
+            previous = self._latest_teleop_frame
+            if (previous is not None and previous[0].get("command_id") == data.get("command_id")
+                    and type(previous[0].get("seq")) is int and type(data.get("seq")) is int
+                    and previous[0]["seq"] >= data["seq"]):
+                return
+            self._latest_teleop_frame = sample
+
+    def _teleop_disconnected(self):
+        with self._teleop_lock:
+            self._latest_teleop_frame = None
+            self._teleop_release_frame = None
+            self._teleop_transport_invalidated = True
 
     def _refresh_capabilities(self) -> None:
         """Tell the dashboard which dock operations are actually available.
@@ -446,6 +582,8 @@ class WebBridgeNode(Node):
         # Detect silent Undock actions without retiring their motion owner.
         self._commands.check_undock_health()
         available = self._commands.available_capabilities()
+        if self._teleop is not None:
+            available.append(TELEOP_CAPABILITY)
         if self._system_reset is not None and self._system_reset.available:
             available.append("software_reset")
         # Log through the ROS logger, not the stdlib one: nothing configures a
@@ -473,6 +611,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if node._teleop is not None:
+            node._teleop.shutdown()
         if node._system_reset is not None:
             node._system_reset.stop()
         node.ws.stop()

@@ -1267,3 +1267,12 @@ input:not([type=checkbox]), select { min-height: 44px; }
   .event-row > div { grid-column: 1 / -1; grid-row: 2; }
 }
 .dialog-content h2 { padding-right: 42px; }
+/* Advanced controls use a separate tab, not a saved dashboard widget. */
+.advanced-page { max-width: 680px; margin: 0 auto; padding: 24px; }
+.manual-panel { border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+.manual-panel:focus-visible, .manual-joystick:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.manual-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.manual-joystick { position: relative; width: 160px; height: 160px; margin: 24px auto; border-radius: 50%; border: 2px solid var(--border); touch-action: none; user-select: none; cursor: grab; background: var(--bg); }
+.manual-joystick[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.manual-stick { position: absolute; left: 59px; top: 59px; width: 38px; height: 38px; border-radius: 50%; background: var(--accent); border: 2px solid currentColor; pointer-events: none; }
+.manual-forward { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font-size: 12px; pointer-events: none; }

@@ -1,7 +1,8 @@
 """Browser-facing WebSocket endpoint: /ws/ui.
 
-Inbound frames from browsers are ignored except command.request, which is
-routed through the CommandBroker (validated, audited, timeout-protected).
+Commands are validated and audited; manual samples have their own connection-
+bound admission and rate cap. Authorized end-input commands never wait for a
+normal-command flood budget.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from typing import get_args
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..protocol.envelope import Envelope, ProtocolError, decode
-from ..protocol.messages import CommandRequestData, CommandType
+from ..protocol.messages import CommandRequestData, CommandType, TeleopVelocityData
 
 log = logging.getLogger("ui_gateway")
 router = APIRouter()
@@ -59,12 +60,11 @@ async def ui_ws(websocket: WebSocket) -> None:
             if now - window_start >= 1.0:
                 window_start, frames_in_window = now, 0
             frames_in_window += 1
-            if frames_in_window > frame_cap:
-                log.warning("dropping browser frame: rate cap (%d/s) exceeded", frame_cap)
-                continue
             try:
                 envelope, payload = decode(raw)
             except ProtocolError as exc:
+                if frames_in_window > frame_cap:
+                    continue
                 log.warning("dropping bad browser frame: %s", exc)
                 try:
                     invalid = Envelope.model_validate_json(raw)
@@ -82,6 +82,13 @@ async def ui_ws(websocket: WebSocket) -> None:
                           "Invalid command fields. Check the goal coordinates and request fields.")
                 await hub.commands._reject_audited(
                     client, invalid.robot_id, command_id, command, reason)
+                continue
+            if envelope.type == "teleop.velocity" and isinstance(payload, TeleopVelocityData):
+                await hub.commands.teleop.velocity(client, envelope, payload)
+                continue
+            emergency = (isinstance(payload, CommandRequestData) and payload.command in
+                         {"stop", "motor_disable", "teleop_stop", "software_reset"})
+            if frames_in_window > frame_cap and not emergency:
                 continue
             if envelope.type == "command.request" and isinstance(payload, CommandRequestData):
                 await hub.commands.handle_browser_request(client, envelope, payload)

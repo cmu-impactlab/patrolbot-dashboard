@@ -49,6 +49,8 @@ export const COMMAND_COPY: Record<CommandType, string> = {
   software_reset: "Restart robot software",
   undock: "Undock",
   set_lidar_power: "Change LiDAR power",
+  teleop_start: "Start manual drive",
+  teleop_stop: "End manual input",
 };
 
 export const ESTIMATE_COPY: Record<string, string> = {

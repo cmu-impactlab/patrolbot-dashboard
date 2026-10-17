@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # Per-operator command rate limit: at most this many command.request frames
     # accepted per minute (token bucket). Excess is rejected with a clear reason.
     command_rate_per_min: int = 30
+    # Separate from audited discrete commands. No velocity backlog is retained.
+    teleop_frames_per_s: int = 30
+    teleop_session_ttl_s: float = 20.0
+    teleop_send_timeout_s: float = 0.1
     # Per-browser-connection inbound frame cap; frames beyond this many per
     # second are dropped (a misbehaving or malicious client cannot flood the hub).
     max_ui_frames_per_s: int = 20

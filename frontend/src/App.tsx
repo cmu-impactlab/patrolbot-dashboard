@@ -19,6 +19,9 @@ import { useTelemetrySocket } from "./websocket/useTelemetrySocket";
 const ReplayPage = lazy(async () => ({
   default: (await import("./pages/ReplayPage")).ReplayPage,
 }));
+const AdvancedPage = lazy(async () => ({
+  default: (await import("./pages/AdvancedPage")).AdvancedPage,
+}));
 
 function Dashboard() {
   useTelemetrySocket();
@@ -61,7 +64,9 @@ export default function App() {
   const replayId = tourRequested ? null : replayIdFromUrl();
   return (
     <AuthGate>
-      {replayId === null ? (
+      {new URLSearchParams(window.location.search).get("advanced") === "1" ? (
+        <Suspense fallback={<div aria-busy="true" />}><AdvancedPage /></Suspense>
+      ) : replayId === null ? (
         <Dashboard />
       ) : (
         <Suspense fallback={<div className="replay-page" aria-busy="true" />}>

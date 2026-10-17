@@ -196,13 +196,25 @@ export function TopBar() {
       >
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </button>
-      {authUser?.auth_mode === "oidc" && (
-        <span className="user-chip" data-tour="account" title={`Signed in as ${authUser.display_name} (${authUser.role})`}>
-          {authUser.username}
-          <a className="btn icon" href="/auth/logout" title="Sign out">
-            <LogOut size={14} />
-          </a>
-        </span>
+      {authUser && (
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button className="btn user-chip" data-tour="account" aria-label="User profile" title={`Signed in as ${authUser.display_name} (${authUser.role})`}>
+              {authUser.username} <ChevronDown size={14} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="dropdown-content" sideOffset={6} align="end">
+              <DropdownMenu.Label className="dropdown-label">{authUser.display_name} ({authUser.role})</DropdownMenu.Label>
+              <DropdownMenu.Item asChild>
+                <a className="dropdown-item" href="/?advanced=1" target="_blank" rel="noopener noreferrer">Advance</a>
+              </DropdownMenu.Item>
+              {authUser.auth_mode === "oidc" && <DropdownMenu.Item asChild>
+                <a className="dropdown-item" href="/auth/logout"><LogOut size={14} /> Sign out</a>
+              </DropdownMenu.Item>}
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       )}
       </div>
       {deleteLayout.isError && <p role="alert">Dashboard deletion failed. Please try again.</p>}

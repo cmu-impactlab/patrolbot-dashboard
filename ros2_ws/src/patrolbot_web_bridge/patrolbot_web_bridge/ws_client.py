@@ -53,7 +53,9 @@ def _json_default(obj):
 class WsClient:
     def __init__(self, server_url: str, token: str, robot_id: str,
                  on_map_wanted: Callable[[], None],
-                 on_command: Callable[[dict], None] | None = None) -> None:
+                 on_command: Callable[[dict], None] | None = None,
+                 on_teleop: Callable[[dict], None] | None = None,
+                 on_disconnect: Callable[[], None] | None = None) -> None:
         # The token travels in the Authorization header (see _connect) so it
         # never lands in reverse-proxy access logs. self.url stays clean.
         self.url = server_url
@@ -62,6 +64,9 @@ class WsClient:
         self.robot_id = robot_id
         self.on_map_wanted = on_map_wanted
         self.on_command = on_command
+        self.on_teleop = on_teleop
+        self.on_disconnect = on_disconnect
+        self.connection_generation = 0
         self.sequence = 0
         self.map_version = 0
         # Dock operations whose servers are currently reachable. Empty until
@@ -200,6 +205,7 @@ class WsClient:
         return "additional_headers"
 
     async def _session(self) -> None:
+        self.connection_generation += 1
         async with self._connect() as ws:
             hello = json.dumps({
                 "version": 1, "type": "robot.hello", "robot_id": self.robot_id,
@@ -242,13 +248,28 @@ class WsClient:
                     self.stats["sent"] += 1
             finally:
                 self.connected.clear()
+                self.connection_generation += 1
+                if self.on_disconnect is not None:
+                    self.on_disconnect()
                 reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
 
     async def _drain_incoming(self, ws) -> None:
         async for message in ws:
             try:
                 frame = json.loads(message)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(frame, dict):
+                continue
+            if frame.get("robot_id") not in (None, self.robot_id):
+                continue
+            if frame.get("type") == "teleop.velocity" and self.on_teleop is not None:
+                # Bounded latest-only ingress is owned by the ROS node. Never
+                # put high-rate velocity frames into the discrete command FIFO.
+                if frame.get("version") == 1 and frame.get("robot_id") == self.robot_id:
+                    self.on_teleop(frame)
                 continue
             if frame.get("type") == "command.cancel" and self.on_command is not None:
                 self.on_command({"command": "cancel", "command_id": frame.get("data", {}).get("command_id")})

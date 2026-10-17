@@ -41,6 +41,8 @@ class RobotSession:
     robot_id: str
     state: RobotState
     websocket: WebSocket | None = None
+    generation: int = 0
+    connected_mono: float = field(default_factory=time.monotonic)
 
 
 QUEUE_LIMIT = 64
@@ -72,6 +74,7 @@ class BrowserClient:
         self.websocket = websocket
         self.user = user  # authentication.local.User (identity + role)
         self.source_ip = source_ip
+        self.connected = True
         self._queue: deque[tuple[str, bool]] = deque()
         self._wakeup = asyncio.Event()
         # Set when a protected frame had to be dropped: this client's view is
@@ -201,23 +204,32 @@ class TelemetryHub:
     # -- robot side ----------------------------------------------------------
 
     async def robot_connected(self, robot_id: str, websocket: WebSocket) -> RobotSession:
-        session = self.get_or_create_state(robot_id)
-        if session.websocket is not None:
+        previous = self.get_or_create_state(robot_id)
+        await self.commands.teleop.revoke(robot_id, "Robot connection replaced.")
+        if previous.websocket is not None:
             log.info("robot %s reconnected; superseding old socket", robot_id)
             with contextlib.suppress(Exception):
-                await session.websocket.close(code=4000, reason="superseded by new connection")
-        session.websocket = websocket
+                await previous.websocket.close(code=4000, reason="superseded by new connection")
+        # A distinct session object prevents the superseded gateway coroutine
+        # from injecting replies or telemetry into the replacement connection.
+        session = RobotSession(robot_id, previous.state, websocket,
+                               generation=previous.generation + 1)
+        self.robots[robot_id] = session
+        session.state.set_capabilities([])
         session.state.record_heartbeat()
         await self._apply_connection(session)
         return session
 
     async def robot_disconnected(self, session: RobotSession, websocket: WebSocket) -> None:
-        if session.websocket is websocket:
+        if self.robots.get(session.robot_id) is session and session.websocket is websocket:
+            await self.commands.teleop.revoke(session.robot_id, "Robot disconnected; manual outcome unknown.")
             session.websocket = None
             session.state.last_heartbeat_mono = None
             await self._apply_connection(session)
 
     async def handle_robot_message(self, session: RobotSession, envelope: Envelope, payload: Any) -> None:
+        if self.robots.get(session.robot_id) is not session:
+            return
         state = session.state
         state.record_heartbeat()
         events: list[EventData] = []
@@ -274,8 +286,11 @@ class TelemetryHub:
             self.publish(t, session.robot_id, data_out)
         await self._emit_events(session, events)
         self._emit_derived(session)
+        await self.commands.teleop.changed(session)
 
     async def handle_robot_command_reply(self, session: RobotSession, envelope: Envelope, payload: Any) -> None:
+        if self.robots.get(session.robot_id) is not session:
+            return
         session.state.record_heartbeat()
         await self.commands.handle_robot_reply(session, envelope, payload)
 
@@ -303,6 +318,7 @@ class TelemetryHub:
         return client
 
     def browser_disconnected(self, client: BrowserClient) -> None:
+        client.connected = False
         self.browsers.discard(client)
         # Free the command lease if this client held it, so another operator
         # can take control without a takeover.
@@ -350,6 +366,8 @@ class TelemetryHub:
         # Health includes per-slice receipt ages, so it must be reconsidered
         # while the connection remains online as well as on transitions.
         self._emit_derived(session)
+
+        await self.commands.teleop.changed(session)
 
     async def _persist_last_pose(self, session: RobotSession) -> None:
         """Save the robot's last-known pose so the next session can offer to

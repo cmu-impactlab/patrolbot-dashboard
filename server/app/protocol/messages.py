@@ -6,6 +6,7 @@ shared/schemas/fixtures/ and are validated by both test suites.
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -138,6 +139,9 @@ class BaseStateData(MapContext):
     # Missing epoch fields remain parseable for legacy recordings but are
     # unsafe for navigation and localization health.
     odom_epoch_valid: bool = False
+    # Raw odometry receipt age at the bridge, independent of map/localization.
+    # Missing evidence is never authorization for web manual drive.
+    raw_odom_age_s: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     localization_recovery_required: bool = True
     localization_recovery_stage: str = ""
     localization_seed_stamp_ns: int = Field(default=0, ge=0)
@@ -182,6 +186,11 @@ class MapData(MapContext):
 
 CommandType = Literal[
     "navigate_to_pose", "set_initial_pose", "stop",
+    # Dashboard deadman teleop. `teleop_start` claims the single-operator
+    # lease and opens a session (audited like every command); `teleop.velocity`
+    # frames flow only inside it; `teleop_stop` closes it. The F710 on
+    # `input/joy` (mux priority 8) always outranks this channel (priority 7).
+    "teleop_start", "teleop_stop",
     # Charging / motor power / undock. Deliberately distinct commands, not one
     # "unlock wheels": charge release is zero-motion and leaves the motors off,
     # enabling the motors is a separate explicit request, and undock is the
@@ -199,6 +208,7 @@ CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout
 
 
 class CommandRequestData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     command_id: str  # UUID minted by the browser; correlates the whole lifecycle
     command: CommandType
     seed_profile: Literal["measured"] | None = None
@@ -206,6 +216,10 @@ class CommandRequestData(BaseModel):
 
     @model_validator(mode="after")
     def require_lidar_target(self):
+        if self.command in {"teleop_start", "teleop_stop"}:
+            UUID(self.command_id)
+            if self.goal is not None or self.enabled is not None or self.allow_unlocalized:
+                raise ValueError("manual input commands do not accept goals, power targets or localization overrides")
         if self.seed_profile is not None and self.command != "set_initial_pose":
             raise ValueError("seed_profile is only valid for set_initial_pose")
         if self.command == "set_lidar_power" and self.enabled is None:
@@ -226,6 +240,40 @@ class CommandRequestData(BaseModel):
     # and ignored on the way in — a browser cannot authorize itself. The robot
     # requires it for guarded motion (the dock manager's Undock goal).
     operator_authorized: bool = False
+
+
+class TeleopVelocityData(BaseModel):
+    """One sample of the dashboard's on-screen deadman teleop.
+
+    Browser → server → robot at ~10–15 Hz while the operator holds the
+    deadman. The server forwards it only inside an open, lease-held teleop
+    session; the Pi web bridge republishes it as a Twist on `/input/teleop`
+    (twist_mux priority 7 — below the F710, above Nav2) and publishes one
+    fail-closed zero within 300 ms of the last frame. This manual input joins
+    the FINAL mux after Nav2's collision-monitor output, like the F710. It uses
+    the final smoother, bridge/SBC hardware guards and priority-10 watchdog;
+    collision-monitor coverage and physical obstacle stopping are not claimed.
+    """
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid", strict=True)
+    command_id: str  # the teleop_start UUID that opened the session
+    # Monotonic within the session; drops replayed or reordered frames.
+    seq: int = Field(ge=0)
+    # Bounded to the robot's teleop_velocity_smoother ceiling, pinned in
+    # contracts/web-teleop.json (both repos) — the dashboard can never ask
+    # for more than the robot's final smoother is configured to pass.
+    linear: float = Field(ge=-0.3, le=0.3)
+    angular: float = Field(ge=-0.7, le=0.7)
+    # True while the operator actively holds; a False frame is the explicit
+    # release — zero velocities, zeroing the robot without waiting for the
+    # watchdog.
+    deadman: bool
+
+    @model_validator(mode="after")
+    def release_must_be_a_zero_command(self):
+        UUID(self.command_id)
+        if not self.deadman and (self.linear != 0.0 or self.angular != 0.0):
+            raise ValueError("a released deadman frame must be a zero command")
+        return self
 
 
 class CommandCancelData(BaseModel):
@@ -346,6 +394,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "event.append": EventData,
     "command.request": CommandRequestData,
     "command.cancel": CommandCancelData,
+    "teleop.velocity": TeleopVelocityData,
     "command.ack": CommandAckData,
     "command.progress": CommandProgressData,
     "command.result": CommandResultData,
