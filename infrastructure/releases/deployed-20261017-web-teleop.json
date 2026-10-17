@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "deployment_utc": "2026-10-17T17:12:07+00:00",
+  "source_repository": "cmu-impactlab/patrolbot-dashboard",
+  "source_ref": "main",
+  "source_sha": "62f732606827302988e0781214778a36c950a92a",
+  "image": "sha256:97d5b1e93310610e4db65d85e27ea3a13bdf858bad72c51e38c03c13779e3ca2",
+  "image_tag": "patrolbot-dashboard-server:latest",
+  "public_entry_asset": "/assets/index-pE9gWd2e.js",
+  "public_entry_sha256": "26f7c08c3ba2a538f0c6cb0e884b9fcdfcc1dc76257d0124f6367f5be93da8af",
+  "health": {
+    "status": "healthy",
+    "robot_connected": true,
+    "writes_zero": true
+  },
+  "scope": "Dashboard web teleop (deadman manual drive, PR #34): server sessions with fail-closed admission gates and a 300 ms zero watchdog, the robot web bridge path (teleop_start/teleop_stop, /input/teleop at mux priority 7, half-second zero-drain start acknowledgement, /patrolbot/web_teleop_active evidence, web_teleop_v1 capability) and the new Advance tab at /?advanced=1 with joystick/keyboard input and release-to-zero on every lifecycle exit. The Pi web bridge was deployed first by source sync (rollout web-teleop-20261017-r1 on patrolbot-rpi5, file manifest sha256:910b0384454e36a96bb0d80e4200bad78fd744a5c8692693caa8f932382c2bbf, byte-identical to this repository's ros2_ws/src/patrolbot_web_bridge tree). The server image was rebuilt and the server container recreated; nginx untouched; the patrolbot-dashboard-data SQLite volume was preserved and snapshotted to /srv/patrolbot-dashboard/backups/web-teleop-20261017/patrolbot.db before the rebuild; no database migration and no other services touched.",
+  "postflight": [
+    "server container healthy",
+    "health endpoint healthy/robot online (robot_connected true after the recreate)",
+    "served entry bundle index-pE9gWd2e.js sha256 26f7c08c... contains the /?advanced=1 link and the web_teleop_v1 gate",
+    "lazy AdvancedPage chunk served with HTTP 200",
+    "Pi web bridge reconnected after the restart; the capabilities hello includes web_teleop_v1 and /input/teleop is published solely by patrolbot_web_bridge to a cmd_vel_mux subscriber",
+    "no motor/pose/goal/undock command sent"
+  ],
+  "rollback": "Previous image sha256:549599a2d2ef039d9d283a25e2d6d793358e73a584fecf6c15f8d1a7cb79ca4f retained on the host as patrolbot-dashboard-server:pre-web-teleop-20261017. Rollback: retag latest to that image and recreate the server service (nginx untouched). Pi bridge rollback: restore /home/ubuntu/backups/20261017-web-teleop/docker.env.bak (WEB_BRIDGE_ROOT pointing at the undock-persistence-20261014-r4 tree, which was left intact) and recreate patrolbot-web-bridge.",
+  "sbc": "Operator-reported down; teleop starts fail closed until the base reports valid telemetry; physical acceptance pending.",
+  "physical_acceptance": false
+}

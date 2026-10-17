@@ -29,6 +29,16 @@ keep both catalogs equal — run `python3 scripts/verify_floor_maps.py` against 
 patrolbot-repo checkout and update the pinned `EXPECTED_REVISIONS` in
 `server/tests/test_map_catalog.py` together with the robot navigation leaf.
 
+Dashboard web teleop (deadman manual drive) is deployed end to end
+(`deployed-20261017-web-teleop.json`, image `97d5b1e9…` from main `62f7326`;
+rollback image `549599a2…` kept as
+`patrolbot-dashboard-server:pre-web-teleop-20261017`). The Pi web bridge runs
+the matching source (rollout `web-teleop-20261017-r1` on the robot host) and
+announces `web_teleop_v1`. Starts still fail closed until the SBC reports valid
+telemetry, so physical acceptance remains pending; the source-sync step is
+recorded on the robot host under
+`/home/ubuntu/patrolbot-path-deploy-20261013/web-teleop-20261017-r1/`.
+
 Known gaps: merged uncertainty and separate always-visible motor-disable UI were
 restored/deployed, but live AMCL/motor-response acceptance still waits on the SBC
 and operator authorization; newer Pi path handling needs a matched dashboard
