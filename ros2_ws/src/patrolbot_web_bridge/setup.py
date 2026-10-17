@@ -9,7 +9,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/config", ["config/web_bridge.yaml"]),
+        (f"share/{package_name}/config", ["config/web_bridge.yaml", "config/web_teleop.json"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
