@@ -389,6 +389,43 @@ def software_reset_reason(facts: StateFacts) -> str | None:
     return None
 
 
+def teleop_reason(state: Any) -> str | None:
+    """Manual drive needs hardware, not a map, localization or undock profile.
+
+    Combine bridge-reported ages with server receipt age; an old frozen report
+    must not become fresh merely because heartbeat traffic continues.
+    """
+    base = state.base_state.data
+    age = state.base_state.age()
+    if state.connection != "online":
+        return "The robot is not connected right now."
+    if "web_teleop_v1" not in state.capabilities:
+        return "Manual drive is not available on this robot."
+    if base is None or age is None or not math.isfinite(age) or not 0 <= age <= .5:
+        return "Manual drive requires fresh hardware readings."
+    if not base.link_connected or not base.hardware_state_valid:
+        return "Manual drive requires a valid connected drive base."
+    for value in (base.telemetry_age, base.lidar_scan_age, base.raw_odom_age_s):
+        if value is None or not math.isfinite(value) or value < 0 or value + age > .5:
+            return "Manual drive requires fresh base, raw odometry and LiDAR readings."
+    if not base.odom_epoch_valid:
+        return "Manual drive requires a valid odometry origin."
+    if base.lidar_state != "READY":
+        return "Manual drive requires fresh LiDAR scans."
+    if base.estop_pressed or base.fault_flags:
+        return "Clear the emergency stop and drive-base faults before manual drive."
+    if base.bumpers_valid is not True or base.bumpers_front or base.bumpers_rear:
+        return "Manual drive requires valid, clear front and rear bumpers."
+    if not base.motors_enabled:
+        return "The robot's motors are off. Enable them explicitly before manual drive."
+    if base.undock_active:
+        return "Stop undocking before manual drive."
+    # Unknown dock evidence is not clearance to drive off a charger.
+    if base.dock_state_valid is not True or base.dock_state != "CLEAR_CONFIRMED":
+        return "Manual drive requires confirmed clearance from the charging dock."
+    return None
+
+
 # There is no dock gate because there is no dock command: the robot has no
 # automatic dock-in path (see protocol/messages.py). Driving onto the charger
 # is done by hand, and `navigate_to_pose` refuses to drive off it.
