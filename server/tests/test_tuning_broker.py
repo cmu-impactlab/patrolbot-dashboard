@@ -123,6 +123,15 @@ def sent_frame(ws: FakeWebSocket, index: int = 0) -> dict:
     return json.loads(ws.sent[index])
 
 
+async def until(predicate, message: str) -> None:
+    """Yield until ``predicate`` holds; scheduling order differs by Python version."""
+    for _ in range(10_000):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(message)
+
+
 # -- capability gate ---------------------------------------------------------
 
 async def test_read_requires_read_capability():
@@ -144,7 +153,7 @@ async def test_save_is_admitted_with_the_write_capability_alone():
     _session, ws = add_robot(hub, capabilities=(READ_CAPABILITY, WRITE_CAPABILITY))
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)])))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "save frame was not sent")
     assert len(ws.sent) == 1
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -206,7 +215,7 @@ async def test_actor_is_derived_server_side_and_role_cannot_be_smuggled():
     assert ws.sent == []
 
     task = asyncio.create_task(broker.request(ADMIN, ROBOT, payload))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "mutation frame was not sent")
     forwarded = sent_frame(ws)
     assert forwarded["type"] == "tuning.request"
     assert forwarded["data"]["actor"] == {"id": 1, "username": "adm",
@@ -225,7 +234,7 @@ async def test_reply_resolves_the_awaiting_request():
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     await broker.handle_response(session, envelope(), response(rid, "refused", detail="no"))
     result = await task
     assert result.outcome == "refused" and result.detail == "no"
@@ -238,7 +247,7 @@ async def test_superseded_reply_is_dropped():
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     # The session is replaced (generation bump) before the reply arrives.
     hub.robots[ROBOT] = FakeSession(ROBOT, FakeWebSocket(), generation=2,
                                     capabilities=(READ_CAPABILITY, MUTATION_CAPABILITY))
@@ -254,7 +263,7 @@ async def test_reply_from_wrong_robot_is_dropped():
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     await broker.handle_response(session, envelope("other-robot"), response(rid, "ok"))
     assert (await task).outcome == "unknown"
 
@@ -266,7 +275,7 @@ async def test_unreadable_reply_marks_unknown_not_failure():
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     await broker.handle_response(session, envelope(),
                                  {"request_id": rid, "outcome": "ok", "detail": "x" * 600})
     result = await task
@@ -296,7 +305,7 @@ async def test_duplicate_in_flight_request_id_conflicts():
     first = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     with pytest.raises(TuningConflict):
         await broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                         request_id=rid))
@@ -328,13 +337,13 @@ async def test_disconnect_marks_mutation_unknown_and_read_unavailable():
     session, _ws = add_robot(hub)
     mutation = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)])))
-    await asyncio.sleep(0)
+    await until(lambda: len(broker._pending) == 1, "mutation was not registered")
     broker.disconnected(session)
     assert (await mutation).outcome == "unknown"
 
-    session2, _ws2 = add_robot(hub, generation=2)
+    session2, ws2 = add_robot(hub, generation=2)
     read = asyncio.create_task(broker.request(OBSERVER, ROBOT, read_request()))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws2.sent) == 1, "read frame was not sent")
     broker.disconnected(session2)
     with pytest.raises(TuningUnavailable):
         await read
@@ -345,7 +354,7 @@ async def test_shutdown_resolves_pending_as_unknown():
     add_robot(hub)
     mutation = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)])))
-    await asyncio.sleep(0)
+    await until(lambda: len(broker._pending) == 1, "mutation was not registered")
     await broker.shutdown()
     assert (await mutation).outcome == "unknown"
 
@@ -357,7 +366,7 @@ async def test_pending_concurrency_is_bounded():
     add_robot(hub)
     first = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)])))
-    await asyncio.sleep(0)
+    await until(lambda: len(broker._pending) == 1, "first request was not registered")
     with pytest.raises(TuningRateLimited):
         await broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha2", 0.1)]))
     first.cancel()
@@ -369,10 +378,10 @@ async def test_pending_concurrency_is_bounded():
 
 async def test_snapshot_returns_runtime_state():
     broker, hub = make_broker()
-    session, _ws = add_robot(hub)
+    session, ws = add_robot(hub)
     rid = new_uuid()
     task = asyncio.create_task(broker.snapshot(OBSERVER, ROBOT))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "snapshot frame was not sent")
     # Find the request_id the broker minted for the read.
     sent = sent_frame(session.websocket)["data"]["request"]
     await broker.handle_response(session, envelope(),
@@ -383,9 +392,9 @@ async def test_snapshot_returns_runtime_state():
 
 async def test_snapshot_unknown_is_unavailable_never_defaulted():
     broker, hub = make_broker()
-    session, _ws = add_robot(hub)
+    session, ws = add_robot(hub)
     task = asyncio.create_task(broker.snapshot(OBSERVER, ROBOT))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "snapshot frame was not sent")
     sent = sent_frame(session.websocket)["data"]["request"]
     await broker.handle_response(session, envelope(),
                                  response(sent["request_id"], "unknown", detail="no state"))
@@ -395,9 +404,9 @@ async def test_snapshot_unknown_is_unavailable_never_defaulted():
 
 async def test_job_unknown_and_missing():
     broker, hub = make_broker()
-    session, _ws = add_robot(hub)
+    session, ws = add_robot(hub)
     task = asyncio.create_task(broker.job(OBSERVER, ROBOT, new_uuid()))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "job frame was not sent")
     sent = sent_frame(session.websocket)["data"]["request"]
     await broker.handle_response(session, envelope(),
                                  response(sent["request_id"], "ok", job=None))
@@ -409,10 +418,10 @@ async def test_job_unknown_and_missing():
 
 async def test_stale_revision_is_rejected_from_cache():
     broker, hub = make_broker()
-    session, _ws = add_robot(hub)
+    session, ws = add_robot(hub)
     snap = snapshot(desired_revision=3)
     read = asyncio.create_task(broker.snapshot(OBSERVER, ROBOT))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "snapshot frame was not sent")
     sent = sent_frame(session.websocket)["data"]["request"]
     await broker.handle_response(session, envelope(),
                                  response(sent["request_id"], "ok", snapshot_data=snap))
@@ -426,10 +435,10 @@ async def test_stale_revision_is_rejected_from_cache():
 
 async def test_changed_tuning_session_is_rejected_from_cache():
     broker, hub = make_broker()
-    session, _ws = add_robot(hub)
+    session, ws = add_robot(hub)
     snap = snapshot(desired_revision=3)
     read = asyncio.create_task(broker.snapshot(OBSERVER, ROBOT))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "snapshot frame was not sent")
     sent = sent_frame(session.websocket)["data"]["request"]
     await broker.handle_response(session, envelope(),
                                  response(sent["request_id"], "ok", snapshot_data=snap))
@@ -448,7 +457,7 @@ async def test_forwarded_mutation_is_signed_for_the_exact_robot():
     session, ws = add_robot(hub)
     payload = save_request([change("amcl.alpha1", 0.1)])
     task = asyncio.create_task(broker.request(ADMIN, ROBOT, payload))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 1, "mutation frame was not sent")
     wrapper = sent_frame(ws)["data"]
     assert wrapper["actor"] == {"id": 1, "username": "adm", "role": "administrator"}
     assert wrapper["request"] == payload
@@ -485,7 +494,7 @@ async def test_replayed_mutation_is_refused_within_the_dedupe_ttl():
     rid = new_uuid()
     payload = save_request([change("amcl.alpha1", 0.1)], request_id=rid)
     first = asyncio.create_task(broker.request(ADMIN, ROBOT, payload))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     await broker.handle_response(session, envelope(), response(rid, "ok"))
     await first
     with pytest.raises(TuningConflict):
@@ -500,13 +509,13 @@ async def test_dedupe_memory_prunes_only_after_the_ttl():
     rid = new_uuid()
     payload = save_request([change("amcl.alpha1", 0.1)], request_id=rid)
     first = asyncio.create_task(broker.request(ADMIN, ROBOT, payload))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     await broker.handle_response(session, envelope(), response(rid, "ok"))
     await first
 
     now["t"] += broker.dedupe_ttl_s + 1
     second = asyncio.create_task(broker.request(ADMIN, ROBOT, payload))
-    await asyncio.sleep(0)
+    await until(lambda: len(ws.sent) == 2, "replayed frame was not admitted")
     assert len(ws.sent) == 2  # admitted again; the core is the durable dedup
     await broker.handle_response(session, envelope(), response(rid, "ok"))
     await second
@@ -519,7 +528,7 @@ async def test_reply_on_a_replaced_socket_is_dropped():
     task = asyncio.create_task(
         broker.request(ADMIN, ROBOT, save_request([change("amcl.alpha1", 0.1)],
                                                   request_id=rid)))
-    await asyncio.sleep(0)
+    await until(lambda: rid in broker._pending, "request was not registered")
     # Same session object and generation, but the socket was replaced underneath.
     session.websocket = FakeWebSocket()
     await broker.handle_response(session, envelope(), response(rid, "ok"))
