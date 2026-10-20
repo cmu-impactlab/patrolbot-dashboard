@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "type": "telemetry.motion",
+  "robot_id": "patrolbot-01",
+  "sequence": 18457,
+  "timestamp": "2026-07-17T10:31:16.140Z",
+  "data": {
+    "linear_velocity": 0.18,
+    "angular_velocity": -0.35,
+    "source": "raw_odom",
+    "sample_age_s": 0.04,
+    "receipt_age_s": 0.08,
+    "session_generation": 4,
+    "odom_epoch": "3f2a6c1d-8b47-4e02-9a15-0d6c7b21e5a0",
+    "odom_epoch_generation": 2
+  }
+}

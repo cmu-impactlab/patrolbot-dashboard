@@ -5,10 +5,11 @@ shared/schemas/fixtures/ and are validated by both test suites.
 """
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 DiagLevel = Literal["OK", "WARN", "ERROR", "STALE"]
 ConnectionState = Literal["online", "stale", "offline"]
@@ -18,6 +19,24 @@ RobotStatus = Literal[
 ]
 HealthLevel = Literal["healthy", "warning", "fault", "offline"]
 EventSeverity = Literal["info", "warning", "critical"]
+
+# --- Measured-motion envelope -------------------------------------------------
+# Motion telemetry carries measured values, not commands, so these are generous
+# physical sanity guards (far above the commissioned ±0.30 m/s / ±0.70 rad/s)
+# that only reject corrupt or absurd data — never a real reading.
+MOTION_MAX_ABS_LINEAR_M_S = 5.0
+MOTION_MAX_ABS_ANGULAR_RAD_S = 10.0
+MOTION_MAX_AGE_S = 86_400.0
+MOTION_MAX_GENERATION = 2**31 - 1
+MOTION_MAX_EPOCH_LENGTH = 128
+
+# --- Tuning transport envelope ------------------------------------------------
+# The dashboard-server -> robot `tuning.request` wrapper and the robot's
+# `tuning.response`. The inner canonical tuning request/snapshot stay opaque
+# bounded JSON here; the robot's core service validates their meaning.
+TUNING_REQUEST_MAX_BYTES = 20 * 1024
+TUNING_RESPONSE_MAX_BYTES = 256 * 1024
+TUNING_DETAIL_MAX_LENGTH = 1024
 
 
 # ---- Robot -> server ------------------------------------------------------
@@ -145,6 +164,39 @@ class BaseStateData(MapContext):
     localization_recovery_required: bool = True
     localization_recovery_stage: str = ""
     localization_seed_stamp_ns: int = Field(default=0, ge=0)
+
+
+class MotionData(BaseModel):
+    """Measured drive-base twist from raw ``/odom``, independent of AMCL/map.
+
+    This is the gauge's *measured* speed and deliberately does not ride inside
+    ``telemetry.pose``: that slice is only sent once an active map plus AMCL
+    context exist, which is exactly the unlocalized case manual drive is allowed
+    in. The bridge sends this slice whenever fresh, finite raw odometry exists,
+    so a robot driving without a localization fix still reports what its wheels
+    are doing.
+
+    Every value is finite and strictly bounded. Negative or non-finite ages are
+    invalid (a negative sample age means the stamp is in the future). Generation
+    binds the sample to a drive-base session and odometry epoch: ``None`` of
+    these is ever invented, because a fabricated zero would read as a real stop.
+    A sample the bridge cannot trust is not sent at all; nothing here is a
+    command or a claim of physical motion.
+    """
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+    linear_velocity: float = Field(ge=-MOTION_MAX_ABS_LINEAR_M_S, le=MOTION_MAX_ABS_LINEAR_M_S)
+    angular_velocity: float = Field(ge=-MOTION_MAX_ABS_ANGULAR_RAD_S, le=MOTION_MAX_ABS_ANGULAR_RAD_S)
+    source: Literal["raw_odom"]
+    # Seconds between the odom stamp and the bridge's clock, and between the
+    # bridge receiving the message and forwarding this slice.
+    sample_age_s: float = Field(ge=0.0, le=MOTION_MAX_AGE_S)
+    receipt_age_s: float = Field(ge=0.0, le=MOTION_MAX_AGE_S)
+    # Drive-base session generation the sample is bound to.
+    session_generation: StrictInt = Field(ge=0, le=MOTION_MAX_GENERATION)
+    # Odom-origin epoch (opaque) and its generation. Empty/0 mean the origin
+    # state was not yet known; the UI must not treat that as a valid origin.
+    odom_epoch: str = Field(max_length=MOTION_MAX_EPOCH_LENGTH)
+    odom_epoch_generation: StrictInt = Field(ge=0, le=MOTION_MAX_GENERATION)
 
 
 class DiagnosticItem(BaseModel):
@@ -306,6 +358,77 @@ class HelloAckData(BaseModel):
     want_map: bool
 
 
+# ---- Tuning transport (server <-> robot) ----------------------------------
+# Bounded wrappers around the canonical, robot-owned tuning request/response.
+# The actor is stamped server-side from the verified session; a browser can
+# never assert a role. Reads are permitted any authenticated role, every
+# mutation is administrator-only and enforced on the robot as well.
+
+TuningRole = Literal["administrator", "operator", "observer"]
+TuningOutcome = Literal["ok", "conflict", "refused", "failed", "unknown"]
+
+
+def _require_bounded_json(data: Any, limit: int, what: str) -> None:
+    """Reject non-finite/non-serializable or oversized opaque payloads."""
+    try:
+        encoded = json.dumps(data, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{what} must be finite JSON: {exc}") from exc
+    if len(encoded.encode("utf-8")) > limit:
+        raise ValueError(f"{what} exceeds {limit} bytes")
+
+
+class TuningActorData(BaseModel):
+    """Server-derived identity attached to a tuning request.
+
+    Strict on purpose: the robot trusts this to distinguish an administrator
+    mutation from an ordinary read, so a smuggled string/float/bool must fail
+    here rather than be coerced.
+    """
+    model_config = ConfigDict(extra="forbid", strict=True)
+    id: StrictInt = Field(ge=0, le=MOTION_MAX_GENERATION)
+    username: str = Field(min_length=1, max_length=128)
+    role: TuningRole
+
+
+class TuningRequestData(BaseModel):
+    """``tuning.request``: a canonical tuning request plus the server actor."""
+    model_config = ConfigDict(extra="forbid")
+    request: dict[str, Any]
+    actor: TuningActorData
+    authorization: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def bounded(self):
+        if not self.request:
+            raise ValueError("tuning request payload is required")
+        _require_bounded_json(self.model_dump(mode="json"),
+                              TUNING_REQUEST_MAX_BYTES, "tuning request")
+        return self
+
+
+class TuningResponseData(BaseModel):
+    """``tuning.response``: the robot's bounded answer for one request_id."""
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    outcome: TuningOutcome
+    detail: str = Field(default="", max_length=TUNING_DETAIL_MAX_LENGTH)
+    # Opaque runtime snapshot / job objects; their meaning is the core schema's
+    # and the robot validates it. Here they only have to be bounded finite JSON.
+    snapshot: dict[str, Any] | None = None
+    job: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_response(self):
+        try:
+            UUID(self.request_id)
+        except (ValueError, AttributeError, TypeError):
+            raise ValueError("request_id must be a UUID") from None
+        _require_bounded_json(self.model_dump(mode="json"),
+                              TUNING_RESPONSE_MAX_BYTES, "tuning response")
+        return self
+
+
 # ---- Server -> browser ----------------------------------------------------
 
 class ConnectionData(BaseModel):
@@ -360,6 +483,10 @@ class SnapshotData(BaseModel):
     battery: BatteryData | None = None
     battery_estimate: BatteryEstimate | None = None
     base_state: BaseStateData | None = None
+    # Measured raw-odom twist, served independently of pose/AMCL. Optional:
+    # recordings and snapshots produced before this slice existed simply omit
+    # it, and absence must read as "no measurement", never as zero speed.
+    motion: MotionData | None = None
     diagnostics: DiagnosticsData | None = None
     resources: ResourcesData | None = None
     path: PathData | None = None
@@ -382,6 +509,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "telemetry.path": PathData,
     "telemetry.battery": BatteryData,
     "telemetry.base_state": BaseStateData,
+    "telemetry.motion": MotionData,
     "telemetry.diagnostics": DiagnosticsData,
     "telemetry.resources": ResourcesData,
     "telemetry.map": MapData,
@@ -398,6 +526,10 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "command.ack": CommandAckData,
     "command.progress": CommandProgressData,
     "command.result": CommandResultData,
+    # Bounded tuning transport over the existing authenticated robot socket.
+    # It never travels through the ordinary command broker or teleop lease.
+    "tuning.request": TuningRequestData,
+    "tuning.response": TuningResponseData,
 }
 
 COMMAND_PREFIX = "command."

@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Per-operator command rate limit: at most this many command.request frames
     # accepted per minute (token bucket). Excess is rejected with a clear reason.
     command_rate_per_min: int = 30
+    # Shared only with the robot core, never the browser or ROS graph.
+    # Empty keeps tuning mutations disabled; no development signing secret.
+    tuning_auth_key_file: str = ""
     # Separate from audited discrete commands. No velocity backlog is retained.
     teleop_frames_per_s: int = 30
     teleop_session_ttl_s: float = 20.0

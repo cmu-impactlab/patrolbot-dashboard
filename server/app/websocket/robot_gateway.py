@@ -87,6 +87,15 @@ async def robot_ws(websocket: WebSocket) -> None:
                             session.robot_id, envelope.sequence, last_seq)
                 continue
             last_seq = envelope.sequence
+            if envelope.type == "tuning.response":
+                # Tuning replies are bound to the authenticated session that
+                # sent the request; the broker drops superseded/obsolete ones.
+                broker = getattr(hub, "tuning", None)
+                if broker is not None:
+                    await broker.handle_response(session, envelope, payload)
+                else:
+                    log.warning("ignoring tuning.response: no tuning broker is installed")
+                continue
             if envelope.type.startswith(COMMAND_PREFIX):
                 await hub.handle_robot_command_reply(session, envelope, payload)
                 continue

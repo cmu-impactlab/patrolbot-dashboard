@@ -123,17 +123,32 @@ export interface BaseStateData extends MapContext {
   undock_profile_commissioned?: boolean | null;
 }
 
+/**
+ * Measured raw-`/odom` twist for the speed gauge, independent of AMCL/map.
+ * Every field is finite and bounded. A missing sample (or an absent field in an
+ * old recording) means "no measurement", never a fabricated zero; the session
+ * and epoch generations let the store drop a superseded reading.
+ */
+export interface MotionData {
+  linear_velocity: number;
+  angular_velocity: number;
+  source: "raw_odom";
+  sample_age_s: number;
+  receipt_age_s: number;
+  session_generation: number;
+  odom_epoch: string;
+  odom_epoch_generation: number;
+}
+
 export interface DiagnosticItem {
   name: string;
   level: DiagLevel;
   message: string;
   values?: Record<string, string> | null;
 }
-
 export interface DiagnosticsData {
   items: DiagnosticItem[];
 }
-
 export interface ResourcesData {
   cpu_percent: number;
   memory_percent: number;
@@ -206,6 +221,8 @@ export interface SnapshotData {
   battery?: BatteryData | null;
   battery_estimate?: BatteryEstimate | null;
   base_state?: BaseStateData | null;
+  /** Measured raw-odom twist; absent means no measurement, not zero speed. */
+  motion?: MotionData | null;
   diagnostics?: DiagnosticsData | null;
   resources?: ResourcesData | null;
   path?: PathData | null;
@@ -287,6 +304,7 @@ export type AnyFrame =
   | Envelope<"telemetry.path", PathData>
   | Envelope<"telemetry.battery", BatteryData>
   | Envelope<"telemetry.base_state", BaseStateData>
+  | Envelope<"telemetry.motion", MotionData>
   | Envelope<"telemetry.diagnostics", DiagnosticsData>
   | Envelope<"telemetry.resources", ResourcesData>
   | Envelope<"telemetry.map", MapData>

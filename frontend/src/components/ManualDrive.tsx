@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { manualDriveReason, TELEOP_LIMITS, TELEOP_TICK_MS } from "../lib/teleop";
+import { manualDriveReason, operationalLimits, TELEOP_LIMITS, TELEOP_TICK_MS } from "../lib/teleop";
 import { useTeleopStore } from "../stores/teleopStore";
 import { canCommand, useAuthStore } from "../stores/authStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
@@ -67,7 +67,11 @@ export function ManualDrive() {
   const sendKeys = () => {
     let linear = 0, angular = 0;
     keys.current.forEach(key => { const direction = DIRECTIONS[key]; if (direction) { linear += direction[0]; angular += direction[1]; } });
-    useTeleopStore.getState().input(linear * TELEOP_LIMITS.linear_m_s.max, angular * TELEOP_LIMITS.angular_rad_s.max, keys.current.has(" "));
+    // Digital keys request a direction and ramp from zero; releasing is
+    // immediate zero. Analog deflection stays proportional.
+    const limits = operationalLimits();
+    if (!limits) { useTeleopStore.getState().end("Active speed policy unavailable."); return; }
+    useTeleopStore.getState().input(linear * limits.linear_m_s.max, angular * limits.angular_rad_s.max, keys.current.has(" "), false, true);
   };
   const keyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (editable(event.target) || (event.target !== panel.current && event.target !== event.currentTarget.querySelector(".manual-joystick"))) return;
@@ -92,7 +96,9 @@ export function ManualDrive() {
     const x = Math.max(-1, Math.min(1, (event.clientX - rect.left - rect.width / 2) / (rect.width / 2)));
     const y = Math.max(-1, Math.min(1, (rect.top + rect.height / 2 - event.clientY) / (rect.height / 2)));
     setStick([x, y]);
-    useTeleopStore.getState().input(y * TELEOP_LIMITS.linear_m_s.max, -x * TELEOP_LIMITS.angular_rad_s.max, true);
+    const limits = operationalLimits();
+    if (!limits) { useTeleopStore.getState().end("Active speed policy unavailable."); return; }
+    useTeleopStore.getState().input(y * limits.linear_m_s.max, -x * limits.angular_rad_s.max, true);
   };
 
   return <section ref={panel} className="manual-panel" aria-label="Manual drive keyboard panel" tabIndex={0}

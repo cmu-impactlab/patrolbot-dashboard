@@ -1,0 +1,85 @@
+name: Tuning contract
+
+# The robot-tuning contract is authored once in the robot repository
+# (cmu-impactlab/patrolbot, contracts/robot-tuning.*) and vendored byte-for-byte
+# into this dashboard. Two jobs:
+#
+#   portable  runs the parity tool's unit tests AND the vendored canonical
+#             contract self-tests (schema / registry / validator / fixtures).
+#             Dev-only deps from contracts/requirements-test.txt, no application
+#             dependencies, no robot checkout, no network. Always runs on PR and
+#             push, so a schema or validation regression cannot hide behind a
+#             manual gate.
+#   parity    byte-for-byte comparison against the canonical robot checkout.
+#             Always runs; the robot PR must merge before the paired dashboard
+#             PR can pass. No runtime environment or deployed robot is used.
+#
+# To run the parity gate against a canonical ref that carries the files:
+#   gh workflow run tuning-contract.yml -f core_ref=<sha-or-branch>
+#
+# The parity job checks out the fixed canonical repository below. If
+# cmu-impactlab/patrolbot is private, the default GITHUB_TOKEN is scoped to this
+# repository only and cannot read it. This workflow does not reference a
+# cross-repo read token (repository secrets were not inventoried): a
+# maintainer must either make the canonical repo readable to Actions or
+# provision a read token / checkout configuration as a separate, reviewed
+# change. Until that exists, run the parity gate locally:
+#   PATROLBOT_CORE_REPO=/path/to/patrolbot make test-tuning-contract-parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: "patrolbot (robot) ref that carries contracts/robot-tuning.*"
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.11", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Dev-only contract test deps (pytest / jsonschema / PyYAML).
+      - run: pip install -r contracts/requirements-test.txt
+      # The parity tool's unit tests plus the vendored canonical contract
+      # self-tests. Both must pass; neither is gated behind workflow_dispatch.
+      - run: python -m pytest scripts/tests contracts/test_robot_tuning.py -q
+
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Fixed canonical repository, no user-controlled repository input. A
+      # private canonical repo needs a read token; see the header note.
+      - uses: actions/checkout@v4
+        with:
+          repository: cmu-impactlab/patrolbot
+          ref: ${{ inputs.core_ref || 'main' }}
+          path: core
+      - name: Byte-for-byte parity of the vendored contract
+        run: python scripts/check_tuning_contract.py --core-repo "$GITHUB_WORKSPACE/core"
+      # Run the canonical copy's own tests from the checked-out ref. A missing
+      # test_robot_tuning.py fails pytest here, so no shell ref interpolation is
+      # needed (and the ref is never echoed into a command line).
+      - name: Canonical contract self-tests
+        working-directory: core/contracts
+        run: |
+          pip install -r requirements-test.txt
+          python -m pytest -q test_robot_tuning.py

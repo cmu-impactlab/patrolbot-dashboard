@@ -47,6 +47,18 @@ try:
 except ImportError:  # allows running against the simulator without the iface pkg
     BaseState = None
 
+# The bridge advertises this only when the tuning adapter is actually able to
+# inspect the live graph. Mutations (`robot_tuning_v1`) stay unadvertised.
+TUNING_READ_CAPABILITY = "robot_tuning_read_v1"
+
+try:
+    from .tuning import RosTuning
+except ImportError:
+    # The tuning adapter is another slice's; a tree without it must still start
+    # and stream telemetry. Bugs *inside* an installed adapter are not swallowed
+    # here — only its absence is.
+    RosTuning = None
+
 
 
 class WebBridgeNode(Node):
@@ -68,6 +80,12 @@ class WebBridgeNode(Node):
             ("pose_interval", 0.1),
             ("scan_interval", 0.2),
             ("path_interval", 0.5),
+            ("motion_interval", 0.1),
+            # Display staleness bound for the measured raw-odom twist. Generous
+            # versus the ~10–50 Hz odom stream: it drops a reading that stopped
+            # updating rather than re-sending an old one, and never invents a
+            # zero. The server applies its own, much looser, sanity bound.
+            ("motion_max_age_s", 1.0),
             ("slow_interval", 1.0),
             ("scan_max_points", 360),
             ("path_max_points", 200),
@@ -152,6 +170,7 @@ class WebBridgeNode(Node):
         self._teleop_origin = None
         self._teleop_map_context = None
         self._teleop: RosTeleop | None = None
+        self._tuning = None
         self._latest_base_state: dict | None = None
         self._latest_base_state_at = 0.0
         self._latest_base_state_mono = None
@@ -168,12 +187,18 @@ class WebBridgeNode(Node):
                            on_map_wanted=self._resend_map,
                            on_command=self._enqueue_command,
                            on_teleop=self._enqueue_teleop,
-                           on_disconnect=self._teleop_disconnected)
+                           on_tuning=self._enqueue_tuning,
+                           on_disconnect=self._transport_disconnected)
 
         self._system_reset = None
         self._commands: CommandExecutor | None = None
         self._announced_capabilities: list[str] | None = None
         self._last_dock_pose_attempt = 0.0
+        if RosTuning is not None:
+            try:
+                self._tuning = RosTuning(self, self.ws)
+            except (OSError, ValueError, ImportError) as error:
+                self.get_logger().error(f"Robot tuning is unavailable: {error}")
         if os.environ.get("WEB_BRIDGE_ENABLE_COMMANDS", "0") == "1":
             self._commands = CommandExecutor(self, self.ws, undock_config={
                 "dock_id": get["undock_dock_id"],
@@ -185,17 +210,22 @@ class WebBridgeNode(Node):
                 self._teleop = RosTeleop(self, self.ws,
                     state=lambda: (self._latest_base_state, self._latest_base_state_mono,
                                    self._latest_odom, self._latest_odom_mono),
-                    context=self._teleop_context)
+                    context=self._teleop_context,
+                    policy=lambda: self._tuning.teleop_policy() if self._tuning else None,
+                    policy_required=lambda: bool(self._tuning and self._tuning.policy_required))
             except (OSError, ValueError, ImportError) as error:
                 self.get_logger().error(f"Web manual drive is unavailable: {error}")
             reset_socket = os.environ.get("PATROLBOT_RESET_SOCKET", "")
             if reset_socket:
                 self._system_reset = SystemResetClient(reset_socket, self.ws)
                 self._system_reset.start()
-            # Re-advertise as dock-manager servers come and go: capabilities
-            # are what the dashboard gates its controls on, and the manager may
-            # start after this node does.
-            self.create_timer(2.0, self._refresh_capabilities)
+        # The tuning adapter is independent of command enablement: a read-only
+        # inspection RPC must be reachable on a bridge that publishes no motion.
+        # Re-advertise as dock-manager servers come and go: capabilities are what
+        # the dashboard gates its controls on, and the manager may start after
+        # this node does. Always scheduled, so a read-only tuning capability is
+        # announced even when WEB_BRIDGE_ENABLE_COMMANDS is off.
+        self.create_timer(2.0, self._refresh_capabilities)
         self.create_timer(0.025, self._drain_commands)
 
         self._last_path_points: list | None = None
@@ -210,6 +240,7 @@ class WebBridgeNode(Node):
         self._pose_throttle = Throttle(float(get["pose_interval"]))
         self._scan_throttle = Throttle(float(get["scan_interval"]))
         self._path_throttle = Throttle(float(get["path_interval"]))
+        self._motion_throttle = Throttle(float(get["motion_interval"]))
 
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -247,6 +278,7 @@ class WebBridgeNode(Node):
         self._latest_odom_mono = time.monotonic()
         self._latest_odom_at = self.get_clock().now().nanoseconds / 1e9
         self._maybe_send_pose()
+        self._maybe_send_motion()
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
         self._latest_amcl = msg
@@ -272,6 +304,47 @@ class WebBridgeNode(Node):
             payload.update(self._map_context())
             payload["localized"] = self._localization_is_usable()
             self.ws.send("telemetry.pose", payload)
+
+    def _maybe_send_motion(self) -> None:
+        """Send the measured raw-odom twist, independent of AMCL/map.
+
+        Only the twist is read: this is a measurement, not a command. The sample
+        is bound to the drive-base session/epoch captured from base state, so a
+        browser can drop a superseded generation. When there is no trusted
+        origin, no fresh finite odom, or the reading is stale or from the future
+        the frame is skipped — never replaced with a zero, which would read as a
+        real stop.
+        """
+        if not self._motion_throttle.ready():
+            return
+        origin = self._teleop_origin
+        if origin is None:
+            return
+        session_generation, odom_epoch, odom_epoch_generation, _valid = origin
+        if _valid is not True or self._latest_base_state_mono is None or not 0 <= time.monotonic() - self._latest_base_state_mono <= .5:
+            return
+        message = self._latest_odom
+        if message is None or self._latest_odom_mono is None:
+            return
+        try:
+            stamp = message.header.stamp
+            stamp_ns = int(stamp.sec) * 10 ** 9 + int(stamp.nanosec)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return
+        receipt_age = time.monotonic() - self._latest_odom_mono
+        sample_age = (self.get_clock().now().nanoseconds - stamp_ns) / 1e9
+        if not 0 <= sample_age <= float(self.cfg["motion_max_age_s"]):
+            return
+        payload = normalizers.normalize_motion(
+            message.twist.twist,
+            session_generation=session_generation,
+            odom_epoch=odom_epoch,
+            odom_epoch_generation=odom_epoch_generation,
+            sample_age_s=sample_age,
+            receipt_age_s=receipt_age,
+        )
+        if payload is not None:
+            self.ws.send("telemetry.motion", payload)
 
     def _map_context(self):
         base = self._latest_base_state or {}
@@ -319,10 +392,14 @@ class WebBridgeNode(Node):
         self.ws.send("telemetry.diagnostics", normalizers.normalize_diagnostics(msg))
 
     def _on_base_state(self, msg) -> None:
+        previous_origin = self._teleop_origin
         self._teleop_origin = (getattr(msg, 'session_generation', None),
                               getattr(msg, 'odom_epoch', None),
                               getattr(msg, 'odom_epoch_generation', None),
-                              getattr(msg, 'odom_epoch_valid', False))
+                               getattr(msg, 'odom_epoch_valid', False))
+        if previous_origin != self._teleop_origin:
+            self._latest_odom = None
+            self._latest_odom_mono = None
         payload = normalizers.normalize_base_state(msg)
         payload["raw_odom_age_s"] = self._raw_odom_age()
         payload.update(map_id=getattr(msg, 'map_id', '') or None,
@@ -570,29 +647,52 @@ class WebBridgeNode(Node):
             self._teleop_release_frame = None
             self._teleop_transport_invalidated = True
 
+    def _transport_disconnected(self) -> None:
+        """One transport loss invalidates manual input and all tuning replies.
+
+        The WsClient calls this on the WS thread, so both handlers must be
+        thread-safe and free of ROS calls; tuning responses bound to the dead
+        socket can never arrive, so the adapter marks them unknown.
+        """
+        self._teleop_disconnected()
+        if self._tuning is not None:
+            self._tuning.disconnected()
+
+    def _enqueue_tuning(self, data) -> None:
+        # WS-thread callback: the adapter owns its thread-safe queue and makes
+        # no ROS calls here. Kept separate from the command FIFO so a read-only
+        # tuning frame never touches the command broker or teleop lease. The
+        # adapter schedules its own ROS timer for dispatch.
+        if self._tuning is not None and isinstance(data, dict):
+            self._tuning.enqueue(data)
+
     def _refresh_capabilities(self) -> None:
-        """Tell the dashboard which dock operations are actually available.
+        """Tell the dashboard which operations are actually available.
 
         Advertising is the commissioning switch: the dashboard greys out any
         control whose capability the robot has not claimed, so nothing is
-        offered until the dock manager is genuinely up and answering.
+        offered until the backing service is genuinely up and answering.
+        Runs whether or not commands are enabled, because the read-only tuning
+        inspection RPC is independent of motion.
         """
-        if self._commands is None:
-            return
-        # Detect silent Undock actions without retiring their motion owner.
-        self._commands.check_undock_health()
-        available = self._commands.available_capabilities()
-        if self._teleop is not None:
-            available.append(TELEOP_CAPABILITY)
-        if self._system_reset is not None and self._system_reset.available:
-            available.append("software_reset")
+        available: list[str] = []
+        if self._commands is not None:
+            # Detect silent Undock actions without retiring their motion owner.
+            self._commands.check_undock_health()
+            available = self._commands.available_capabilities()
+            if self._teleop is not None:
+                available.append(TELEOP_CAPABILITY)
+            if self._system_reset is not None and self._system_reset.available:
+                available.append("software_reset")
+        if self._tuning is not None:
+            available.extend(self._tuning.capabilities())
         # Log through the ROS logger, not the stdlib one: nothing configures a
         # stdlib handler in the container, so log.info there goes nowhere and
         # this transition is exactly what an operator needs to see.
         if available != self._announced_capabilities:
             self._announced_capabilities = available
             self.get_logger().info(
-                f"dock capabilities: {', '.join(available) if available else 'none available'}")
+                f"capabilities: {', '.join(available) if available else 'none available'}")
         self.ws.set_dock_capabilities(available)
 
     def _slow_tick(self) -> None:
@@ -615,6 +715,8 @@ def main() -> None:
             node._teleop.shutdown()
         if node._system_reset is not None:
             node._system_reset.stop()
+        if node._tuning is not None:
+            node._tuning.disconnected()
         node.ws.stop()
         node.destroy_node()
         if rclpy.ok():

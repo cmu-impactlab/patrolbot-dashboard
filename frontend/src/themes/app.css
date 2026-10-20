@@ -1276,3 +1276,86 @@ input:not([type=checkbox]), select { min-height: 44px; }
 .manual-joystick[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 .manual-stick { position: absolute; left: 59px; top: 59px; width: 38px; height: 38px; border-radius: 50%; background: var(--accent); border: 2px solid currentColor; pointer-events: none; }
 .manual-forward { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font-size: 12px; pointer-events: none; }
+
+/* ---------- Robot tuning panel ---------- */
+.tuning-panel { border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 12px; }
+.tuning-panel h2 { margin: 0; }
+.tuning-panel h3 { margin: 0 0 4px; }
+.tuning-readonly-banner, .tuning-writable-banner { margin: 0; padding: 10px 12px; border-radius: 8px; }
+.tuning-readonly-banner { background: var(--muted-bg); color: var(--text-secondary); }
+.tuning-writable-banner { background: var(--info-bg); color: var(--info); }
+
+.speed-gauges { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.gauge { flex: 1 1 190px; min-width: 170px; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.gauge-title { font-weight: 600; margin-bottom: 4px; }
+.gauge-dial { display: block; width: 100%; height: auto; }
+.gauge-track { fill: none; stroke: var(--border); stroke-width: 10; stroke-linecap: round; }
+.gauge-value { fill: none; stroke-width: 10; stroke-linecap: round; transition: stroke 160ms ease; }
+.gauge-ok .gauge-value { stroke: var(--ok); }
+.gauge-warn .gauge-value { stroke: var(--warn); }
+.gauge-danger .gauge-value { stroke: var(--danger); }
+.gauge-needle line { stroke: var(--text); stroke-width: 3; stroke-linecap: round; transition: transform 160ms ease; }
+.gauge-hub { fill: var(--text); }
+.gauge-readout { display: flex; flex-direction: column; gap: 2px; }
+.gauge-value-text { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.gauge-unit, .gauge-cap, .gauge-direction, .gauge-percent { color: var(--text-secondary); font-size: 12px; }
+.gauge-ok .gauge-value-text { color: var(--ok); }
+.gauge-warn .gauge-value-text { color: var(--warn); }
+.gauge-danger .gauge-value-text { color: var(--danger); }
+.gauge-stale .gauge-value-text.gauge-none, .gauge-none { color: var(--muted); font-size: 15px; }
+.gauge-over { color: var(--danger); font-weight: 700; }
+.speed-gauges-note { flex-basis: 100%; margin: 0; color: var(--text-faint); font-size: 12px; }
+
+.tuning-ceilings { display: flex; flex-direction: column; gap: 8px; }
+.tuning-group { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; }
+.tuning-group > summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.tuning-group-count { color: var(--text-faint); font-weight: 400; font-size: 12px; }
+.field-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.tuning-group .field-row:first-of-type { border-top: 0; }
+.field-conflict { background: color-mix(in srgb, var(--warn-bg) 60%, transparent); }
+.field-label { font-weight: 600; display: block; }
+.field-key { margin: 2px 0; color: var(--text-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
+.field-help { margin: 2px 0 6px; color: var(--text-secondary); font-size: 12px; }
+.field-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.field-number { width: 110px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.field-slider { flex: 1 1 160px; min-width: 120px; }
+.field-unit, .field-readonly-value { color: var(--text-secondary); font-size: 13px; }
+.field-disabled-reason { margin: 6px 0 0; color: var(--text-faint); font-size: 12px; }
+.field-status { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.field-unknown { color: var(--warn); }
+.field-pending { color: var(--warn); font-weight: 600; }
+.field-phase.phase-saving { color: var(--info); }
+.field-phase.phase-saved { color: var(--ok); }
+.field-phase.phase-saved_pending { color: var(--warn); }
+.field-phase.phase-conflict, .field-phase.phase-failed { color: var(--danger); font-weight: 600; }
+.field-phase.phase-unknown { color: var(--warn); font-weight: 600; }
+.field-detail { flex-basis: 100%; color: var(--danger); }
+.badge { padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge-live { background: var(--info-bg); color: var(--info); }
+.badge-redeploy { background: var(--warn-bg); color: var(--warn); }
+.badge-read-only { background: var(--muted-bg); color: var(--muted); }
+
+.tuning-live-apply { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); }
+.tuning-sticky { position: sticky; bottom: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: var(--shadow); }
+.tuning-sticky .btn.is-active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--cmu-red) 35%, transparent); }
+.tuning-sticky-detail { color: var(--text-secondary); font-size: 12px; }
+
+.tuning-dialog-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgb(10 12 16 / 0.5); }
+.tuning-dialog { max-width: 520px; max-height: 85vh; overflow: auto; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); }
+.tuning-dialog h3 { margin-top: 0; }
+.tuning-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.tuning-diff { margin: 8px 0; padding-left: 18px; }
+.tuning-op { color: var(--text-secondary); }
+.tuning-op.detail-unknown, .tuning-op.detail-conflict { color: var(--warn); }
+.tuning-op.detail-failed { color: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .gauge-value, .gauge-needle line { transition: none; }
+}
+
+@media (max-width: 767px) {
+  .tuning-sticky { position: static; justify-content: stretch; }
+  .tuning-sticky .btn { flex: 1 1 auto; }
+  .gauge { flex-basis: 100%; }
+}

@@ -29,13 +29,16 @@ function key(key: string, repeat = false, target = panel()) { fireEvent.keyDown(
 function keyboardStart() { arm(); key("w"); key(" "); }
 function tick(ms = 80) { act(() => vi.advanceTimersByTime(ms)); }
 function healthy() { useTelemetryStore.setState({ baseState: { ...base }, baseStateAt: performance.now() }); }
+/** Advance the ramp while refreshing the raw-state receipt, which otherwise goes stale after 0.5 s. */
+function hold(ms: number) { for (let i = 0; i < Math.ceil(ms / 80); i++) { act(() => healthy()); tick(80); } }
 
 describe("manual drive isolated software input", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("PointerEvent", MouseEvent);
     useTeleopStore.getState().end();
-    useTeleopStore.setState({ phase: "idle", externalBusy: false, session: null, detail: null, deadman: false, linear: 0, angular: 0 });
+    useTeleopStore.setState({ phase: "idle", externalBusy: false, session: null, detail: null, deadman: false, linear: 0, angular: 0,
+      targetLinear: 0, targetAngular: 0, ramp: false });
     useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null,
       stoppedGoal: null, pickMode: "none", allowUnlocalized: false });
     useAuthStore.setState({ user: { id: 1, username: "operator", display_name: "Operator", role: "operator", auth_mode: "local" } });
@@ -51,25 +54,62 @@ describe("manual drive isolated software input", () => {
     expect(frames).toEqual([]);
     expect(screen.getByText("Not armed")).toBeTruthy();
   });
-  it("waits for robot acceptance, then samples bounded keyboard input with the exact start ID", () => {
+  it("waits for robot acceptance, then ramps bounded keyboard input with the exact start ID", () => {
     render(<ManualDrive />); keyboardStart(); tick(160);
     expect(requests("teleop_start")).toHaveLength(1);
     expect(velocity()).toEqual([]);
     ack(); key("a"); tick(160);
-    expect(velocity()).toHaveLength(2);
-    expect(velocity()[0]).toMatchObject({ command_id: requests("teleop_start")[0].data.command_id, seq: 0, linear: .3, angular: .7, deadman: true });
-    expect(velocity()[1].seq).toBe(1);
+    const frames = velocity();
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({ command_id: requests("teleop_start")[0].data.command_id, seq: 0, deadman: true });
+    // Digital input ramps from zero: the first frames are small and growing.
+    expect(frames[0].linear).toBeGreaterThan(0);
+    expect(frames[0].linear).toBeLessThan(.3);
+    expect(frames[0].angular).toBeGreaterThan(0);
+    expect(frames[1].seq).toBe(1);
+    expect(frames[1].linear).toBeGreaterThan(frames[0].linear);
+    expect(frames[1].angular).toBeGreaterThan(frames[0].angular);
+    // Over time it reaches, but never exceeds, the fixed wire cap.
+    hold(2000);
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.3, 5);
+    expect(velocity().at(-1)!.angular).toBeCloseTo(.7, 5);
+    expect(velocity().every(frame => frame.linear <= .3 + 1e-9 && frame.angular <= .7 + 1e-9)).toBe(true);
   });
   it("permits healthy raw hardware with no AMCL, seed, map or pose confirmation", () => {
     render(<ManualDrive />); keyboardStart(); ack(); tick();
-    expect(velocity()[0].linear).toBe(.3);
+    expect(velocity()[0].linear).toBeGreaterThan(0);
+    expect(velocity()[0].linear).toBeLessThanOrEqual(.3);
+    hold(2000);
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.3, 5);
   });
   it("waits through a one-second robot quiescence handshake without positive output", () => {
     render(<ManualDrive />); keyboardStart();
     for (let i = 0; i < 10; i++) { act(() => healthy()); tick(100); }
     expect(velocity()).toHaveLength(0);
     expect(useTeleopStore.getState().phase).toBe("pending");
-    ack(); tick(); expect(velocity()[0].linear).toBe(.3);
+    ack(); tick(); expect(velocity()[0].linear).toBeGreaterThan(0);
+  });
+  it("ramps digital input from zero and reverses through zero without exceeding the cap", () => {
+    render(<ManualDrive />); keyboardStart(); ack();
+    hold(1600);
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.3, 5);
+    fireEvent.keyUp(panel(), { key: "w" }); key("s");
+    hold(2400);
+    const values = velocity().map(frame => frame.linear);
+    expect(values.some(value => value === 0)).toBe(true); // reversals pass through zero
+    expect(values.at(-1)).toBeCloseTo(-.3, 5);
+    expect(values.every(value => Math.abs(value) <= .3 + 1e-9)).toBe(true);
+  });
+  it("keeps a small analog deflection proportional and never ramps it to the cap", () => {
+    render(<ManualDrive />); arm();
+    const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
+    vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
+    fireEvent.pointerDown(stick, { button: 0, clientX: 80, clientY: 40 }); // half deflection => 0.15 m/s
+    ack(); hold(2000);
+    const frames = velocity();
+    expect(frames[0].linear).toBeCloseTo(.15, 5);
+    expect(frames.at(-1)!.linear).toBeCloseTo(.15, 5);
+    expect(frames.every(frame => frame.linear <= .15 + 1e-9)).toBe(true);
   });
   it("sends latest pointer position only, then immediate strict zero and exactly one stop on release", () => {
     render(<ManualDrive />); arm();

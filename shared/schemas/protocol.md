@@ -36,6 +36,7 @@ and vitest; edit fixtures together with both definitions.
 | `telemetry.path` | on change / 2 Hz | `frame_id`, `points[[x,y],…]`, `goal?{x,y,yaw}` |
 | `telemetry.battery` | 1 Hz | `voltage`, `current?`, `percentage?`, `charging` |
 | `telemetry.base_state` | 10 Hz | drive-base state plus the SBC dock observer (`dock_state`, validity, active phase, rear-clearance and commissioning fields); valid `CLEAR_CONFIRMED` is authoritative over a stale raw charge level |
+| `telemetry.motion` | ≤10 Hz (throttled) | measured raw-`/odom` twist `linear_velocity`, `angular_velocity`, `source` (`"raw_odom"`), `sample_age_s`, `receipt_age_s`, `session_generation`, `odom_epoch`, `odom_epoch_generation` |
 | `telemetry.diagnostics` | 1 Hz | `items[{name, level, message, values?}]`, level ∈ OK/WARN/ERROR/STALE |
 | `telemetry.resources` | 1 Hz | `cpu_percent`, `memory_percent`, `cpu_temp_c?`, `disk_percent`, `wifi_signal_dbm?` |
 | `telemetry.map` | on server request + on change | `map_version`, `name`, `resolution`, `width`, `height`, `origin{x,y,yaw}`, `rle[[value,count],…]` |
@@ -63,6 +64,22 @@ is invalid/degenerate, the refresh age is unknown/invalid/stale, or receipt age
 exceeds the existing 15-second display policy. Dock Manager's separate 0.5-second
 freshness policy and the authoritative `localized` verdict are unchanged.
 
+`telemetry.motion` is the **measured** drive-base twist from raw `/odom`,
+deliberately independent of AMCL, the active map and `telemetry.pose`. It is the
+speed gauge's source; a robot driving without a localization fix still reports
+what its wheels are doing, and `/cmd_vel` (a commanded value) is never a
+substitute. Every value is finite and bounded: `linear_velocity` is m/s,
+`angular_velocity` rad/s, the ages are seconds since the odom stamp and since the
+bridge received the message, and `source` is `"raw_odom"`. `session_generation`
+binds the sample to the drive-base session and `odom_epoch`/`odom_epoch_generation`
+to the odometry origin epoch; a sample whose generation does not match the live
+base state is dropped, never merged. A reading the bridge cannot trust is not
+sent at all — a missing `motion` (or an omitted field in an old recording) means
+"no measurement", never a fabricated zero. Browsers age the value by the odom
+sample age, the bridge receipt age, envelope transport age and their own local
+elapsed time, and clear it on a snapshot whose session/epoch generation is older
+than the live one.
+
 ## Server → Browser  (`/ws/ui`)
 
 All robot telemetry types are re-broadcast unchanged, plus:
@@ -78,6 +95,12 @@ All robot telemetry types are re-broadcast unchanged, plus:
 
 Connection staleness (server-side, from heartbeat age): `<3 s` online,
 `3–10 s` stale, `>10 s` (or socket closed) offline.
+
+`server.snapshot` carries the same optional `motion` payload as
+`telemetry.motion` together with `slice_ages_s` (per-slice server receipt ages,
+including `"motion"`). A browser times a snapshot's motion from that receipt age,
+not from the moment the snapshot arrived; an omitted `motion` is "no
+measurement", never zero.
 
 ## Commands (Phase 3)
 
@@ -317,3 +340,53 @@ Neither motor command sends a velocity or goal, or establishes localization.
 Service results retain request correlation; disable success also requires a
 motors-disabled readback. These repairs were recovered from the saved deployment
 source and web-bridge image, not inferred from mock behavior.
+
+## Guarded robot tuning
+
+Browser tuning uses the authenticated HTTP tuning API, not a browser-origin
+`tuning.request` socket frame. Read/status requires an authenticated user;
+save/apply/redeploy/restore requires a currently verified administrator. The
+server rejects browser actor/role/authorization fields and stamps identity itself.
+
+| type | direction | data |
+| --- | --- | --- |
+| `tuning.request` | server → robot web bridge | `request` (canonical versioned request), `actor` (verified server identity), `authorization` (required on mutations) |
+| `tuning.response` | robot web bridge → server | `request_id`, `outcome` ∈ `ok/conflict/refused/failed/unknown`, `detail`, optional `snapshot` and durable `job` |
+
+The canonical request's logical IDs, types, revisions, dependencies and finite
+bounds come from `contracts/robot-tuning.*`. Values start from the robot's current
+YAML; a source catalog or initial YAML value is not saved state or live readback.
+Saved desired, committed startup and verified running values remain distinct.
+
+Mutation `authorization` has exact fields `version: 1`, `robot_id`,
+`issued_at_ms`, `expires_at_ms` and `signature` (lowercase SHA-256 HMAC hex).
+The signature covers the canonical request, server-derived actor and claims
+without the signature field, using the domain and canonicalization pinned in
+`contracts/robot-tuning-auth.json`. Lifetime is at most 30 seconds with at most
+5 seconds future skew. The private key exists only at server/core, never in the
+browser, web bridge, ROS payload or audit records. The core verifies it before
+dispatch; a forged administrator actor alone never permits a mutation.
+
+Capability gates are separate:
+
+- `robot_tuning_read_v1`: core inspection is reachable.
+- `robot_tuning_write_v1`: initialized store and configured signed-save path.
+- `robot_tuning_v1`: explicitly enabled fixed-scope runtime activation support.
+- `robot_tuning_policy_v1`: fresh session-bound effective policy is required for
+  web input; it must never silently fall back to a higher legacy ceiling.
+
+Save writes a durable desired revision only. Apply/redeploy reloads only fixed
+consumer scopes under the existing mutation owner, verifies exact readback, then
+commits matching startup artifacts. Unsettled jobs and ambiguous persistence/RPC
+outcomes remain `unknown`, hold motion as appropriate, and are queried by the
+same durable ID—not blindly replayed. Revision/session checks and durable
+idempotency remain mandatory even with a valid signature.
+
+Runtime admission topics, services, fixed consumers and no-rearm behavior are
+pinned in `contracts/robot-tuning-runtime.json`. Neither settings mount, save,
+reload nor restore publishes a pose, goal, motor-enable or motion request.
+Navigation after reload needs a new explicit operator seed and matching global
+costmap acknowledgment; F710 needs release/new press and web needs a new session.
+
+These are source/unit contracts. Native/deployment/browser/physical acceptance
+remains deferred during the operator-directed unit-only implementation stage.

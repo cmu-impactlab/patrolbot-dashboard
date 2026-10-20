@@ -74,7 +74,9 @@ check_server_tests_against_constraints() {
     if docker run --rm -v "$REPO:/repo:ro" "$IMAGE" bash -c '
         set -euo pipefail
         mkdir -p /tmp/repo
-        cp -r /repo/server /repo/shared /repo/infrastructure /tmp/repo/
+        # The tuning catalog is runtime data, not a test fixture; the server
+        # suite must see it at the same checkout-relative path production uses.
+        cp -r /repo/server /repo/shared /repo/infrastructure /repo/contracts /tmp/repo/
         rm -rf /tmp/repo/server/.venv /tmp/repo/server/*.egg-info
         pip install --quiet --no-cache-dir --root-user-action=ignore \
             -c /tmp/repo/server/constraints.txt "/tmp/repo/server[dev]" >/dev/null
