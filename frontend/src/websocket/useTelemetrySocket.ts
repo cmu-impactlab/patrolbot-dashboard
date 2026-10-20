@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { useTuningStore } from "../stores/tuningStore";
 import { useTeleopStore } from "../stores/teleopStore";
 import { DashboardSocket, telemetryUrl } from "./client";
 import { startTeleopTabSync } from "./teleopTabSync";
@@ -49,6 +50,7 @@ export function useTelemetrySocket(): void {
         useCommandStore.getState().resetOverrides();
       },
       onClose: () => {
+        useTuningStore.getState().connectionLost();
         useTeleopStore.getState().end("Connection lost — manual input ended.");
         useCommandStore.getState().connectionLost();
         useCommandStore.getState().setPickMode("none");

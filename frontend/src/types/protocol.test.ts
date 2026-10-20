@@ -26,7 +26,7 @@ const KNOWN_TYPES = new Set([
   "state.capabilities", "event.append",
   "telemetry.heartbeat", "telemetry.pose", "telemetry.lidar", "telemetry.path",
   "telemetry.battery", "telemetry.base_state", "telemetry.diagnostics",
-  "telemetry.resources", "telemetry.map",
+  "telemetry.resources", "telemetry.map", "telemetry.motion",
   "command.request", "command.ack", "command.progress", "command.result",
   "teleop.velocity",
 ]);

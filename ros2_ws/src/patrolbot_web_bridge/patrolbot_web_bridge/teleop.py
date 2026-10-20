@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import Callable
+from typing import Callable, Mapping, NamedTuple
 from uuid import UUID
 
 
@@ -22,6 +22,133 @@ ACTION_NAMES = (
     "patrolbot/undock", "patrolbot/hardware_undock", "patrolbot/undock_turn",
     "patrolbot/localize_on_map",
 )
+
+# --- Dynamic tuning policy ----------------------------------------------------
+# A robot that advertises a tuning capability must supply a fresh, session-bound
+# runtime policy. The bridge is the last software boundary before the robot, so
+# it re-derives the same checks locally instead of trusting the server, the
+# browser or any ambient source. These are fixed local constants, not knobs.
+TUNING_POLICY_CAPABILITY = "robot_tuning_policy_v1"
+# Documented fixed freshness upper bound; no setting or transported field widens
+# how old a trusted policy may be before manual input is refused.
+POLICY_MAX_AGE_S = 5.0
+POLICY_FUTURE_TOLERANCE_S = 0.5
+MAX_POLICY_GENERATION_LENGTH = 128
+# Canonical ASCII only. `str.isalnum()` accepts Unicode letters/digits, which
+# would let a non-canonical generation slip past the digest/UUID check.
+_GENERATION_ALNUM = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
+_GENERATION_EXTRA = frozenset("-_.:")
+_GENERATION_ALLOWED = _GENERATION_ALNUM | _GENERATION_EXTRA
+
+
+class RuntimePolicy(NamedTuple):
+    """One resolved manual-drive policy: effective caps plus its generation."""
+
+    max_linear: float
+    max_angular: float
+    generation: str | None
+    dynamic: bool
+
+    @property
+    def signature(self) -> tuple:
+        # Generation is the primary key; the caps travel with it so a provider
+        # bug that mutates a cap without rotating the generation is still caught.
+        return (self.dynamic, self.max_linear, self.max_angular, self.generation)
+
+    def over(self, linear: float, angular: float) -> bool:
+        return (abs(linear) > self.max_linear + 1e-9
+                or abs(angular) > self.max_angular + 1e-9)
+
+
+def _finite_number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        # A huge Python int is an `int` but overflows a float; refuse, don't raise.
+        value = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _valid_generation(value) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_POLICY_GENERATION_LENGTH:
+        return False
+    if "/" in value or "\\" in value or ".." in value:
+        return False
+    if not any(character in _GENERATION_ALNUM for character in value):
+        return False
+    return all(character in _GENERATION_ALLOWED for character in value)
+
+
+def _policy_field(raw, name):
+    if isinstance(raw, Mapping):
+        return raw.get(name) if name in raw else None
+    return getattr(raw, name, None)
+
+
+def parse_runtime_policy(raw, *, now: float, hard_linear: float,
+                         hard_angular: float) -> tuple[RuntimePolicy | None, str | None]:
+    """Validate one trusted runtime policy value.
+
+    Accepts a mapping or an object with ``max_linear_m_s``, ``max_angular_rad_s``,
+    ``generation`` and ``received_mono`` (and optional ``robot_generation``).
+    Returns ``(policy, None)`` or ``(None, reason)``. A cap above the fixed hard
+    envelope, a non-finite/negative cap, a non-canonical generation or a stale
+    receipt is refused; presence is never permission to move.
+    """
+    if raw is None:
+        return None, "The dynamic speed policy is missing."
+
+    linear = _finite_number(_policy_field(raw, "max_linear_m_s"))
+    if linear is None:
+        return None, "The dynamic speed policy linear cap is not a finite number."
+    if linear < 0.0 or linear > hard_linear:
+        return None, "The dynamic speed policy linear cap is outside the commissioned envelope."
+    angular = _finite_number(_policy_field(raw, "max_angular_rad_s"))
+    if angular is None:
+        return None, "The dynamic speed policy angular cap is not a finite number."
+    if angular < 0.0 or angular > hard_angular:
+        return None, "The dynamic speed policy angular cap is outside the commissioned envelope."
+    generation = _policy_field(raw, "generation")
+    if not _valid_generation(generation):
+        return None, "The dynamic speed policy configuration generation is missing or not canonical."
+    received = _finite_number(_policy_field(raw, "received_mono"))
+    if received is None:
+        return None, "The dynamic speed policy receipt time is missing or invalid."
+    if received > now + POLICY_FUTURE_TOLERANCE_S:
+        return None, "The dynamic speed policy receipt time is in the future."
+    if now - received > POLICY_MAX_AGE_S:
+        return None, "The dynamic speed policy is stale; manual input is refused."
+    bound = _policy_field(raw, "robot_generation")
+    if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int) or bound < 0):
+        return None, "The dynamic speed policy session binding is invalid."
+    return RuntimePolicy(linear, angular, generation, True), None
+
+
+
+def policy_source(node, policy: Callable | None = None,
+                  policy_required: bool | None = None) -> tuple[Callable | None, bool]:
+    """Resolve the trusted policy callable and whether one is required.
+
+    An explicit argument always wins. Otherwise the trusted robot adapter is
+    read from ``node._tuning`` (``teleop_policy()`` plus its ``policy_required``
+    property), which the parent wires to the real adapter. Nothing here is ever
+    read from a browser frame, a query string or a filename.
+    """
+    if policy is None or policy_required is None:
+        tuning = getattr(node, "_tuning", None)
+        if tuning is not None:
+            if policy is None:
+                candidate = getattr(tuning, "teleop_policy", None)
+                policy = candidate if callable(candidate) else None
+            if policy_required is None:
+                policy_required = bool(getattr(tuning, "policy_required", False))
+    if policy_required is None:
+        policy_required = False
+    return policy, bool(policy_required)
 
 
 def read_contract() -> dict:
@@ -49,7 +176,8 @@ class TeleopSession:
     """Own one authorized transport-bound stream, expiring without retries."""
 
     def __init__(self, *, publish: Callable, send: Callable, safety: Callable,
-                 clock: Callable = time.monotonic, contract: dict | None = None):
+                 clock: Callable = time.monotonic, contract: dict | None = None,
+                 policy: Callable | None = None, policy_required: bool = False):
         self.publish = publish
         self.send = send
         self.safety = safety
@@ -59,6 +187,12 @@ class TeleopSession:
         limits = self.contract["velocity_limits"]
         self.linear_limits = limits["linear_m_s"]
         self.angular_limits = limits["angular_rad_s"]
+        # Trusted runtime policy source. `policy` returns the robot-adapter's
+        # current policy value (mapping/object) or None; `policy_required` says
+        # the robot advertises dynamic tuning and must supply one.
+        self.policy = policy
+        self.policy_required = policy_required
+        self.policy_signature = None
         self.command_id = None
         self.context = None
         self.sequence = -1
@@ -68,6 +202,30 @@ class TeleopSession:
         self._lock = threading.RLock()
         # Closed IDs cannot re-open after release, delayed dispatch or reconnect.
         self._seen: set[str] = set()
+
+    def _resolve_policy(self) -> tuple[RuntimePolicy | None, str | None]:
+        """Resolve the live trusted policy, or a refusal reason.
+
+        Legacy sessions (no tuning capability) keep the fixed commissioned
+        envelope. A tuning-capable session with a missing/malformed/stale policy
+        is refused; it is never handed the old higher default.
+        """
+        raw = None
+        if self.policy is not None:
+            try:
+                raw = self.policy()
+            except Exception:
+                return None, "The dynamic speed policy could not be read; manual input is refused."
+        hard_linear = self.linear_limits["max"]
+        hard_angular = self.angular_limits["max"]
+        if raw is None:
+            if self.policy_required() if callable(self.policy_required) else self.policy_required:
+                return None, ("A dynamic speed policy is required but unavailable; "
+                              "manual input is refused.")
+            return RuntimePolicy(hard_linear, hard_angular, None, False), None
+        return parse_runtime_policy(raw, now=self.clock(), hard_linear=hard_linear,
+                                    hard_angular=hard_angular)
+
 
     @property
     def active(self) -> bool:
@@ -92,6 +250,10 @@ class TeleopSession:
                 reason = "The manual-drive request is stale. Start again explicitly."
             else:
                 reason = self.safety()
+                if reason is None:
+                    policy, reason = self._resolve_policy()
+                    if policy is not None:
+                        self.policy_signature = policy.signature
             if reason:
                 self._ack(command_id, False, reason)
                 return False
@@ -122,6 +284,13 @@ class TeleopSession:
             reason = self.safety()
             if reason or context != self.context:
                 self.end(reason or "The manual session changed before acceptance.", "failed")
+                return False
+            policy, policy_reason = self._resolve_policy()
+            if policy_reason:
+                self.end(policy_reason, "failed")
+                return False
+            if policy.signature != self.policy_signature:
+                self.end("The active speed policy changed before acceptance; manual input ended.", "failed")
                 return False
             self.acknowledged = True
             self.last_received = self.clock()
@@ -166,8 +335,23 @@ class TeleopSession:
                 return False
             self.sequence = seq
             if not deadman:
+                # Release always reaches the robot, even when the runtime policy
+                # has gone missing/stale: a zero is never gated on policy health.
                 self.end("Manual input released; zero requested.", "succeeded")
                 return True
+            policy, policy_reason = self._resolve_policy()
+            if policy_reason:
+                self.end(policy_reason, "failed")
+                return False
+            if policy.signature != self.policy_signature:
+                self.end("The active speed policy changed; manual input ended. Start again explicitly.", "failed")
+                return False
+            if policy.over(linear, angular):
+                # Reject an over-policy frame instead of clamping and forwarding
+                # an intent the operator did not have; end rather than silently
+                # accept a reduced command.
+                self.end("Manual input exceeds the active speed policy; session ended.", "failed")
+                return False
             reason = self.safety()
             if reason:
                 self.end(reason, "failed")
@@ -190,6 +374,13 @@ class TeleopSession:
             if reason:
                 self.end(reason, "failed")
                 return
+            policy, policy_reason = self._resolve_policy()
+            if policy_reason:
+                self.end(policy_reason, "failed")
+                return
+            if policy.signature != self.policy_signature:
+                self.end("The active speed policy changed; manual input ended. Start again explicitly.", "failed")
+                return
             if not self.acknowledged:
                 if self.clock() - self.preparing_at >= 5.0:
                     self.end("The manual command buffers could not be confirmed clear.", "timeout")
@@ -207,6 +398,7 @@ class TeleopSession:
             self.last_received = None
             self.acknowledged = False
             self.preparing_at = None
+            self.policy_signature = None
             try:
                 self.publish(0.0, 0.0, False)
             except Exception:
@@ -227,7 +419,8 @@ class TeleopSession:
 class RosTeleop:
     """Publish solely through the existing web mux input when every gate holds."""
 
-    def __init__(self, node, ws, *, state: Callable, context: Callable):
+    def __init__(self, node, ws, *, state: Callable, context: Callable,
+                 policy: Callable | None = None, policy_required: bool | None = None):
         from action_msgs.msg import GoalStatusArray
         from geometry_msgs.msg import Twist
         from std_msgs.msg import Bool
@@ -240,8 +433,27 @@ class RosTeleop:
         self._drain_source = {}
         self._writers = None
         self.contract = read_contract()
+        # Optional trusted policy source. The parent wires the real adapter as
+        # ``node._tuning`` exposing ``teleop_policy()`` and ``policy_required``;
+        # callers may also inject them explicitly. Nothing is read from the
+        # browser or any filename.
+        if policy is None or policy_required is None:
+            tuning = getattr(node, "_tuning", None)
+            if tuning is not None:
+                if policy is None:
+                    candidate = getattr(tuning, "teleop_policy", None)
+                    policy = candidate if callable(candidate) else None
+                if policy_required is None:
+                    policy_required = bool(getattr(tuning, "policy_required", False))
+        if policy_required is None:
+            policy_required = False
+        self.policy_required = policy_required
+        self.policy = policy
         self.velocity = node.create_publisher(Twist, self.contract["topics"]["velocity"]["name"], 10)
         self.evidence = node.create_publisher(Bool, self.contract["topics"]["evidence"]["name"], 10)
+        self.session_evidence = node.create_publisher(
+            Bool, "/patrolbot/web_teleop_session_active", 10)
+        self._tuning_hold = False
         self.manual_at = None
         self.action_active = {name: False for name in ACTION_NAMES}
         self.idle_at = None
@@ -251,7 +463,10 @@ class RosTeleop:
         self.idle = node.create_client(Trigger, "/bt_navigator/navigation_idle")
         self._Trigger = Trigger
         self.session = TeleopSession(publish=self._publish, send=ws.send, safety=self.safety,
-                                    contract=self.contract)
+                                    contract=self.contract, policy=policy,
+                                     policy_required=policy_required)
+        node.create_subscription(Bool, "/patrolbot/tuning_hold", self._on_tuning_hold, 10)
+        node.create_service(Trigger, "/patrolbot/web_tuning_idle", self._tuning_idle)
         node.create_subscription(Bool, self.contract["topics"]["joystick_evidence"]["name"],
                                  self._on_joystick, 10)
         from rclpy.qos import qos_profile_action_status_default
@@ -282,6 +497,16 @@ class RosTeleop:
                 self.session.end("The physical joystick took control. Start web manual input again explicitly.")
         else:
             self.manual_at = None
+
+    def _on_tuning_hold(self, message):
+        self._tuning_hold = bool(message.data)
+        if self._tuning_hold and self.session.active:
+            self.session.end("Configuration maintenance owns motion. Start manual input again explicitly.")
+
+    def _tuning_idle(self, request, response):
+        response.success = self._tuning_hold and not self.session.active
+        response.message = "Web session idle" if response.success else "Web session busy"
+        return response
 
     def _on_action(self, action, message):
         self.action_active[action] = any(item.status in (1, 2, 3) for item in message.status_list)
@@ -334,6 +559,8 @@ class RosTeleop:
         return tuple(identities)
 
     def safety(self):
+        if self._tuning_hold:
+            return "Configuration maintenance owns motion; manual input is disarmed."
         state = self.state()
         base, base_at, odom, odom_at = state
         now = time.monotonic()
@@ -431,6 +658,11 @@ class RosTeleop:
             self.last_idle_request = self.idle_request_at = now
             self.idle_future = self.idle.call_async(self._Trigger.Request())
         self.session.tick(self.context())
+        self.session_evidence.publish(self._Bool(data=bool(self.session.active)))
+        if not self.session.active:
+            # Explicit released heartbeat for safe tuning admission; no Twist
+            # is published, so this never takes a mux slot from navigation.
+            self.evidence.publish(self._Bool(data=False))
         if self.session.active and not self.session.acknowledged:
             self._publish(0.0, 0.0, False)
             # One owner observes the complete drain before acknowledging start;

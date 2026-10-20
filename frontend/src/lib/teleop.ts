@@ -4,12 +4,44 @@ import { canCommand, useAuthStore } from "../stores/authStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTeleopStore } from "../stores/teleopStore";
+import { useTuningStore } from "../stores/tuningStore";
 
 const contract = JSON.parse(contractSource) as {
   velocity_limits: { linear_m_s: { min: number; max: number }; angular_rad_s: { min: number; max: number } };
 };
 export const TELEOP_LIMITS = contract.velocity_limits;
+export function operationalLimits() {
+  const telemetry = useTelemetryStore.getState();
+  const required = telemetry.capabilities.some(cap => cap === "robot_tuning_v1" || cap === "robot_tuning_policy_v1");
+  if (!required) return TELEOP_LIMITS;
+  const tuning = useTuningStore.getState();
+  const snapshot = tuning.snapshot;
+  const age = tuning.receivedAt === null ? Infinity : (performance.now() - tuning.receivedAt) / 1000;
+  const caps = snapshot?.activeKnown ? snapshot.effectiveLimits : null;
+  if (!snapshot?.available || !caps || age < 0 || age > 5) return null;
+  return { linear_m_s: { min: -caps.max_linear_m_s, max: caps.max_linear_m_s },
+    angular_rad_s: { min: -caps.max_angular_rad_s, max: caps.max_angular_rad_s } };
+}
 export const TELEOP_TICK_MS = 80; // 12.5 Hz, latest sample, never a movement queue.
+
+/** Keyboard/digital input ramps from zero over this long; analog never ramps. */
+export const TELEOP_RAMP_SECONDS = 1.0;
+export const TELEOP_RAMP_STEP_LINEAR = TELEOP_LIMITS.linear_m_s.max * (TELEOP_TICK_MS / 1000) / TELEOP_RAMP_SECONDS;
+export const TELEOP_RAMP_STEP_ANGULAR = TELEOP_LIMITS.angular_rad_s.max * (TELEOP_TICK_MS / 1000) / TELEOP_RAMP_SECONDS;
+
+/**
+ * Move `current` toward `target` by at most `step`. Reversal passes through
+ * zero; a small analog target never grows into the full ceiling because the
+ * analog path sets its target directly and never ramps.
+ */
+export function rampToward(current: number, target: number, step: number): number {
+  const delta = target - current;
+  if (Math.abs(delta) <= step) return target;
+  const next = current + Math.sign(delta) * step;
+  // A direction reversal passes through exactly zero rather than jumping sign.
+  if (current !== 0 && Math.sign(next) !== Math.sign(current)) return 0;
+  return next;
+}
 
 /** Deliberately no map, AMCL, seed, confidence or pose-set prerequisite. */
 export function manualDriveReason(): string | null {
@@ -19,6 +51,7 @@ export function manualDriveReason(): string | null {
   if (!canCommand(useAuthStore.getState().user)) return "An operator account is required for manual drive.";
   if (!t.capabilities.includes("web_teleop_v1")) return "Manual drive is unavailable. Update the robot bridge first (web_teleop_v1).";
   if (!t.wsConnected || t.connection.state !== "online") return "The robot is not connected — manual drive is unavailable.";
+  if (operationalLimits() === null) return "A fresh verified active speed policy is required for manual drive.";
   const manual = useTeleopStore.getState();
   if (manual.externalBusy && !manual.session) return "Another tab is using manual drive. End manual input there or use Stop first.";
   if (commands.active || b?.undock_active || ["navigating", "recording"].includes(t.status.status)) return "Stop navigation first — another robot action is active.";

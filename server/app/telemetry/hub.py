@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 from collections import deque
@@ -34,6 +35,55 @@ PROTECTED_TYPES = {
     "state.system_health", "state.capabilities", "event.append", "telemetry.map",
     "command.ack", "command.progress", "command.result",
 }
+
+
+class UnavailableTuningBroker:
+    """Explicit stand-in until the API slice's tuning broker is present.
+
+    The telemetry slice only *wires* the tuning transport; it must not invent
+    tuning behaviour. When ``server/app/tuning/broker.py`` has not landed yet,
+    this keeps the hub runnable and makes the absence observable (``available``
+    is False) instead of silently accepting an RPC that nothing will answer.
+    """
+
+    available = False
+
+    def __init__(self, hub: "TelemetryHub") -> None:
+        self.hub = hub
+
+    async def handle_response(self, session: "RobotSession", envelope: Envelope,
+                              payload: Any) -> None:
+        return None
+
+    def disconnected(self, session: "RobotSession") -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _build_tuning_broker(hub: "TelemetryHub") -> Any:
+    """Attach the API slice's tuning broker, or an explicit unavailable stand-in.
+
+    The import is deferred so a partially-landed tree still starts and serves
+    telemetry. A missing module is logged loudly rather than swallowed; bugs
+    *inside* the module still propagate (only ImportError is caught).
+    """
+    try:
+        from ..tuning.broker import TuningBroker
+    except ImportError:
+        log.warning("server/app/tuning/broker.py is not available; "
+                    "the tuning transport will answer unavailable")
+        return UnavailableTuningBroker(hub)
+    return TuningBroker(hub)
+
+
+async def _await_and_log(awaitable: Any, robot_id: str) -> None:
+    """Await a fire-and-forget tuning coroutine without losing its errors."""
+    try:
+        await awaitable
+    except Exception:
+        log.exception("tuning disconnect notification failed for %s", robot_id)
 
 
 @dataclass
@@ -144,6 +194,10 @@ class TelemetryHub:
         # counters all seeded from the same value collided across robots — see
         # EventIdAllocator.
         self.event_ids = EventIdAllocator()
+        # The tuning broker is the API slice's; the telemetry slice only wires
+        # the transport (request/response routing, disconnect, shutdown). It is
+        # attached last so the object it is handed is fully initialised.
+        self.tuning = _build_tuning_broker(self)
 
     def set_event_seed(self, next_id: int) -> None:
         """Continue event ids from the persisted event log."""
@@ -167,10 +221,23 @@ class TelemetryHub:
         for session in self.robots.values():
             await self._persist_last_pose(session)
         await self.commands.shutdown()
+        await self._tuning_shutdown()
         # Drain last, so everything above has been queued, and before
         # create_app's lifespan closes the database underneath them.
         await self.recorder.shutdown()
         await self.battery_writer.stop()
+
+    async def _tuning_shutdown(self) -> None:
+        """Release the tuning broker if the API slice attached a real one.
+
+        Tolerates both a sync ``shutdown()`` (the declared interface) and an
+        async one, so the exact shape of the API slice's broker cannot make
+        the telemetry shutdown hang or crash.
+        """
+        with contextlib.suppress(Exception):
+            result = self.tuning.shutdown()
+            if inspect.isawaitable(result):
+                await result
 
     @property
     def write_failures(self) -> dict[str, int]:
@@ -205,6 +272,9 @@ class TelemetryHub:
 
     async def robot_connected(self, robot_id: str, websocket: WebSocket) -> RobotSession:
         previous = self.get_or_create_state(robot_id)
+        self._tuning_disconnected(previous)
+        previous.state.motion.data = None
+        previous.state.motion.received_mono = None
         await self.commands.teleop.revoke(robot_id, "Robot connection replaced.")
         if previous.websocket is not None:
             log.info("robot %s reconnected; superseding old socket", robot_id)
@@ -225,13 +295,37 @@ class TelemetryHub:
             await self.commands.teleop.revoke(session.robot_id, "Robot disconnected; manual outcome unknown.")
             session.websocket = None
             session.state.last_heartbeat_mono = None
+            session.state.motion.data = None
+            session.state.motion.received_mono = None
+            self._tuning_disconnected(session)
             await self._apply_connection(session)
+
+    def _tuning_disconnected(self, session: RobotSession) -> None:
+        """Tell the tuning broker this session's replies can no longer arrive.
+
+        Any in-flight read/mutation bound to this socket is now indeterminate,
+        so the broker marks it unknown rather than letting a later reconnect's
+        reply satisfy it. Sync call as declared; an async override is awaited
+        on a task so a disconnect can never be blocked by it.
+        """
+        try:
+            result = self.tuning.disconnected(session)
+        except Exception:
+            log.exception("tuning.disconnected failed for %s", session.robot_id)
+            return
+        if inspect.isawaitable(result):
+            asyncio.create_task(_await_and_log(result, session.robot_id))
 
     async def handle_robot_message(self, session: RobotSession, envelope: Envelope, payload: Any) -> None:
         if self.robots.get(session.robot_id) is not session:
             return
         state = session.state
         state.record_heartbeat()
+        # Tuning replies are their own transport: routed to the tuning broker
+        # and never into the ordinary command broker or teleop lease.
+        if envelope.type == "tuning.response":
+            await self.tuning.handle_response(session, envelope, payload)
+            return
         events: list[EventData] = []
         rebroadcast = True
         data_out: Any = envelope.data
@@ -272,6 +366,22 @@ class TelemetryHub:
         elif t == "telemetry.base_state":
             events = state.record_base_state(payload)
             self.recorder.offer("base_state", envelope.timestamp, envelope.data)
+        elif t == "telemetry.motion":
+            base = state.base_state.data
+            current = state.motion.data
+            if (base is None or state.base_state.received_mono is None
+                    or state.base_state.received_mono < session.connected_mono
+                    or payload.session_generation != base.session_generation
+                    or (current is not None and payload.odom_epoch_generation < current.odom_epoch_generation)):
+                return
+            from datetime import datetime, timezone
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(envelope.timestamp.replace("Z", "+00:00"))).total_seconds()
+            if age < -1 or age > 1.5:
+                return
+            payload = payload.model_copy(update={"receipt_age_s": payload.receipt_age_s + max(0, age)})
+            data_out = payload.model_dump()
+            events = state.record_motion(payload)
+            self.recorder.offer("motion", envelope.timestamp, data_out)
         elif t == "telemetry.diagnostics":
             events = state.record_diagnostics(payload)
             self.recorder.offer("diagnostics", envelope.timestamp, envelope.data)

@@ -21,6 +21,7 @@ services:
       PATROLBOT_OPERATOR_USERNAMES: ${PATROLBOT_OPERATOR_USERNAMES:-}
       PATROLBOT_ADMIN_USERNAMES: ${PATROLBOT_ADMIN_USERNAMES:-}
       PATROLBOT_DATABASE_PATH: /data/patrolbot.db
+      PATROLBOT_TUNING_AUTH_KEY_FILE: /run/patrolbot-secrets/tuning.key
       PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
 
     command:
@@ -38,6 +39,7 @@ services:
 
     volumes:
       - server-data:/data
+      - tuning-secrets:/run/patrolbot-secrets:ro
 
     healthcheck:
       test:
@@ -79,5 +81,6 @@ networks:
     driver: bridge
 
 volumes:
+  tuning-secrets:
   server-data:
     name: patrolbot-dashboard-data

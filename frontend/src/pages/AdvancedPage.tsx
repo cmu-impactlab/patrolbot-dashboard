@@ -1,4 +1,5 @@
 import { ManualDrive } from "../components/ManualDrive";
+import { TuningPanel } from "../components/TuningPanel";
 import { useTelemetrySocket } from "../websocket/useTelemetrySocket";
 
 /** AuthGate is the sole parent. This tab has its own fresh browser socket and
@@ -7,6 +8,7 @@ export function AdvancedPage() {
   useTelemetrySocket();
   return <main className="advanced-page">
     <h1>Advanced controls</h1>
+    <TuningPanel />
     <ManualDrive />
   </main>;
 }

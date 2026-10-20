@@ -11,6 +11,7 @@ import type {
   EventData,
   GoalData,
   LidarData,
+  MotionData,
   PathData,
   PoseData,
   ResourcesData,
@@ -49,6 +50,8 @@ export interface TelemetryState {
   path: PathData | null;
   battery: BatteryData | null;
   baseState: BaseStateData | null;
+  /** Measured raw-odom twist; null means no measurement, never zero speed. */
+  motion: MotionData | null;
   diagnostics: DiagnosticsData | null;
   resources: ResourcesData | null;
   mapVersion: number;
@@ -69,6 +72,21 @@ export interface TelemetryState {
   batteryAt: number | null;
   /** Same, for the robot computer's own resource reports. */
   resourcesAt: number | null;
+  /**
+   * When the last measured-motion sample was received, by the browser's clock.
+   * Raw receipt time: the envelope's transport age is kept separately in
+   * `motionTransportAgeS` so the total age is sample + receipt + transport +
+   * local elapsed (see `motionAgeMs`). Null with `motion` when there is no
+   * sample.
+   */
+  motionAt: number | null;
+  /**
+   * Seconds between the server stamping the motion envelope and the browser
+   * reading it (server->browser transport, plus clamped clock skew). Null when
+   * there is no sample; a snapshot's motion leaves this at 0 because its
+   * `slice_ages_s.motion` receipt age already covers robot->server time.
+   */
+  motionTransportAgeS: number | null;
   /** Alert ids the user has read; read alerts move to the "Seen" section. */
   seenEventIds: number[];
   /** Robot's last-known pose persisted server-side when it last went offline. */
@@ -138,6 +156,66 @@ function cap<T>(items: T[], item: T, limit: number): T[] {
   return next;
 }
 
+/**
+ * Delay between the server stamping the envelope and the browser reading it.
+ *
+ * The server re-stamps each frame with its own clock, so this is server->browser
+ * transport plus any clock skew. Skew only ever makes the frame look older
+ * (clamped at zero) and is capped, so a badly-set browser clock cannot show a
+ * live reading as fresh — the safe direction for a speed gauge. Returns
+ * milliseconds.
+ */
+export function motionTransportAgeMs(timestamp: string, receivedWallMs: number): number {
+  const sent = Date.parse(timestamp);
+  if (!Number.isFinite(sent)) return Infinity;
+  const delta = receivedWallMs - sent;
+  if (!Number.isFinite(delta) || delta < -1000) return Infinity;
+  if (delta <= 0) return 0;
+  return Math.min(delta, 5000);
+}
+
+/**
+ * Total age of the measured-motion sample in milliseconds: the odom stamp age
+ * and the bridge receipt age it carries, the envelope transport age, plus the
+ * local elapsed time since it arrived. Null when there is no sample — never
+ * treated as zero.
+ */
+export function motionAgeMs(
+  motion: MotionData | null,
+  motionAt: number | null,
+  transportAgeS: number | null = null,
+  now: number = performance.now(),
+): number | null {
+  if (motion === null || motionAt === null) return null;
+  const local = Math.max(0, now - motionAt);
+  const transport = Math.max(0, transportAgeS ?? 0) * 1000;
+  return (motion.sample_age_s + motion.receipt_age_s) * 1000 + transport + local;
+}
+
+/**
+ * Whether a motion sample is superseded and must not replace the live reading.
+ * A sample from a different drive-base session, or from an older odometry epoch
+ * generation, is obsolete; accepting it would mix sessions or move the gauge
+ * backwards in origin time.
+ */
+export function motionSuperseded(
+  sample: MotionData,
+  baseState: BaseStateData | null,
+  current: MotionData | null,
+): boolean {
+  if (sample.source !== "raw_odom" || ![sample.linear_velocity, sample.angular_velocity, sample.sample_age_s, sample.receipt_age_s].every(value => typeof value === "number" && Number.isFinite(value))
+    || sample.sample_age_s < 0 || sample.receipt_age_s < 0 || Math.abs(sample.linear_velocity) > 5 || Math.abs(sample.angular_velocity) > 10
+    || !Number.isSafeInteger(sample.session_generation) || !Number.isSafeInteger(sample.odom_epoch_generation)
+    || typeof sample.odom_epoch !== "string" || sample.odom_epoch.length === 0 || sample.odom_epoch.length > 128) return true;
+  if (baseState !== null && sample.session_generation !== baseState.session_generation) {
+    return true;
+  }
+  if (current !== null && sample.odom_epoch_generation < current.odom_epoch_generation) {
+    return true;
+  }
+  return false;
+}
+
 export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   wsConnected: false,
   robotId: "patrolbot-01",
@@ -150,6 +228,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   path: null,
   battery: null,
   baseState: null,
+  motion: null,
   diagnostics: null,
   resources: null,
   mapVersion: 0,
@@ -162,6 +241,8 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   baseStateAt: null,
   batteryAt: null,
   resourcesAt: null,
+  motionAt: null,
+  motionTransportAgeS: null,
   seenEventIds: loadSeenIds(),
   lastKnownPose: null,
   poseSetThisSession: false,
@@ -180,6 +261,11 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             // Whatever reconnects may be a different robot — the snapshot
             // that follows re-declares what it can do.
             capabilities: [],
+            // The measured twist is bound to a connection/origin; without one
+            // it must read as "no measurement", never as a stop.
+            motion: null,
+            motionAt: null,
+            motionTransportAgeS: null,
           },
     ),
 
@@ -214,6 +300,13 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           const age = data.slice_ages_s?.[slice];
           return age == null ? null : performance.now() - age * 1000;
         };
+        // A snapshot's motion is only usable if it belongs to the same
+        // drive-base session it arrived with; an obsolete sample is dropped
+        // rather than shown, and absence stays absent.
+        const snapshotMotion =
+          data.motion && !motionSuperseded(data.motion, data.base_state ?? null, null)
+            ? data.motion
+            : null;
         set({
           ...bump,
           connection: data.connection,
@@ -223,6 +316,9 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           battery: data.battery ?? null,
           baseState: data.base_state ?? null,
           baseStateAt: receivedAt("base_state"),
+          motion: snapshotMotion,
+          motionAt: snapshotMotion === null ? null : receivedAt("motion"),
+          motionTransportAgeS: snapshotMotion === null ? null : motionTransportAgeMs(frame.timestamp, Date.now()) / 1000,
           diagnostics: data.diagnostics ?? null,
           resources: data.resources ?? null,
           path: data.path ?? null,
@@ -254,10 +350,14 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             trajectory: [],
             lidar: null,
             path: null,
+            motion: null,
+            motionAt: null,
+            motionTransportAgeS: null,
             poseSetThisSession: false,
           });
         } else {
-          set({ ...bump, connection: frame.data });
+          set({ ...bump, connection: frame.data,
+            ...(frame.data.state !== "online" ? { motion: null, motionAt: null, motionTransportAgeS: null } : {}) });
         }
         break;
       }
@@ -306,10 +406,34 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         break;
       case "telemetry.base_state":
         set({ ...bump, baseState: frame.data, baseStateAt: performance.now(),
+          // A new drive-base session supersedes the measured twist bound to the
+          // old one; keeping it would let the gauge mix two sessions.
+          ...(get().baseState !== null &&
+              frame.data.session_generation !== get().baseState!.session_generation
+            ? { motion: null, motionAt: null, motionTransportAgeS: null }
+            : {}),
           // Full robot reset remains false until a new seed is accepted.
           poseSetThisSession: get().connection.state === "online" &&
             localizationRecoveryReason(frame.data, performance.now()) === null });
         break;
+      case "telemetry.motion": {
+        // Drop a sample from a superseded session or an older odom origin
+        // generation instead of moving the gauge backwards.
+        if (motionSuperseded(frame.data, get().baseState, get().motion)) {
+          set({ ...bump });
+          break;
+        }
+        // Raw receipt time plus the separately-tracked transport age: the
+        // exported age helper and the gauge add them without double-counting.
+        const transport = motionTransportAgeMs(frame.timestamp, Date.now());
+        set({
+          ...bump,
+          motion: frame.data,
+          motionAt: performance.now(),
+          motionTransportAgeS: transport / 1000,
+        });
+        break;
+      }
       case "telemetry.diagnostics":
         set({ ...bump, diagnostics: frame.data });
         break;

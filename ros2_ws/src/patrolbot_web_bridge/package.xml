@@ -4,9 +4,9 @@
   <name>patrolbot_web_bridge</name>
   <version>0.1.0</version>
   <description>
-    Read-only telemetry bridge: subscribes to approved PatrolBot topics and
-    streams normalized dashboard-protocol messages over an outbound WebSocket
-    to the PatrolBot dashboard server. No motion commands (Phase 3).
+    Telemetry and opt-in command bridge. Routes leased deadman input through
+    the existing mux and forwards server-signed tuning requests to the
+    robot-owned configuration service; no direct hardware connection.
   </description>
   <maintainer email="ymh1874@gmail.com">Yousef Hussein</maintainer>
   <license>MIT</license>

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import tuning_policy
 from .gates import teleop_reason
 from ..protocol.envelope import Envelope, encode
 from ..protocol.messages import CommandRequestData, TeleopVelocityData
@@ -36,6 +37,11 @@ class ManualOwner:
     start_terminal: bool = False
     stop_ids: set[str] = field(default_factory=set)
     stop_issued: bool = False
+    # The trusted policy captured when this session was admitted. Every nonzero
+    # frame is revalidated against the live policy and this signature; a change
+    # ends the session instead of being replayed against stale limits.
+    policy: Any = None
+    policy_signature: Any = None
 
 
 class TeleopController:
@@ -63,11 +69,48 @@ class TeleopController:
         # connection's report with an apparently fresh server receipt time.
         if session.state.base_state.received_mono < session.connected_mono:
             return "Wait for fresh hardware readings from this robot connection."
+        # Capture the trusted runtime policy for the whole session. A robot that
+        # advertises dynamic tuning with no fresh, bound policy is refused here,
+        # never handed the old higher fixed default.
+        policy, reason = self._resolve_policy(session)
+        if reason:
+            return reason
         self.owners[robot_id] = ManualOwner(
             command_id, client, session, session.websocket, session.generation,
-            session.state.base_state.data.session_generation)
+            session.state.base_state.data.session_generation,
+            policy=policy, policy_signature=policy.signature)
         if self._watchdog is None:
             self._watchdog = asyncio.create_task(self._monitor())
+        return None
+
+    # -- runtime policy --------------------------------------------------------
+
+    def _current_robot_generation(self, session):
+        base = session.state.base_state.data
+        return getattr(base, "session_generation", None) if base is not None else None
+
+    def _resolve_policy(self, session):
+        """Resolve the trusted policy for a connection.
+
+        The provider is ``hub.tuning.teleop_policy(robot_id)`` when the parent
+        wired the tuning adapter, else the documented
+        ``session.state.tuning_policy`` attribute. Neither is browser-supplied.
+        """
+        return tuning_policy.resolve_policy(
+            capabilities=session.state.capabilities,
+            state=session.state,
+            robot_id=session.robot_id,
+            provider=tuning_policy.provider_from_hub(self.hub),
+            robot_generation=self._current_robot_generation(session),
+        )
+
+    def _policy_problem(self, owner):
+        """Reason the live policy no longer authorizes this session, or None."""
+        policy, reason = self._resolve_policy(owner.session)
+        if reason:
+            return reason
+        if policy.signature != owner.policy_signature:
+            return "The active speed policy changed; manual input ended. Start again explicitly."
         return None
 
     def bound(self, owner):
@@ -125,6 +168,18 @@ class TeleopController:
             if reason:
                 await self.revoke(envelope.robot_id, reason)
                 return False
+            # Revalidate the live trusted policy on every nonzero frame. A
+            # changed generation, a now-missing/stale policy, or an
+            # over-policy request ends the session rather than being clamped or
+            # replayed against the limits captured at start.
+            problem = self._policy_problem(owner)
+            if problem:
+                await self.revoke(envelope.robot_id, problem)
+                return False
+            if owner.policy is not None and owner.policy.over_policy(payload.linear, payload.angular):
+                await self.revoke(envelope.robot_id,
+                    "Manual input exceeds the active speed policy; input ended.")
+                return False
             now = time.monotonic()
             while owner.frame_times and now - owner.frame_times[0] >= 1:
                 owner.frame_times.popleft()
@@ -133,7 +188,9 @@ class TeleopController:
                 return False
             owner.frame_times.append(now)
         # Releases bypass rate/hardware/ack/closing barriers, not identity,
-        # freshness, sequence or lease checks. Never turn a zero into motion.
+        # freshness, sequence or lease checks. Never turn a zero into motion —
+        # and a release must always reach the robot even when the runtime policy
+        # itself has gone missing or stale.
         owner.seq = payload.seq
         owner.last_frame = time.monotonic()
         sent = await self.send(owner, payload, envelope.timestamp)
@@ -190,6 +247,10 @@ class TeleopController:
             reason = teleop_reason(session.state)
             if not self.bound(owner) or not self.owns_lease(owner) or reason:
                 await self.revoke(session.robot_id, reason or "Manual session connection or lease changed.")
+                return
+            problem = self._policy_problem(owner)
+            if problem:
+                await self.revoke(session.robot_id, problem)
 
     async def _monitor(self):
         while True:

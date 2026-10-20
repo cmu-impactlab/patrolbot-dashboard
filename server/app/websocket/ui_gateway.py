@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from typing import get_args
 
@@ -15,9 +16,33 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..protocol.envelope import Envelope, ProtocolError, decode
 from ..protocol.messages import CommandRequestData, CommandType, TeleopVelocityData
+from ..tuning.authz import fresh_user
 
 log = logging.getLogger("ui_gateway")
 router = APIRouter()
+
+_TUNING_PREFIX = "tuning."
+
+
+def _raw_tuning_type(raw: str) -> str | None:
+    """Cheaply detect a tuning frame before typed decoding.
+
+    Tuning has no browser-WebSocket mutation channel: read/save/apply go
+    through the authenticated HTTP endpoints. Any tuning frame arriving on
+    /ws/ui is therefore refused, but only after re-verifying the session cookie
+    *per message* so a socket that outlives its cookie cannot act.
+    """
+    if '"tuning.' not in raw:
+        return None
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(frame, dict):
+        return None
+    type_ = frame.get("type")
+    return type_ if isinstance(type_, str) and type_.startswith(_TUNING_PREFIX) else None
+
 
 
 def _origin_allowed(settings, websocket: WebSocket) -> bool:
@@ -55,6 +80,15 @@ async def ui_ws(websocket: WebSocket) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
+            tuning_type = _raw_tuning_type(raw)
+            if tuning_type is not None:
+                current = fresh_user(settings, websocket.cookies)
+                if current is None:
+                    log.warning("closing /ws/ui: session is no longer valid")
+                    await websocket.close(code=4401, reason="session expired")
+                    break
+                log.warning("ignoring %s over /ws/ui; tuning uses the HTTP API", tuning_type)
+                continue
             # Per-connection flood guard: drop frames beyond the per-second cap.
             now = asyncio.get_running_loop().time()
             if now - window_start >= 1.0:

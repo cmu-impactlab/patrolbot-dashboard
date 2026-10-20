@@ -23,8 +23,12 @@ import websockets
 
 log = logging.getLogger("web_bridge.ws")
 
-PROTECTED_TYPES = {"robot.hello", "telemetry.map"}
+PROTECTED_TYPES = {"robot.hello", "telemetry.map", "tuning.response"}
 QUEUE_LIMIT = 256
+
+# JSON markers used by send() to spare protected frames from back-pressure
+# eviction. Kept in one place so a protected type is never half-protected.
+_PROTECTED_MARKERS = tuple(f'"{type_}"' for type_ in PROTECTED_TYPES)
 
 
 def utc_now() -> str:
@@ -55,6 +59,7 @@ class WsClient:
                  on_map_wanted: Callable[[], None],
                  on_command: Callable[[dict], None] | None = None,
                  on_teleop: Callable[[dict], None] | None = None,
+                 on_tuning: Callable[[dict], None] | None = None,
                  on_disconnect: Callable[[], None] | None = None) -> None:
         # The token travels in the Authorization header (see _connect) so it
         # never lands in reverse-proxy access logs. self.url stays clean.
@@ -65,6 +70,7 @@ class WsClient:
         self.on_map_wanted = on_map_wanted
         self.on_command = on_command
         self.on_teleop = on_teleop
+        self.on_tuning = on_tuning
         self.on_disconnect = on_disconnect
         self.connection_generation = 0
         self.sequence = 0
@@ -127,6 +133,8 @@ class WsClient:
         self._capabilities_dirty = False
 
     def send(self, type_: str, data: dict) -> None:
+        if type_ in {"tuning.response", "telemetry.motion"} and not self.connected.is_set():
+            return  # A measurement/RPC result must never replay on a new socket.
         with self._lock:
             self.sequence += 1
             frame = json.dumps({
@@ -137,14 +145,13 @@ class WsClient:
                 # Drop the oldest unprotected frame; give up only if the queue
                 # is somehow all-protected.
                 for index, queued in enumerate(self._queue):
-                    if '"telemetry.map"' not in queued and '"robot.hello"' not in queued:
+                    if not any(marker in queued for marker in _PROTECTED_MARKERS):
                         del self._queue[index]
                         self.stats["dropped"] += 1
                         break
                 else:
-                    if type_ not in PROTECTED_TYPES:
-                        self.stats["dropped"] += 1
-                        return
+                    self.stats["dropped"] += 1
+                    return  # Bounded even if every queued frame is protected.
             self._queue.append(frame)
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
@@ -233,6 +240,9 @@ class WsClient:
             reader = asyncio.create_task(self._drain_incoming(ws))
             try:
                 while not self._stop.is_set():
+                    if reader.done():
+                        await reader
+                        raise ConnectionError("robot socket reader ended")
                     frame = None
                     with self._lock:
                         if self._queue:
@@ -248,6 +258,9 @@ class WsClient:
                     self.stats["sent"] += 1
             finally:
                 self.connected.clear()
+                with self._lock:
+                    self._queue = deque(frame for frame in self._queue
+                        if '"tuning.response"' not in frame and '"telemetry.motion"' not in frame)
                 self.connection_generation += 1
                 if self.on_disconnect is not None:
                     self.on_disconnect()
@@ -270,6 +283,12 @@ class WsClient:
                 # put high-rate velocity frames into the discrete command FIFO.
                 if frame.get("version") == 1 and frame.get("robot_id") == self.robot_id:
                     self.on_teleop(frame)
+                continue
+            if frame.get("type") == "tuning.request" and self.on_tuning is not None:
+                # Read-only tuning transport: its own thread-safe queue inside
+                # the adapter, never the discrete command FIFO or teleop lease.
+                if frame.get("version") == 1 and frame.get("robot_id") == self.robot_id:
+                    self.on_tuning(frame.get("data", {}))
                 continue
             if frame.get("type") == "command.cancel" and self.on_command is not None:
                 self.on_command({"command": "cancel", "command_id": frame.get("data", {}).get("command_id")})

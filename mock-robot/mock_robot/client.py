@@ -70,6 +70,11 @@ class MockRobot:
         self.lidar_state = "READY"
         self._last_lidar_scan = time.monotonic()
         self.session_generation = 1
+        # Odom-origin epoch this simulated drive base is publishing against.
+        # A real drive-base reset would mint a new epoch/generation; the
+        # dashboard uses it to drop measured-motion samples from an old origin.
+        self.odom_epoch = "mock-odom-epoch-1"
+        self.odom_epoch_generation = 1
         # The simulator starts at an exact, known world pose. This synthetic
         # seed is not hardware acceptance and survives transport reconnects.
         self.odom_epoch_valid = True
@@ -105,6 +110,24 @@ class MockRobot:
             "height": self.world.height,
             "origin": {"x": MAP_ORIGIN, "y": MAP_ORIGIN, "yaw": 0.0},
             "rle": encode_rle(self.world.cells),
+        }
+
+    def motion_payload(self) -> dict:
+        """Measured raw-odom twist for the speed gauge, independent of AMCL.
+
+        Only the measured values are reported; nothing here is a command or a
+        claim about a destination. The session/epoch generations let the
+        dashboard drop a sample from a superseded connection or odom origin.
+        """
+        return {
+            "linear_velocity": round(self.robot.speed, 3),
+            "angular_velocity": round(self.robot.yaw_rate, 3),
+            "source": "raw_odom",
+            "sample_age_s": 0.0,
+            "receipt_age_s": 0.0,
+            "session_generation": self.session_generation,
+            "odom_epoch": self.odom_epoch,
+            "odom_epoch_generation": self.odom_epoch_generation,
         }
 
     # -- simulation stepping --------------------------------------------------
@@ -206,6 +229,7 @@ class MockRobot:
                 asyncio.create_task(self._path_loop(ws)),
                 asyncio.create_task(self._slow_loop(ws)),
                 asyncio.create_task(self._base_state_loop(ws)),
+                asyncio.create_task(self._motion_loop(ws)),
                 asyncio.create_task(self._receive_loop(ws)),
                 asyncio.create_task(self._disconnect_watch()),
             ]
@@ -278,6 +302,12 @@ class MockRobot:
                 lidar_state=self.lidar_state,
                 lidar_scan_age=time.monotonic() - self._last_lidar_scan if self.lidar_state == "READY" else -1.0,
             )))
+
+    async def _motion_loop(self, ws) -> None:
+        """Measured raw-odom twist at the bridge's throttled rate, map-free."""
+        while True:
+            await asyncio.sleep(0.1)
+            await ws.send(self.frame("telemetry.motion", self.motion_payload()))
 
     async def _slow_loop(self, ws) -> None:
         """1 Hz: heartbeat, battery, diagnostics, resources, map changes."""

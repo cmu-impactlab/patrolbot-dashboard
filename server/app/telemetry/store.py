@@ -20,6 +20,7 @@ from ..protocol.messages import (
     EventData,
     LidarData,
     MapData,
+    MotionData,
     PathData,
     PoseData,
     ResourcesData,
@@ -84,6 +85,7 @@ class RobotState:
     path: Slice = field(default_factory=Slice)
     battery: Slice = field(default_factory=Slice)
     base_state: Slice = field(default_factory=Slice)
+    motion: Slice = field(default_factory=Slice)
     diagnostics: Slice = field(default_factory=Slice)
     resources: Slice = field(default_factory=Slice)
     map: Slice = field(default_factory=Slice)
@@ -231,8 +233,25 @@ class RobotState:
                 f"The robot's {where} bumper touched something. Check that its path is clear.",
             ))
         self._prev_bumper = bumper
+        if self.motion.data is not None and self.motion.data.session_generation != data.session_generation:
+            self.motion.data = None
+            self.motion.received_mono = None
         self.base_state.set(data)
         return events
+
+    def record_motion(self, data: MotionData) -> list[EventData]:
+        """Store the latest raw-odom twist, bound to the live drive-base session.
+
+        A sample whose session generation does not match the current base state
+        belongs to a superseded connection — keeping it would let a browser's
+        snapshot mix two sessions. It is dropped rather than overwriting the
+        last sample from the live session.
+        """
+        base = self.base_state.data
+        if base is not None and data.session_generation != base.session_generation:
+            return []
+        self.motion.set(data)
+        return []
 
     def record_diagnostics(self, data: DiagnosticsData) -> list[EventData]:
         events: list[EventData] = []
@@ -372,6 +391,7 @@ class RobotState:
             battery=battery,
             battery_estimate=estimate_model,
             base_state=self.base_state.data,
+            motion=self.motion.data,
             diagnostics=self.diagnostics.data,
             resources=self.resources.data,
             path=self.path.data,
@@ -382,6 +402,7 @@ class RobotState:
             slice_ages_s={
                 "pose": self.pose.age(),
                 "base_state": self.base_state.age(),
+                "motion": self.motion.age(),
                 "battery": self.battery.age(),
                 "resources": self.resources.age(),
             },

@@ -19,6 +19,15 @@ CHARGE_STATE_NAMES = {
 
 DIAG_LEVEL_NAMES = {0: "OK", 1: "WARN", 2: "ERROR", 3: "STALE"}
 
+# Mirrors server/app/protocol/messages.py MotionData guards. These are generous
+# physical sanity bounds far above the commissioned ±0.30 m/s / ±0.70 rad/s, so
+# only corrupt or absurd data is dropped — never a real reading.
+MOTION_MAX_ABS_LINEAR_M_S = 5.0
+MOTION_MAX_ABS_ANGULAR_RAD_S = 10.0
+MOTION_MAX_AGE_S = 86_400.0
+MOTION_MAX_GENERATION = 2 ** 31 - 1
+MOTION_MAX_EPOCH_LENGTH = 128
+
 
 def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
@@ -104,6 +113,59 @@ def normalize_pose(amcl_pose: Any, odom: Any, covariance_warn: float = 0.25,
         "localization_age_s": _finite(localization_age_s, None),
         "localization_max_age_s": _finite(localization_max_age_s, None),
         "localized": localized,
+    }
+
+
+def normalize_motion(twist: Any, *, session_generation: Any, odom_epoch: Any,
+                     odom_epoch_generation: Any, sample_age_s: Any,
+                     receipt_age_s: Any) -> dict | None:
+    """Measured raw-``/odom`` twist for the speed gauge, or None when untrusted.
+
+    Independent of AMCL and the active map on purpose: a robot driving without a
+    localization fix still reports what its wheels are doing. Only the twist is
+    read — `/cmd_vel` is a commanded value, not a measurement.
+
+    Returns None (never a zeroed sample) when any value is missing, non-finite,
+    out of the generous sanity bounds, or when an age is negative (the stamp is
+    in the future) or absurdly large. ``session_generation`` binds the sample to
+    the drive-base session and the epoch fields to the odometry origin; the
+    caller supplies them from base state, never invented here. A sample that
+    cannot be trusted is simply not sent.
+    """
+    try:
+        linear = float(twist.linear.x)
+        angular = float(twist.angular.z)
+        sample_age = float(sample_age_s)
+        receipt_age = float(receipt_age_s)
+        generation = int(session_generation)
+        epoch_generation = int(odom_epoch_generation)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    epoch = "" if odom_epoch is None else str(odom_epoch)
+    if len(epoch) > MOTION_MAX_EPOCH_LENGTH:
+        return None
+    if not all(math.isfinite(value)
+               for value in (linear, angular, sample_age, receipt_age)):
+        return None
+    if abs(linear) > MOTION_MAX_ABS_LINEAR_M_S or abs(angular) > MOTION_MAX_ABS_ANGULAR_RAD_S:
+        return None
+    if sample_age < 0.0 or receipt_age < 0.0:
+        return None
+    if sample_age > MOTION_MAX_AGE_S or receipt_age > MOTION_MAX_AGE_S:
+        return None
+    if not 0 <= generation <= MOTION_MAX_GENERATION:
+        return None
+    if not 0 <= epoch_generation <= MOTION_MAX_GENERATION:
+        return None
+    return {
+        "linear_velocity": round(linear, 3),
+        "angular_velocity": round(angular, 3),
+        "source": "raw_odom",
+        "sample_age_s": round(sample_age, 3),
+        "receipt_age_s": round(receipt_age, 3),
+        "session_generation": generation,
+        "odom_epoch": epoch,
+        "odom_epoch_generation": epoch_generation,
     }
 
 

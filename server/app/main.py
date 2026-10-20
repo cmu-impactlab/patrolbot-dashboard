@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .api import health, help_guide, history, layouts, recordings, snapshot
+from .api import health, help_guide, history, layouts, recordings, snapshot, tuning
 from .authentication import oidc
 from .database import create_database
 from .settings import Settings, validate_startup
@@ -77,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(layouts.router)
     app.include_router(recordings.router)
     app.include_router(oidc.router)
+    app.include_router(tuning.router)
     app.include_router(robot_gateway.router)
     app.include_router(ui_gateway.router)
 
