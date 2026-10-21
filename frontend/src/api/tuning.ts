@@ -38,6 +38,7 @@ const base = (robotId: string) => `/api/robots/${encodeURIComponent(robotId)}/tu
 /** GET runtime snapshot. Unavailable (503) yields an honest no-snapshot result
  *  that still carries the server's precise reason. */
 export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSnapshot> {
+  const started = performance.now();
   let response: Response;
   try {
     response = await fetch(base(robotId), { headers: { Accept: "application/json" } });
@@ -50,7 +51,10 @@ export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSn
     return reason ? { ...snapshot, reason } : snapshot;
   }
   try {
-    return normalizeSnapshot(await response.json());
+    const snapshot = normalizeSnapshot(await response.json());
+    // Bound observation age conservatively by the complete HTTP round-trip.
+    return snapshot.readback ? { ...snapshot, readback: { ...snapshot.readback,
+      ageS: snapshot.readback.ageS + Math.max(0, performance.now() - started) / 1000 } } : snapshot;
   } catch {
     return normalizeSnapshot(null);
   }

@@ -32,16 +32,17 @@ function Dial({ reading }: { reading: GaugeReading }) {
   const fraction = cap !== null && cap > 0 && reading.value !== null
     ? Math.max(-1, Math.min(1, reading.value / cap)) : 0;
   const needleDeg = fraction * 90;
-  const valueEnd = 90 - Math.abs(fraction) * 90;
+  const valueEnd = 90 - fraction * 90;
+  const needleKnown = reading.value !== null && cap !== null && cap > 0;
   return (
     <svg className="gauge-dial" viewBox="0 0 160 100" aria-hidden="true" focusable="false">
       <path className="gauge-track" d={arc(180, 0)} />
       {reading.value !== null && reading.band !== "unknown" && (
         <path className={`gauge-value gauge-${reading.band}`} d={arc(90, valueEnd)} />
       )}
-      <g className="gauge-needle" transform={`rotate(${needleDeg.toFixed(1)} ${CX} ${CY})`}>
+      {needleKnown && <g className="gauge-needle" transform={`rotate(${needleDeg.toFixed(1)} ${CX} ${CY})`}>
         <line x1={CX} y1={CY} x2={CX} y2={CY - R + 10} />
-      </g>
+      </g>}
       <circle className="gauge-hub" cx={CX} cy={CY} r={4} />
     </svg>
   );
@@ -97,7 +98,7 @@ function Gauge({ title, kind, reading, unit, staleReason, fresh }: {
  * when the odometry is missing or stale. Threshold bands are on the measured
  * magnitude relative to the ACTIVE effective cap reported by the robot.
  */
-export function SpeedGauges({ limits }: { limits: EffectiveLimits | null }) {
+export function SpeedGauges({ limits, limitsAt }: { limits: EffectiveLimits | null; limitsAt?: number | null }) {
   const { motion, motionAt, transportAgeS } = useMotion();
   const generation = useTelemetryStore((state) => state.baseState?.session_generation ?? null);
   const [now, setNow] = useState(() => performance.now());
@@ -105,9 +106,14 @@ export function SpeedGauges({ limits }: { limits: EffectiveLimits | null }) {
     const timer = setInterval(() => setNow(performance.now()), 500);
     return () => clearInterval(timer);
   }, []);
-  const freshness = motionFreshness({ motion, motionAt, transportAgeS }, now, generation);
-  const linear = gaugeReading(freshness.fresh ? freshness.linear : null, limits?.max_linear_m_s ?? null, "linear");
-  const angular = gaugeReading(freshness.fresh ? freshness.angular : null, limits?.max_angular_rad_s ?? null, "angular");
+  // Motion arrives more often than the aging timer. A cached timer timestamp
+  // can precede a newly received sample and incorrectly make its age negative.
+  const checkedAt = Math.max(now, performance.now());
+  const freshness = motionFreshness({ motion, motionAt, transportAgeS }, checkedAt, generation);
+  const freshLimits = limitsAt === undefined || (limitsAt !== null
+    && Number.isFinite(limitsAt) && checkedAt >= limitsAt && checkedAt - limitsAt <= 3000);
+  const linear = gaugeReading(freshness.fresh ? freshness.linear : null, freshLimits ? limits?.max_linear_m_s ?? null : null, "linear");
+  const angular = gaugeReading(freshness.fresh ? freshness.angular : null, freshLimits ? limits?.max_angular_rad_s ?? null : null, "angular");
   return (
     <section className="speed-gauges" aria-label="Measured speed gauges">
       <Gauge title="Linear speed" kind="linear" reading={linear} unit="m/s"

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { isAdministrator, useAuthStore } from "../stores/authStore";
@@ -10,6 +10,7 @@ import {
   editPolicyText,
   fieldBadge,
   formatBounds,
+  freshReadback,
   parseNumericInput,
   REGISTRY_CAPABILITY,
   REGISTRY_GROUPS,
@@ -23,6 +24,7 @@ import type { SavePhase } from "../stores/tuningStore";
 import { SpeedGauges } from "./SpeedGauges";
 
 const SHOWN_GROUPS = ["amcl", "nav2_controller", "nav2_velocity_smoother", "nav2_behavior", "structural_read_only"];
+const ObservedValues = createContext<Record<string, TuningValue>>({});
 
 function groupLabel(id: string): string {
   return REGISTRY_GROUPS.find((group) => group.id === id)?.label ?? id;
@@ -51,6 +53,7 @@ const PHASE_TEXT: Record<SavePhase, string | null> = {
 };
 
 function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
+  const observed = useContext(ObservedValues)[entry.id];
   const snapshot = useTuningStore((state) => state.snapshot);
   const phase = useTuningStore((state) => state.savePhase[entry.id] ?? "idle");
   const detail = useTuningStore((state) => state.saveDetail[entry.id] ?? null);
@@ -69,9 +72,9 @@ function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
     <div className="field-status">
       <span className={`badge badge-${badge}`}>{BADGE_LABEL[badge]}</span>
       {showDesired && <span className="field-saved">{desiredIsSaved ? "Saved" : "Initial YAML value"} {formatValue(desired, entry)} {unitText(entry)}</span>}
-      {snapshot?.available && (activeKnown
-        ? <span className="field-active">Active {formatValue(active, entry)} {unitText(entry)}</span>
-        : <span className="field-active field-unknown">Active value unknown</span>)}
+      {observed !== undefined && <span className="field-observed">Live readback {formatValue(observed, entry)} {unitText(entry)}</span>}
+      {snapshot?.available && activeKnown && <span className="field-active">Verified revision value {formatValue(active, entry)} {unitText(entry)}</span>}
+      {snapshot?.available && observed === undefined && <span className="field-active field-unknown">Live readback unavailable</span>}
       {pending && <span className="field-pending">Pending activation</span>}
       {phaseText && <span className={`field-phase phase-${phase}`} role="status">{phaseText}</span>}
       {detail && <span className="field-detail">{detail}</span>}
@@ -83,6 +86,8 @@ function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
 function NumberField({ entry, editable, disabledReason }: {
   entry: TuningCatalogEntry; editable: boolean; disabledReason: string | null;
 }) {
+  const observed = useContext(ObservedValues)[entry.id];
+  const snapshot = useTuningStore((state) => state.snapshot);
   const draft = useTuningStore((state) => state.drafts[entry.id]);
   const server = useTuningStore((state) => state.snapshot?.desired[entry.id]);
   const conflict = useTuningStore((state) => state.conflictIds.includes(entry.id));
@@ -148,7 +153,10 @@ function NumberField({ entry, editable, disabledReason }: {
             <span className="field-unit">{unitText(entry)}</span>
           </>
         ) : (
-          <span className="field-readonly-value">{value !== "" ? `${value} ${unitText(entry)}` : `${formatValue(entry.default, entry)} ${unitText(entry)} (YAML starting value; not live readback)`}</span>
+          <span className="field-readonly-value">{observed !== undefined
+            ? `${formatValue(observed, entry)} ${unitText(entry)} (live readback)`
+            : snapshot?.available ? "— (live readback unavailable)"
+              : `${formatValue(entry.default, entry)} ${unitText(entry)} (YAML starting value; not live readback)`}</span>
         )}
       </div>
       {!editable && disabledReason && <p className="field-disabled-reason">{disabledReason}</p>}
@@ -262,6 +270,14 @@ function releaseManualSession() {
 }
 
 export function TuningPanel() {
+  const [tick, setTick] = useState(() => performance.now());
+  useEffect(() => {
+    const timer = setInterval(() => setTick(performance.now()), 500);
+    return () => clearInterval(timer);
+  }, []);
+  const now = Math.max(tick, performance.now());
+  const baseState = useTelemetryStore((state) => state.baseState);
+  const baseStateAt = useTelemetryStore((state) => state.baseStateAt);
   const snapshot = useTuningStore((state) => state.snapshot);
   const status = useTuningStore((state) => state.status);
   const load = useTuningStore((state) => state.load);
@@ -275,6 +291,10 @@ export function TuningPanel() {
   const admin = isAdministrator(user);
   const wasConnected = useRef(telemetryConnected);
   const receivedAt = useTuningStore((state) => state.receivedAt);
+  const observed = telemetryConnected
+    ? freshReadback(snapshot, receivedAt, now, baseState?.session_generation ?? null) : null;
+  const limits = observed?.limits ?? null;
+  const limitsAt = observed && receivedAt !== null ? receivedAt - observed.ageS * 1000 : null;
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -289,7 +309,11 @@ export function TuningPanel() {
   }, [telemetryConnected, load]);
 
   const disabledReason = !telemetryConnected ? "The dashboard connection is offline — drafts are unsaved."
-    : editDisabledReason(snapshot, admin);
+    : editDisabledReason(snapshot, admin)
+      ?? (!baseState?.link_connected || baseStateAt === null || now - baseStateAt < 0
+        || now - baseStateAt > 500 || !Number.isFinite(baseState.telemetry_age)
+        || baseState.telemetry_age < 0 || baseState.telemetry_age > .5
+        ? "The SBC link is disconnected or stale — editing is disabled." : null);
   const editable = disabledReason === null;
   const pending = pendingRedeploy(snapshot);
   const livePending = snapshot?.entries.filter((entry) => fieldBadge(entry) === "live"
@@ -312,6 +336,7 @@ export function TuningPanel() {
     .filter(({ entries }) => entries.length > 0);
 
   return (
+    <ObservedValues.Provider value={observed?.values ?? {}}>
     <section className="tuning-panel" aria-label="Robot tuning"
       onFocusCapture={releaseManualSession} onPointerDownCapture={releaseManualSession}>
       <h2>Speed and tuning</h2>
@@ -329,7 +354,7 @@ export function TuningPanel() {
         <p className="subtext">Source catalogue from {REGISTRY_PROVENANCE.baseline_commit.slice(0, 10)} ({REGISTRY_PROVENANCE.inspected}). {REGISTRY_CAPABILITY.advertised ? "" : "The runtime capability is not advertised."}</p>
       )}
 
-      <SpeedGauges limits={telemetryConnected && snapshot?.activeKnown && receivedAt !== null && performance.now() - receivedAt <= 5000 ? snapshot.effectiveLimits : null} />
+      <SpeedGauges limits={telemetryConnected ? limits : null} limitsAt={limitsAt} />
 
       {Object.keys(useTuningStore.getState().drafts).length > 0 && (
         <div className="tuning-drafts">
@@ -376,6 +401,7 @@ export function TuningPanel() {
       {snapshot?.available && <RedeployDialog snapshot={snapshot} />}
       {snapshot?.available && <RestoreDialog snapshot={snapshot} />}
     </section>
+    </ObservedValues.Provider>
   );
 }
 

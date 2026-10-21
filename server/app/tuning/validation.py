@@ -516,6 +516,33 @@ def validate_snapshot(snapshot: Any, registry: dict[str, Any] | None = None) -> 
     _scan(snapshot, max_bytes=RESPONSE_MAX_BYTES)
     index = registry_index(registry if registry is not None else load_registry())
 
+    readback = snapshot.get("readback")
+    if readback is not None:
+        if (not isinstance(readback, dict) or set(readback) != {
+                "source", "age_s", "hardware_session_generation", "values", "limits"}
+                or readback["source"] != "ros_parameters"
+                or not is_finite_number(readback["age_s"]) or not 0 <= readback["age_s"] <= 3
+                or not is_strict_int(readback["hardware_session_generation"])
+                or not 0 <= readback["hardware_session_generation"] <= JS_SAFE_INT
+                or not isinstance(readback["values"], dict)):
+            raise TuningInvalid("Parameter readback is invalid.", code="bad_type")
+        for pid, value in readback["values"].items():
+            if pid not in index:
+                raise TuningInvalid("Unknown parameter readback id.", code="unknown_logical_id")
+            _snapshot_scalar(index[pid], value, check_bounds=False)
+        limits = readback["limits"]
+        if limits is not None:
+            if not isinstance(limits, dict) or set(limits) != {"max_linear_m_s", "max_angular_rad_s"}:
+                raise TuningInvalid("Invalid observed speed limits.", code="bad_type")
+            for pid, hard in (("max_linear_m_s", .30), ("max_angular_rad_s", .70)):
+                value = limits[pid]
+                if (not is_finite_number(value) or not 0 <= value <= hard
+                        or value != readback["values"].get(pid)):
+                    raise TuningInvalid("Observed cap lacks matching readback.", code="bad_type")
+    reason = snapshot.get("write_disabled_reason")
+    if reason is not None and (not isinstance(reason, str) or len(reason) > MAX_DETAIL):
+        raise TuningInvalid("Invalid editing refusal reason.", code="bad_type")
+
     uninitialized = snapshot.get("session_id") is None and snapshot.get("desired_revision") is None
     if not uninitialized and canonical_uuid(snapshot.get("session_id")) is None:
         raise TuningInvalid("snapshot.session_id must be a canonical UUID.",
