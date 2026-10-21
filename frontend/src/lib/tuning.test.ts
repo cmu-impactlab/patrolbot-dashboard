@@ -9,6 +9,7 @@ import {
   fieldBadge,
   formatBounds,
   gaugeReading,
+  freshReadback,
   normalizeSnapshot,
   outcomeLabel,
   parseNumericInput,
@@ -32,6 +33,49 @@ const exclusiveLow = registryEntry("amcl.pf_err")!;
 // so the exclusive-upper example must be the robot's `< 1.5 m` approach range.
 const exclusiveHigh = registryEntry("nav2.controller.approach_velocity_scaling_dist")!;
 const pfZ = registryEntry("amcl.pf_z")!;
+
+describe("uninitialized live parameter observations", () => {
+  function uninitialized() {
+    return { session_id: null, desired_revision: null, active_revision: null,
+      active_known: false, writable: false, activation_supported: false,
+      desired: { "amcl.alpha1": .05 }, active: {}, pending_keys: [],
+      catalog: BUNDLED_ENTRIES,
+      safe_apply: { allowed: false, reason: "Robot tuning has not been initialized." },
+      write_disabled_reason: "Robot tuning has not been initialized.",
+      readback: { source: "ros_parameters", age_s: .1, hardware_session_generation: 1,
+        values: { "amcl.alpha1": .123, max_linear_m_s: .3, max_angular_rad_s: .7 },
+        limits: { max_linear_m_s: .3, max_angular_rad_s: .7 } } };
+  }
+  it("does not discard a valid read-only snapshot merely because no saved session exists", () => {
+    const snapshot = normalizeSnapshot(uninitialized());
+    expect(snapshot.available).toBe(true);
+    expect(snapshot.catalogFromServer).toBe(true);
+    expect(snapshot.sessionId).toBeNull();
+    expect(snapshot.desiredRevision).toBeNull();
+    expect(snapshot.activeKnown).toBe(false);
+    expect(snapshot.writable).toBe(false);
+    expect(snapshot.readback?.values["amcl.alpha1"]).toBe(.123);
+    expect(snapshot.desired["amcl.alpha1"]).toBe(.05);
+    expect(editDisabledReason(snapshot, true)).toBe("Robot tuning has not been initialized.");
+  });
+  it("rejects missing sessions that claim writable or active state", () => {
+    for (const override of [{ writable: true }, { active_known: true }, { activation_supported: true }]) {
+      expect(normalizeSnapshot({ ...uninitialized(), ...override }).available).toBe(false);
+    }
+  });
+  it("expires observations and rejects old-session or future receipts", () => {
+    const snapshot = normalizeSnapshot(uninitialized());
+    expect(freshReadback(snapshot, 1000, 1100, 1)?.values["amcl.alpha1"]).toBe(.123);
+    expect(freshReadback(snapshot, 1000, 4100, 1)).toBeNull();
+    expect(freshReadback(snapshot, 1000, 900, 1)).toBeNull();
+    expect(freshReadback(snapshot, 1000, 1100, 2)).toBeNull();
+  });
+  it("never uses an unobserved or out-of-envelope number as a gauge cap", () => {
+    const raw = uninitialized();
+    raw.readback.limits.max_linear_m_s = .4;
+    expect(normalizeSnapshot(raw).readback?.limits).toBeNull();
+  });
+});
 
 /** A realistic server snapshot. Catalog omitted so the bundled registry is used. */
 function serverSnapshot(overrides: Record<string, unknown> = {}) {

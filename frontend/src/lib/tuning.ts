@@ -113,6 +113,8 @@ export interface TuningJob {
 /** Coordination-contract shape, with every field optional so a partial or
  *  older response is handled honestly instead of defaulting to "active". */
 export interface RawTuningSnapshot {
+  readback?: unknown;
+  write_disabled_reason?: unknown;
   session_id?: unknown;
   desired_revision?: unknown;
   active_revision?: unknown;
@@ -140,6 +142,8 @@ export interface RawTuningSnapshot {
 }
 
 export interface NormalizedSnapshot {
+  readback?: ParameterReadback | null;
+  writeDisabledReason?: string | null;
   available: boolean;
   reason: string | null;
   compatibility: string;
@@ -161,6 +165,36 @@ export interface NormalizedSnapshot {
   pendingKeys: string[];
   entries: TuningCatalogEntry[];
   catalogFromServer: boolean;
+}
+
+export interface ParameterReadback {
+  ageS: number;
+  generation: number;
+  values: Record<string, TuningValue>;
+  limits: { max_linear_m_s: number; max_angular_rad_s: number } | null;
+}
+
+function normalizeReadback(raw: unknown): ParameterReadback | null {
+  if (!isPlainObject(raw) || raw.source !== "ros_parameters") return null;
+  const age = finite(raw.age_s);
+  const generation = safeRevision(raw.hardware_session_generation);
+  if (age === null || age < 0 || age > 3 || generation === null || !isPlainObject(raw.values)) return null;
+  const values = valueMap(raw.values);
+  const limits = isPlainObject(raw.limits) ? raw.limits : null;
+  const linear = finite(limits?.max_linear_m_s);
+  const angular = finite(limits?.max_angular_rad_s);
+  return { ageS: age, generation, values,
+    limits: linear !== null && angular !== null && linear >= 0 && linear <= .30 && angular >= 0 && angular <= .70
+      && values.max_linear_m_s === linear && values.max_angular_rad_s === angular
+      ? { max_linear_m_s: linear, max_angular_rad_s: angular } : null };
+}
+
+export function freshReadback(snapshot: NormalizedSnapshot | null, receivedAt: number | null,
+  now: number, generation: number | null): ParameterReadback | null {
+  const readback = snapshot?.readback;
+  if (!readback || receivedAt === null || generation !== readback.generation) return null;
+  const localAge = (now - receivedAt) / 1000;
+  return Number.isFinite(localAge) && localAge >= 0 && localAge + readback.ageS <= 3 ? readback : null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -295,10 +329,15 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
 
   const isSlice1 = raw.kind === "tuning_state_snapshot";
   const sessionId = typeof raw.session_id === "string" && raw.session_id.length > 0 ? raw.session_id : null;
-  if (!sessionId && !isSlice1) return base;
+  const uninitialized = raw.session_id === null && raw.desired_revision === null
+    && raw.active_known === false && raw.writable === false && raw.activation_supported === false
+    && catalog !== null && safeApply.allowed === false;
+  if (!sessionId && !isSlice1 && !uninitialized) return base;
 
   return {
     available: true,
+    readback: normalizeReadback(raw.readback),
+    writeDisabledReason: typeof raw.write_disabled_reason === "string" ? raw.write_disabled_reason : null,
     reason: null,
     compatibility: typeof raw.compatibility === "string" ? raw.compatibility : isSlice1 ? "contract-only" : "unknown",
     sessionId,
@@ -326,7 +365,9 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
 export function editDisabledReason(snapshot: NormalizedSnapshot | null, isAdmin: boolean): string | null {
   if (!snapshot || !snapshot.available) return "The robot tuning snapshot is unavailable — showing read-only source candidates.";
   if (!isAdmin) return "An administrator account is required to change tuning.";
-  if (!snapshot.writable) return "The robot reported its tuning store is not writable.";
+  if (!snapshot.writable) return snapshot.writeDisabledReason ?? (snapshot.desiredRevision === null
+    ? "Robot tuning has not been initialized; editing is disabled. Live readback remains available."
+    : "The robot reported its tuning store is not writable.");
   return null;
 }
 

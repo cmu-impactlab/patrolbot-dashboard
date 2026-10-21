@@ -77,6 +77,7 @@ function snapshot(entries: TuningCatalogEntry[], desired: Record<string, number>
 function ready(snap: NormalizedSnapshot, drafts: Record<string, string> = {}) {
   useTuningStore.setState({
     snapshot: snap, status: "ready", drafts, savePhase: {}, saveDetail: {},
+    receivedAt: performance.now(),
     saveRequestIds: {}, draftBaseRevision: 1, conflictIds: [], job: null,
     redeploy: { phase: "idle", detail: null, requestId: null },
     restore: { phase: "idle", detail: null, requestId: null },
@@ -89,7 +90,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(fetchTuningSnapshot).mockImplementation(() => new Promise<NormalizedSnapshot>(() => {}));
   useAuthStore.setState({ user: { id: 1, username: "admin", display_name: "Admin", role: "administrator", auth_mode: "local" } });
-  useTelemetryStore.setState({ wsConnected: true, robotId: "test-robot" });
+  useTelemetryStore.setState({ wsConnected: true, robotId: "test-robot", baseStateAt: performance.now(),
+    baseState: { session_generation: 1, link_connected: true, telemetry_age: 0,
+      motors_enabled: false, localization_ready: false } as never });
 });
 
 afterEach(() => { cleanup(); });
@@ -218,6 +221,7 @@ describe("a pending save stays scoped to the field's own group", () => {
   it("submits only the edited group when the slider debounce fires", async () => {
     vi.useFakeTimers();
     try {
+      useTelemetryStore.setState({ baseStateAt: performance.now() });
       const drafts = { [MIN_APPROACH.id]: "0.08", [SIGMA.id]: "0.3" };
       ready(snapshot([MIN_APPROACH, SIGMA], { [MIN_APPROACH.id]: 0.08, [SIGMA.id]: 0.3 }), drafts);
       render(<TuningPanel />);
@@ -253,14 +257,38 @@ describe("saved versus starting value labelling", () => {
 });
 
 describe("read-only fallback", () => {
-  it("labels the YAML starting value and invents no active value", () => {
+  it("shows live values before commissioning without calling them saved or enabling writes", () => {
+    const snap = normalizeSnapshot({ session_id: null, desired_revision: null,
+      active_known: false, writable: false, activation_supported: false,
+      safe_apply: { allowed: false, reason: "Robot tuning has not been initialized." },
+      catalog: [SIGMA], desired: { [SIGMA.id]: .2 }, active: {}, pending_keys: [],
+      readback: { source: "ros_parameters", age_s: 0, hardware_session_generation: 1,
+        values: { [SIGMA.id]: .17 }, limits: null } });
+    ready(snap);
+    render(<TuningPanel />);
+    expect(screen.getByText(/0\.17 m\/s \(live readback\)/)).toBeTruthy();
+    expect(screen.getByText(/Live readback 0\.17/)).toBeTruthy();
+    expect(screen.queryByText(/bundled source catalogue/)).toBeNull();
+    expect(screen.queryByRole("slider")).toBeNull();
+  });
+
+  it("keeps editing independent of localization and motors but blocks a lost SBC link", () => {
+    ready(snapshot([SIGMA], { [SIGMA.id]: .2 }));
+    render(<TuningPanel />);
+    expect(screen.getByLabelText(SIGMA.label).tagName).toBe("INPUT");
+    act(() => useTelemetryStore.setState({ baseState: {
+      session_generation: 1, link_connected: false, telemetry_age: 0 } as never }));
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.getAllByText(/SBC link is disconnected or stale/).length).toBeGreaterThan(0);
+  });
+  it("does not substitute YAML for unavailable live readback", () => {
     const readOnly = entry({ id: "test.readonly", label: "Read-only parameter", group: "amcl",
       accepts_edits: false, activatable: false, default: 0.2 });
     ready(snapshot([readOnly], {}));
     render(<TuningPanel />);
-    expect(screen.getByText(/0\.2 m\/s \(YAML starting value; not live readback\)/)).toBeTruthy();
+    expect(screen.getByText(/— \(live readback unavailable\)/)).toBeTruthy();
     expect(screen.queryByRole("slider")).toBeNull();
-    expect(screen.getByText(/Active value unknown/)).toBeTruthy();
+    expect(screen.getByText(/^Live readback unavailable$/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/source candidate/);
   });
 });

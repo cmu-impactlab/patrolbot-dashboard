@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SpeedGauges } from "./SpeedGauges";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { MotionData } from "../types/protocol";
@@ -25,6 +25,7 @@ function setMotion(sample: MotionData | null, at: number | null = performance.no
     motion: sample,
     motionAt: sample === null ? null : at,
     baseState: { session_generation: generation } as never,
+    motionTransportAgeS: 0,
   });
 }
 
@@ -33,10 +34,39 @@ const figureOf = (name: string) => meter(`Measured ${name} speed`).closest("figu
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   useTelemetryStore.setState({ motion: null, motionAt: null, baseState: null });
 });
 
 describe("measured speed gauges", () => {
+  it("does not flicker when motion arrives between the 500 ms clock ticks", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    setMotion(motion(), 0);
+    render(<SpeedGauges limits={limits} />);
+    for (const at of [100, 200, 300, 400]) {
+      clock.mockReturnValue(at);
+      act(() => setMotion(motion({ linear_velocity: at / 2000 }), at));
+      expect(meter("Measured linear speed").getAttribute("aria-valuenow")).toBe(String(at / 2000));
+      expect(screen.queryByText(/invalid age/)).toBeNull();
+    }
+  });
+
+  it("still rejects genuinely future-dated motion", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    setMotion(motion(), 100);
+    render(<SpeedGauges limits={limits} />);
+    expect(meter("Measured linear speed").getAttribute("aria-valuenow")).toBeNull();
+  });
+
+  it("expires observed caps without hiding fresh measured speed", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    setMotion(motion(), 0);
+    render(<SpeedGauges limits={limits} limitsAt={0} />);
+    clock.mockReturnValue(4000);
+    act(() => setMotion(motion(), 4000));
+    expect(meter("Measured linear speed").getAttribute("aria-valuenow")).toBe("0.1");
+    expect(screen.getAllByText(/active cap unknown/)).toHaveLength(2);
+  });
   it("publishes signed measured values, direction and percent of the active cap", () => {
     setMotion(motion());
     render(<SpeedGauges limits={limits} />);
@@ -71,6 +101,7 @@ describe("measured speed gauges", () => {
     expect(screen.getAllByText("No fresh speed data").length).toBeGreaterThanOrEqual(2);
     expect(meter("Measured linear speed").getAttribute("aria-valuenow")).toBeNull();
     expect(figureOf("linear").className).toContain("gauge-stale");
+    expect(figureOf("linear").querySelector(".gauge-needle")).toBeNull();
   });
 
   it("marks stale samples and never shows their values", () => {
@@ -99,5 +130,13 @@ describe("measured speed gauges", () => {
     render(<SpeedGauges limits={null} />);
     expect(screen.getAllByText(/active cap unknown/).length).toBe(2);
     expect(meter("Measured linear speed").getAttribute("aria-valuetext")).toContain("cap unknown");
+    expect(figureOf("linear").querySelector(".gauge-needle")).toBeNull();
+  });
+
+  it("draws the value band on the same signed side as the needle", () => {
+    setMotion(motion({ linear_velocity: -.15 }));
+    render(<SpeedGauges limits={limits} />);
+    expect(figureOf("linear").querySelector(".gauge-needle")?.getAttribute("transform")).toContain("rotate(-45.0");
+    expect(figureOf("linear").querySelector("path.gauge-value")?.getAttribute("d")).toContain("0 0 0 34.75");
   });
 });
