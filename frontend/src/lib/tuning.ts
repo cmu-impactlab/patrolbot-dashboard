@@ -118,10 +118,12 @@ export interface RawTuningSnapshot {
   session_id?: unknown;
   desired_revision?: unknown;
   active_revision?: unknown;
+  committed_active_revision?: unknown;
   last_known_good_revision?: unknown;
   active_known?: unknown;
   desired?: unknown;
   active?: unknown;
+  committed_active?: unknown;
   field_active_known?: unknown;
   effective_limits?: unknown;
   pending_keys?: unknown;
@@ -150,6 +152,7 @@ export interface NormalizedSnapshot {
   sessionId: string | null;
   desiredRevision: number | null;
   activeRevision: number | null;
+  committedActiveRevision: number | null;
   lastKnownGoodRevision: number | null;
   writable: boolean;
   activationSupported: boolean;
@@ -163,6 +166,9 @@ export interface NormalizedSnapshot {
   active: Record<string, TuningValue | null>;
   fieldActiveKnown: Record<string, boolean>;
   pendingKeys: string[];
+  pendingKeysKnown?: boolean;
+  pendingKeysTrustworthy?: boolean;
+  committedActive?: Record<string, TuningValue>;
   entries: TuningCatalogEntry[];
   catalogFromServer: boolean;
 }
@@ -178,13 +184,18 @@ function normalizeReadback(raw: unknown): ParameterReadback | null {
   if (!isPlainObject(raw) || raw.source !== "ros_parameters") return null;
   const age = finite(raw.age_s);
   const generation = safeRevision(raw.hardware_session_generation);
-  if (age === null || age < 0 || age > 3 || generation === null || !isPlainObject(raw.values)) return null;
+  // Expired observations remain usable as visibly labelled last-known values;
+  // they never renew as live and never supply gauge caps. A day-old value is
+  // still shown as old rather than silently substituted with YAML.
+  if (age === null || age < 0 || age > 86_400 || generation === null || !isPlainObject(raw.values)) return null;
   const values = valueMap(raw.values);
   const limits = isPlainObject(raw.limits) ? raw.limits : null;
   const linear = finite(limits?.max_linear_m_s);
   const angular = finite(limits?.max_angular_rad_s);
   return { ageS: age, generation, values,
-    limits: linear !== null && angular !== null && linear >= 0 && linear <= .30 && angular >= 0 && angular <= .70
+    // Limits describe the live runtime envelope. An expired observation may
+    // still be shown, but its cap is not evidence of the current envelope.
+    limits: age <= 3 && linear !== null && angular !== null && linear >= 0 && linear <= .30 && angular >= 0 && angular <= .70
       && values.max_linear_m_s === linear && values.max_angular_rad_s === angular
       ? { max_linear_m_s: linear, max_angular_rad_s: angular } : null };
 }
@@ -263,6 +274,7 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     sessionId: null,
     desiredRevision: null,
     activeRevision: null,
+    committedActiveRevision: null,
     lastKnownGoodRevision: null,
     writable: false,
     activationSupported: false,
@@ -276,6 +288,7 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     active: {},
     fieldActiveKnown: {},
     pendingKeys: [],
+    pendingKeysKnown: false,
     entries: BUNDLED_ENTRIES,
     catalogFromServer: false,
   };
@@ -328,6 +341,15 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     : { allowed: false, reason: "The robot did not report whether a safe apply is allowed." };
 
   const isSlice1 = raw.kind === "tuning_state_snapshot";
+  const committedActiveRevision = safeRevision(raw.committed_active_revision)
+    ?? (isSlice1 ? safeRevision(slice1Revisions.active)
+      : globalActiveKnown ? safeRevision(raw.active_revision) : null);
+  // The robot computes pending_keys against the committed active revision. A
+  // never-activated store instead reports every desired key as "pending"; that
+  // is an unknown baseline, not a list of changes the operator made.
+  const pendingKeysTrustworthy = Array.isArray(raw.pending_keys)
+    ? committedActiveRevision !== null || globalActiveKnown
+    : isSlice1;
   const sessionId = typeof raw.session_id === "string" && raw.session_id.length > 0 ? raw.session_id : null;
   const uninitialized = raw.session_id === null && raw.desired_revision === null
     && raw.active_known === false && raw.writable === false && raw.activation_supported === false
@@ -343,6 +365,7 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     sessionId,
     desiredRevision: safeRevision(raw.desired_revision) ?? safeRevision(slice1Revisions.desired),
     activeRevision: safeRevision(raw.active_revision) ?? safeRevision(slice1Revisions.active),
+    committedActiveRevision,
     lastKnownGoodRevision: safeRevision(raw.last_known_good_revision) ?? safeRevision(slice1Revisions.last_known_good),
     writable: raw.writable === true,
     activationSupported: raw.activation_supported === true,
@@ -356,6 +379,9 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     active,
     fieldActiveKnown,
     pendingKeys: pendingRaw.length ? pendingRaw : slice1Pending,
+    pendingKeysKnown: Array.isArray(raw.pending_keys) || isSlice1,
+    pendingKeysTrustworthy,
+    committedActive: isPlainObject(raw.committed_active) ? valueMap(raw.committed_active) : undefined,
     entries: catalog ?? BUNDLED_ENTRIES,
     catalogFromServer: catalog !== null,
   };
@@ -373,15 +399,25 @@ export function editDisabledReason(snapshot: NormalizedSnapshot | null, isAdmin:
 
 /** A saved restart-required field that the robot has not activated. */
 export function unappliedRestartFields(snapshot: NormalizedSnapshot): TuningCatalogEntry[] {
-  return snapshot.entries.filter((entry) => {
-    if (fieldBadge(entry) !== "redeploy") return false;
-    if (snapshot.pendingKeys.includes(entry.id)) return true;
-    if (!snapshot.fieldActiveKnown[entry.id]) return false;
-    // The runtime verified the generated artifact for this exact revision.
-    // A source target may legitimately be clamped by a lower global ceiling.
-    if (snapshot.desiredRevision !== null && snapshot.activeRevision === snapshot.desiredRevision) return false;
-    return !valuesEqual(snapshot.desired[entry.id], snapshot.active[entry.id]);
-  });
+  return snapshot.entries.filter(entry => fieldBadge(entry) === "redeploy" && parameterPending(snapshot, entry));
+}
+
+/** Pending is saved intent owned by the robot, not the parameter's mutability
+ * or a difference between an unclamped target and an effective runtime value.
+ * An explicit list is only trusted when the robot also identified the active
+ * baseline; otherwise its "all desired keys" answer is not evidence of edits. */
+export function parameterPending(snapshot: NormalizedSnapshot | null, entry: TuningCatalogEntry): boolean {
+  if (!snapshot?.available || snapshot.desiredRevision === null || !entry.accepts_edits
+    || entry.protected || entry.not_applicable) return false;
+  if (snapshot.pendingKeysKnown && snapshot.pendingKeysTrustworthy) {
+    return snapshot.pendingKeys.includes(entry.id);
+  }
+  // Without a usable explicit list, compare against committed targets. The
+  // effective runtime value may be clamped, so it is never the baseline.
+  const baseline = snapshot.committedActive ?? (snapshot.activeKnown ? snapshot.active : null);
+  const before = baseline?.[entry.id];
+  return before !== undefined && before !== null && snapshot.desired[entry.id] !== undefined
+    && !valuesEqual(snapshot.desired[entry.id], before);
 }
 
 export function affectedServices(entries: TuningCatalogEntry[]): string[] {

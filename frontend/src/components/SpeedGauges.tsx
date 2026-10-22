@@ -27,23 +27,43 @@ function arc(startDeg: number, endDeg: number): string {
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${R} ${R} 0 0 ${sweep} ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 
-function Dial({ reading }: { reading: GaugeReading }) {
+export function capMarkerAngles(cap: number | null, scale: number): number[] {
+  if (cap === null || !Number.isFinite(cap) || cap < 0 || cap > scale) return [];
+  const angle = (cap / scale) * 90;
+  return angle === 0 ? [90] : [90 + angle, 90 - angle];
+}
+
+function Dial({ reading, scale, unit }: { reading: GaugeReading; scale: number; unit: string }) {
   const cap = reading.cap;
-  const fraction = cap !== null && cap > 0 && reading.value !== null
-    ? Math.max(-1, Math.min(1, reading.value / cap)) : 0;
+  // A fixed, labelled hard-envelope scale lets a lower runtime cap have a
+  // meaningful red marker. The hard envelope is NOT used as a cap fallback.
+  const fraction = reading.value !== null ? Math.max(-1, Math.min(1, reading.value / scale)) : 0;
   const needleDeg = fraction * 90;
   const valueEnd = 90 - fraction * 90;
-  const needleKnown = reading.value !== null && cap !== null && cap > 0;
+  const needleKnown = reading.value !== null;
+  const markers = capMarkerAngles(cap, scale);
   return (
-    <svg className="gauge-dial" viewBox="0 0 160 100" aria-hidden="true" focusable="false">
+    <svg className="gauge-dial" viewBox="0 0 160 114" aria-hidden="true" focusable="false">
       <path className="gauge-track" d={arc(180, 0)} />
       {reading.value !== null && reading.band !== "unknown" && (
         <path className={`gauge-value gauge-${reading.band}`} d={arc(90, valueEnd)} />
       )}
+      {markers.length > 0 && <g className="gauge-cap-markers" data-cap={cap}>
+        <title>Live speed cap ±{cap?.toFixed(2)} {unit}</title>
+        {markers.map(angle => {
+          const rad = angle * Math.PI / 180;
+          return <line key={angle} className="gauge-cap-marker" data-angle={angle}
+            x1={CX + (R - 10) * Math.cos(rad)} y1={CY - (R - 10) * Math.sin(rad)}
+            x2={CX + (R + 7) * Math.cos(rad)} y2={CY - (R + 7) * Math.sin(rad)} />;
+        })}
+      </g>}
       {needleKnown && <g className="gauge-needle" transform={`rotate(${needleDeg.toFixed(1)} ${CX} ${CY})`}>
         <line x1={CX} y1={CY} x2={CX} y2={CY - R + 10} />
       </g>}
       <circle className="gauge-hub" cx={CX} cy={CY} r={4} />
+      <g className="gauge-scale"><text x={8} y={108}>−{scale.toFixed(2)}</text>
+        <text x={80} y={108} textAnchor="middle">0</text>
+        <text x={152} y={108} textAnchor="end">+{scale.toFixed(2)}</text></g>
     </svg>
   );
 }
@@ -66,7 +86,7 @@ function Gauge({ title, kind, reading, unit, staleReason, fresh }: {
   return (
     <figure className={`gauge gauge-${reading.band}${fresh ? "" : " gauge-stale"}`}>
       <figcaption className="gauge-title">{title}</figcaption>
-      <Dial reading={reading} />
+      <Dial reading={reading} scale={kind === "linear" ? .30 : .70} unit={unit} />
       <div className="gauge-readout" role="meter" aria-label={`Measured ${kind} speed`}
         aria-valuemin={reading.cap !== null ? -Math.abs(reading.cap) : undefined}
         aria-valuemax={reading.cap !== null ? Math.abs(reading.cap) : undefined}
@@ -120,7 +140,7 @@ export function SpeedGauges({ limits, limitsAt }: { limits: EffectiveLimits | nu
         fresh={freshness.fresh} staleReason={freshness.reason} />
       <Gauge title="Angular speed" kind="angular" reading={angular} unit="rad/s"
         fresh={freshness.fresh} staleReason={freshness.reason} />
-      <p className="speed-gauges-note">Measured from raw wheel odometry, independent of localization. Bands: under 50% green, under 80% amber, 80%+ red.</p>
+      <p className="speed-gauges-note"><span className="cap-legend" />Red marks: live cap, not a pending target. Raw wheel odometry; no localization required.</p>
     </section>
   );
 }

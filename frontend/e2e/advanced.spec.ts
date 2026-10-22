@@ -2,13 +2,13 @@ import { expect, test } from "@playwright/test";
 import { dashboardFixture, READY_BASE_STATE } from "./fixtures";
 const TELEOP_BASE = { ...READY_BASE_STATE, dock_state_valid: true, dock_state: "CLEAR_CONFIRMED" };
 
-test("profile Advance opens a fresh authenticated advanced tab without starting input", async ({ page, context }) => {
+test("profile Advanced opens a fresh authenticated advanced tab without starting input", async ({ page, context }) => {
   await dashboardFixture(page);
   await page.goto("/");
   const profile = page.getByRole("button", { name: "User profile" });
   if (!(await profile.isVisible())) await page.getByRole("button", { name: "Menu", exact: true }).click();
   await profile.click();
-  const link = page.getByRole("menuitem", { name: "Advance", exact: true });
+  const link = page.getByRole("menuitem", { name: "Advanced", exact: true });
   await expect(link).toHaveAttribute("href", "/?advanced=1");
   await expect(link).toHaveAttribute("target", "_blank");
   await expect(link).toHaveAttribute("rel", "noopener noreferrer");

@@ -39,9 +39,12 @@ const base = (robotId: string) => `/api/robots/${encodeURIComponent(robotId)}/tu
  *  that still carries the server's precise reason. */
 export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSnapshot> {
   const started = performance.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
   let response: Response;
   try {
-    response = await fetch(base(robotId), { headers: { Accept: "application/json" } });
+    response = await fetch(base(robotId), { headers: { Accept: "application/json" }, signal: controller.signal });
   } catch {
     return normalizeSnapshot(null);
   }
@@ -57,6 +60,9 @@ export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSn
       ageS: snapshot.readback.ageS + Math.max(0, performance.now() - started) / 1000 } } : snapshot;
   } catch {
     return normalizeSnapshot(null);
+  }
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

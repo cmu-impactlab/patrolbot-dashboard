@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SpeedGauges } from "./SpeedGauges";
+import { capMarkerAngles, SpeedGauges } from "./SpeedGauges";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import type { MotionData } from "../types/protocol";
 
@@ -130,7 +130,10 @@ describe("measured speed gauges", () => {
     render(<SpeedGauges limits={null} />);
     expect(screen.getAllByText(/active cap unknown/).length).toBe(2);
     expect(meter("Measured linear speed").getAttribute("aria-valuetext")).toContain("cap unknown");
-    expect(figureOf("linear").querySelector(".gauge-needle")).toBeNull();
+    // The explicitly labelled fixed hard-envelope scale is still known, but
+    // no runtime cap may be invented from it.
+    expect(figureOf("linear").querySelector(".gauge-needle")).not.toBeNull();
+    expect(figureOf("linear").querySelector(".gauge-cap-marker")).toBeNull();
   });
 
   it("draws the value band on the same signed side as the needle", () => {
@@ -138,5 +141,17 @@ describe("measured speed gauges", () => {
     render(<SpeedGauges limits={limits} />);
     expect(figureOf("linear").querySelector(".gauge-needle")?.getAttribute("transform")).toContain("rotate(-45.0");
     expect(figureOf("linear").querySelector("path.gauge-value")?.getAttribute("d")).toContain("0 0 0 34.75");
+  });
+
+  it("places red cap marks on the fixed scale, never at a pending target", () => {
+    expect(capMarkerAngles(.15, .3)).toEqual([135, 45]);
+    expect(capMarkerAngles(null, .3)).toEqual([]);
+    expect(capMarkerAngles(.4, .3)).toEqual([]);
+    expect(capMarkerAngles(0, .3)).toEqual([90]);
+    setMotion(motion());
+    render(<SpeedGauges limits={{ max_linear_m_s: .15, max_angular_rad_s: .35 }} />);
+    const markers = figureOf("linear").querySelectorAll(".gauge-cap-marker");
+    expect([...markers].map(m => m.getAttribute("data-angle"))).toEqual(["135", "45"]);
+    expect(figureOf("linear").querySelector(".gauge-cap-markers")?.getAttribute("data-cap")).toBe("0.15");
   });
 });

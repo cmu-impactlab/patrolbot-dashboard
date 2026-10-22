@@ -6,6 +6,7 @@ import {
   effectiveValues,
   newRequestId,
   parseNumericInput,
+  parameterPending,
   redeployRequest,
   registryEntry,
   restoreRequest,
@@ -93,21 +94,22 @@ function withDetail(current: Record<string, string | null>, ids: string[], detai
 /** Human-facing status for a saved value, using only server-reported state. */
 export function savedPhaseFor(snapshot: NormalizedSnapshot | null, entry: TuningCatalogEntry): SavePhase {
   if (!snapshot?.available || snapshot.desiredRevision === null) return "idle";
-  const verifiedRevision = snapshot.activeRevision === snapshot.desiredRevision;
-  if (snapshot.pendingKeys.includes(entry.id) || !snapshot.fieldActiveKnown[entry.id]
-      || (!verifiedRevision && snapshot.active[entry.id] !== snapshot.desired[entry.id])) return "saved_pending";
+  if (parameterPending(snapshot, entry)) return "saved_pending";
   return "saved";
 }
 
 export const useTuningStore = create<TuningState>((set, get) => {
+  const pendingLoads = new Map<string, Promise<void>>();
   /** Apply a mutation response: merge the new snapshot and update field phases. */
   const absorb = (response: TuningResponse, ids: string[]) => {
     const snapshot = response.snapshot ?? get().snapshot;
     const detail = response.detail || null;
     if (response.outcome === "ok") {
       // A durable save is only "saved" once the robot returns a snapshot.
-      const phase: SavePhase = snapshot && ids.every((id) => snapshot.fieldActiveKnown[id]
-        && snapshot.desired[id] === snapshot.active[id] && !snapshot.pendingKeys.includes(id)) ? "saved" : "saved_pending";
+      const phase: SavePhase = snapshot && ids.some(id => {
+        const entry = snapshot.entries.find(candidate => candidate.id === id) ?? registryEntry(id);
+        return entry ? parameterPending(snapshot, entry) : false;
+      }) ? "saved_pending" : "saved";
       set({
         snapshot,
         receivedAt: performance.now(),
@@ -202,12 +204,24 @@ export const useTuningStore = create<TuningState>((set, get) => {
     restoreBase: null,
     restoreSession: null,
 
-    load: async () => {
+    load: () => {
       const requestedRobot = robotId();
+      const pending = pendingLoads.get(requestedRobot);
+      if (pending) return pending;
       const requestStarted = performance.now();
+      const fetch = async () => {
       set({ status: "loading" });
       const snapshot = await fetchTuningSnapshot(requestedRobot);
       if (requestedRobot !== robotId() || (get().receivedAt !== null && get().receivedAt! > requestStarted)) return;
+      const previous = get().snapshot;
+      if (!snapshot.available && previous?.catalogFromServer) {
+        // Keep confirmed targets/last observations visible, never relabel them
+        // as fresh or renew their age after a failed poll. All writes stay off.
+        set({ snapshot: { ...previous, available: false, writable: false,
+          activationSupported: false, safeApply: { allowed: false, reason: snapshot.reason ?? "Readback unavailable." },
+          reason: snapshot.reason }, status: "unavailable", loadReason: snapshot.reason });
+        return;
+      }
       const drafts = get().drafts;
       const dirty = Object.keys(drafts);
       // Reconnect must not silently replay or discard drafts. If the saved
@@ -232,6 +246,12 @@ export const useTuningStore = create<TuningState>((set, get) => {
         saveDetail: moved ? withDetail(get().saveDetail, dirty, "The robot's saved revision changed while you were editing. Review and reapply, or discard your draft.") : get().saveDetail,
         job: snapshot.latestJob ?? get().job,
       });
+      };
+      const operation = fetch().finally(() => {
+        if (pendingLoads.get(requestedRobot) === operation) pendingLoads.delete(requestedRobot);
+      });
+      pendingLoads.set(requestedRobot, operation);
+      return operation;
     },
 
     setDraft: (id, text) => {

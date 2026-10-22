@@ -1,17 +1,17 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { isAdministrator, useAuthStore } from "../stores/authStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useTeleopStore } from "../stores/teleopStore";
 import {
-  BADGE_LABEL,
   editDisabledReason,
   editPolicyText,
   fieldBadge,
   formatBounds,
-  freshReadback,
+  parameterPending,
   parseNumericInput,
+  BUNDLED_ENTRIES,
   REGISTRY_CAPABILITY,
   REGISTRY_GROUPS,
   REGISTRY_PROVENANCE,
@@ -21,10 +21,10 @@ import {
 import type { NormalizedSnapshot, TuningCatalogEntry, TuningValue } from "../lib/tuning";
 import { pendingRedeploy, useTuningStore } from "../stores/tuningStore";
 import type { SavePhase } from "../stores/tuningStore";
-import { SpeedGauges } from "./SpeedGauges";
+import { useTuningReadback } from "../lib/useTuningReadback";
 
-const SHOWN_GROUPS = ["amcl", "nav2_controller", "nav2_velocity_smoother", "nav2_behavior", "structural_read_only"];
-const ObservedValues = createContext<Record<string, TuningValue>>({});
+const ObservedValues = createContext<{ values: Record<string, TuningValue>; fresh: boolean; ageS: number | null }>(
+  { values: {}, fresh: false, ageS: null });
 
 function groupLabel(id: string): string {
   return REGISTRY_GROUPS.find((group) => group.id === id)?.label ?? id;
@@ -45,7 +45,7 @@ function unitText(entry: TuningCatalogEntry): string {
 const PHASE_TEXT: Record<SavePhase, string | null> = {
   idle: null,
   saving: "Saving…",
-  saved: "Saved and active",
+  saved: null,
   saved_pending: "Saved — waiting for safe apply",
   conflict: "Conflict — review the robot values",
   failed: "Failed",
@@ -53,29 +53,17 @@ const PHASE_TEXT: Record<SavePhase, string | null> = {
 };
 
 function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
-  const observed = useContext(ObservedValues)[entry.id];
   const snapshot = useTuningStore((state) => state.snapshot);
   const phase = useTuningStore((state) => state.savePhase[entry.id] ?? "idle");
   const detail = useTuningStore((state) => state.saveDetail[entry.id] ?? null);
-  const desired = snapshot?.desired[entry.id];
-  const active = snapshot?.active[entry.id];
-  const activeKnown = snapshot?.fieldActiveKnown[entry.id] ?? false;
-  const pending = snapshot?.pendingKeys.includes(entry.id) ?? false;
+  const pending = parameterPending(snapshot, entry);
   const badge = fieldBadge(entry);
-  const showDesired = snapshot?.available && desired !== undefined;
-  // Without a saved revision the value is only the starting point the robot
-  // reported; calling it "Saved" would claim a durable state that is unknown.
-  const desiredIsSaved = snapshot?.desiredRevision !== null && snapshot?.desiredRevision !== undefined;
-  const phaseText = phase === "saved_pending" && badge === "redeploy"
-    ? "Saved — redeploy required" : PHASE_TEXT[phase];
+  const phaseText = phase === "saved_pending" ? null : PHASE_TEXT[phase];
+  if (!pending && !phaseText && !detail && phase !== "unknown") return null;
   return (
     <div className="field-status">
-      <span className={`badge badge-${badge}`}>{BADGE_LABEL[badge]}</span>
-      {showDesired && <span className="field-saved">{desiredIsSaved ? "Saved" : "Initial YAML value"} {formatValue(desired, entry)} {unitText(entry)}</span>}
-      {observed !== undefined && <span className="field-observed">Live readback {formatValue(observed, entry)} {unitText(entry)}</span>}
-      {snapshot?.available && activeKnown && <span className="field-active">Verified revision value {formatValue(active, entry)} {unitText(entry)}</span>}
-      {snapshot?.available && observed === undefined && <span className="field-active field-unknown">Live readback unavailable</span>}
-      {pending && <span className="field-pending">Pending activation</span>}
+      {pending && <span className={`badge badge-${badge}`}>
+        {badge === "redeploy" ? "Redeploy required" : "Apply required"}</span>}
       {phaseText && <span className={`field-phase phase-${phase}`} role="status">{phaseText}</span>}
       {detail && <span className="field-detail">{detail}</span>}
       {phase === "unknown" && <button className="btn" onClick={() => void useTuningStore.getState().resolveUnknownSave(entry.group)}>Query saved request outcome</button>}
@@ -86,7 +74,8 @@ function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
 function NumberField({ entry, editable, disabledReason }: {
   entry: TuningCatalogEntry; editable: boolean; disabledReason: string | null;
 }) {
-  const observed = useContext(ObservedValues)[entry.id];
+  const observation = useContext(ObservedValues);
+  const observed = observation.values[entry.id];
   const snapshot = useTuningStore((state) => state.snapshot);
   const draft = useTuningStore((state) => state.drafts[entry.id]);
   const server = useTuningStore((state) => state.snapshot?.desired[entry.id]);
@@ -111,6 +100,13 @@ function NumberField({ entry, editable, disabledReason }: {
   const sliderValue = parsedDraft?.ok ? parsedDraft.value!
     : typeof server === "number" ? server : range?.min ?? 0;
   const id = `tuning-${entry.id.replace(/\W/g, "-")}`;
+  const protectedField = !entry.accepts_edits || entry.protected || entry.not_applicable;
+  const canEdit = editable && typeof server === "number";
+  // Both smoother fields are `max_velocity`, so a key-only label would render
+  // two identical rows. Disambiguate by the array slot the value occupies.
+  const keyLabel = entry.source.key.split(".").at(-1)!.replaceAll("_", " ");
+  const shortLabel = entry.source.key === "max_velocity" && entry.source.index !== null
+    ? entry.source.index === 0 ? "linear max" : "angular max" : keyLabel;
   const commit = () => commitGroup(entry.group);
   const schedule = () => {
     clearTimeout(debounce.current);
@@ -126,18 +122,16 @@ function NumberField({ entry, editable, disabledReason }: {
     if (event.type === "pointerup") commit();
   };
   return (
-    <div className={`field-row${conflict ? " field-conflict" : ""}`}>
-      <label className="field-label" htmlFor={id}>{entry.label}</label>
-      <p className="field-key">{entry.source.node} · {entry.source.key}{entry.source.index !== null ? `[${entry.source.index}]` : ""}</p>
-      <p className="field-help">
-        {formatBounds(entry)} {editPolicyText(entry)}
-        {entry.bounds.note ? ` ${entry.bounds.note}` : ""}
-        {entry.effective_ceiling_ref && " Bounded by the active speed ceiling."}
-      </p>
+    <div className={`field-row${conflict ? " field-conflict" : ""}`} data-parameter={entry.id}>
+      <label className="field-label" htmlFor={id} title={entry.label}>
+        <span>{entry.group === "speed_ceiling" ? entry.label.replace("Maximum ", "") : shortLabel}</span>
+        <small className="field-unit">{unitText(entry)}</small>
+      </label>
       <div className="field-controls">
-        {editable ? (
+        {canEdit ? (
           <>
             <input id={id} className="field-number" type="text" inputMode="decimal" value={value}
+              aria-label={entry.label}
               aria-describedby={`${id}-status`}
               onChange={(event) => setDraft(entry.id, event.target.value)}
               onBlur={() => { clearTimeout(debounce.current); commit(); }}
@@ -150,32 +144,55 @@ function NumberField({ entry, editable, disabledReason }: {
                 onPointerUp={sliderRelease} onPointerCancel={sliderRelease}
                 onKeyUp={(event) => { if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") schedule(); }} />
             )}
-            <span className="field-unit">{unitText(entry)}</span>
           </>
         ) : (
-          <span className="field-readonly-value">{observed !== undefined
-            ? `${formatValue(observed, entry)} ${unitText(entry)} (live readback)`
-            : snapshot?.available ? "— (live readback unavailable)"
-              : `${formatValue(entry.default, entry)} ${unitText(entry)} (YAML starting value; not live readback)`}</span>
+          <span className="field-readonly-value" title={disabledReason ?? "Read-only setting"}>
+            {protectedField ? "Read only" : server !== undefined ? String(server)
+              : snapshot?.catalogFromServer ? "—" : `Source ${formatValue(entry.default, entry)}`}</span>
         )}
       </div>
-      {!editable && disabledReason && <p className="field-disabled-reason">{disabledReason}</p>}
+      <div className={`field-live ${observation.fresh ? "is-fresh" : "is-stale"}`}
+        title={observed === undefined ? "No parameter observation received" : String(observed)}>
+        <span className="field-live-value">{formatValue(observed, entry)}</span>
+        <small>{observed === undefined ? "Not received" : observation.fresh ? "Live" : "Last read"}</small>
+      </div>
+      <details className="field-info" onKeyDown={event => {
+        if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
+      }}>
+        <summary aria-label={`Details for ${entry.label}`} title={entry.label}>ⓘ</summary>
+        <div className="field-info-content">
+          <strong>{entry.label}</strong>
+          <p className="field-key">{entry.source.node} · {entry.source.key}{entry.source.index !== null ? `[${entry.source.index}]` : ""}</p>
+          <p className="field-help">{formatBounds(entry)} {editPolicyText(entry)} {entry.bounds.note}</p>
+          {disabledReason && !canEdit && <p>{disabledReason}</p>}
+          <p>{snapshot?.desiredRevision == null ? "Initial YAML target" : "Saved target"}: {formatValue(server, entry)} {unitText(entry)}</p>
+          <p>{observation.fresh ? "Live readback" : "Last-known readback"}: {formatValue(observed, entry)} {unitText(entry)}
+            {observation.ageS !== null && ` · ${observation.ageS.toFixed(1)} s old`}</p>
+          {entry.effective_ceiling_ref && <p>Runtime output is bounded by the active ceiling; a clamped value is not an unsaved change.</p>}
+          <button className="btn" onClick={event => {
+            const details = event.currentTarget.closest("details");
+            if (details) { details.open = false; details.querySelector("summary")?.focus(); }
+          }}>Close details</button>
+        </div>
+      </details>
       <div id={`${id}-status`}><StatusLine entry={entry} /></div>
     </div>
   );
 }
 
-function CollapsibleGroup({ group, entries, editable, disabledReason }: {
+function ParameterGroup({ group, entries, editable, disabledReason, title }: {
   group: string; entries: TuningCatalogEntry[]; editable: boolean; disabledReason: string | null;
+  title?: string;
 }) {
-  const editableEntries = entries.filter((entry) => entry.accepts_edits && !entry.not_applicable);
+  if (entries.length === 0) return null;
   return (
-    <details className="tuning-group">
-      <summary>{groupLabel(group)} <span className="tuning-group-count">{editableEntries.length} parameter{editableEntries.length === 1 ? "" : "s"}</span></summary>
+    <section className={`tuning-group tuning-group-${group}`} aria-label={title ?? groupLabel(group)}>
+      <h3>{title ?? groupLabel(group)} <span className="tuning-group-count">{entries.length}</span></h3>
+      <div className="field-columns" aria-hidden="true"><span>Parameter</span><span>Target</span><span>Readback</span><span /></div>
       {entries.map((entry) => <NumberField key={entry.id} entry={entry}
         editable={editable && entry.accepts_edits && !entry.protected && !entry.not_applicable && (entry.type === "number" || entry.type === "integer")}
         disabledReason={disabledReason ?? "This parameter is read-only or not approved for activation."} />)}
-    </details>
+    </section>
   );
 }
 
@@ -227,7 +244,7 @@ function RedeployDialog({ snapshot }: { snapshot: NormalizedSnapshot }) {
   if (!open) return null;
   const jobId = typeof job?.job_id === "string" ? job.job_id : typeof job?.id === "string" ? job.id : undefined;
   return (
-    <ConfirmDialog title="Redeploy with new params" confirmLabel="Deploy the reviewed revision"
+    <ConfirmDialog title="Apply saved parameter changes" confirmLabel="Apply the reviewed revision"
       onCancel={closeRedeploy} onConfirm={() => void confirmRedeploy()}
       confirmDisabled={redeploy.phase === "saving" || !snapshot.safeApply.allowed
         || !snapshot.activationSupported || reviewedRevision !== snapshot.desiredRevision}>
@@ -270,14 +287,11 @@ function releaseManualSession() {
 }
 
 export function TuningPanel() {
-  const [tick, setTick] = useState(() => performance.now());
-  useEffect(() => {
-    const timer = setInterval(() => setTick(performance.now()), 500);
-    return () => clearInterval(timer);
-  }, []);
-  const now = Math.max(tick, performance.now());
+  const readback = useTuningReadback();
+  const { now, observed, last, ageS } = readback;
   const baseState = useTelemetryStore((state) => state.baseState);
   const baseStateAt = useTelemetryStore((state) => state.baseStateAt);
+  const robotId = useTelemetryStore(state => state.robotId);
   const snapshot = useTuningStore((state) => state.snapshot);
   const status = useTuningStore((state) => state.status);
   const load = useTuningStore((state) => state.load);
@@ -289,24 +303,18 @@ export function TuningPanel() {
   const user = useAuthStore((state) => state.user);
   const telemetryConnected = useTelemetryStore((state) => state.wsConnected);
   const admin = isAdministrator(user);
-  const wasConnected = useRef(telemetryConnected);
-  const receivedAt = useTuningStore((state) => state.receivedAt);
-  const observed = telemetryConnected
-    ? freshReadback(snapshot, receivedAt, now, baseState?.session_generation ?? null) : null;
-  const limits = observed?.limits ?? null;
-  const limitsAt = observed && receivedAt !== null ? receivedAt - observed.ageS * 1000 : null;
-
-  useEffect(() => { void load(); }, [load]);
   useEffect(() => {
-    // Reconnect fetches the robot's state; it never replays drafts or jobs.
-    if (telemetryConnected && !wasConnected.current) void load();
-    wasConnected.current = telemetryConnected;
-  }, [telemetryConnected, load]);
-  useEffect(() => {
-    if (!telemetryConnected) return;
-    const timer = setInterval(() => { void load(); }, 2000);
-    return () => clearInterval(timer);
-  }, [telemetryConnected, load]);
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      const started = performance.now();
+      await load();
+      if (!disposed && telemetryConnected) timer = setTimeout(() => { void refresh(); },
+        Math.max(150, 1000 - (performance.now() - started)));
+    };
+    void refresh();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [telemetryConnected, robotId, load]);
 
   const disabledReason = !telemetryConnected ? "The dashboard connection is offline — drafts are unsaved."
     : editDisabledReason(snapshot, admin)
@@ -322,25 +330,34 @@ export function TuningPanel() {
 
   const redeployReason = !admin ? "An administrator account is required."
     : !snapshot?.available ? "The robot tuning state is unknown."
-    : !snapshot.activationSupported ? "The robot has not enabled tuning activation."
-    : !snapshot.safeApply.allowed ? snapshot.safeApply.reason
     : pending.count === 0 ? "No saved restart-required changes are waiting."
+    : !snapshot.activationSupported ? "Runtime apply is not commissioned on this robot. Saving targets is still available."
+    : !snapshot.safeApply.allowed ? snapshot.safeApply.reason
     : !telemetryConnected ? "The dashboard server is offline."
     : busy ? "A deployment job is already running."
     : null;
   const canRedeploy = redeployReason === null;
 
-  const ceilingEntries = snapshot?.entries.filter((entry) => entry.group === "speed_ceiling") ?? [];
-  const groups = SHOWN_GROUPS
-    .map((group) => ({ group, entries: snapshot?.entries.filter((entry) => entry.group === group) ?? [] }))
-    .filter(({ entries }) => entries.length > 0);
+  const entries = snapshot?.entries ?? BUNDLED_ENTRIES;
+  const group = (name: string) => entries.filter(entry => entry.group === name);
+  const protection = entries.filter(entry => ["protected_safety", "structural_read_only"].includes(entry.group));
+  const liveCount = Object.keys(observed?.values ?? {}).length;
+  const renderGroup = (name: string, title?: string) => <ParameterGroup key={name}
+    group={name} title={title} entries={group(name)} editable={editable} disabledReason={disabledReason} />;
 
   return (
-    <ObservedValues.Provider value={observed?.values ?? {}}>
+    <ObservedValues.Provider value={{ values: observed?.values ?? last?.values ?? {}, fresh: !!observed, ageS }}>
     <section className="tuning-panel" aria-label="Robot tuning"
       onFocusCapture={releaseManualSession} onPointerDownCapture={releaseManualSession}>
-      <h2>Speed and tuning</h2>
-      <p className="subtext">Speed settings are ceilings, not commanded speeds. Nav2 keeps its normal curvature, obstacle and approach slowdowns.</p>
+      <header className="tuning-heading">
+        <div><h2>Speed and tuning</h2><p>Targets are ceilings, not motion commands. Saving does not apply them.</p></div>
+        <div className={`readback-health readback-${readback.status}`} role="status">
+          {observed ? `${liveCount}/${entries.length} live · ${ageS?.toFixed(1)} s`
+            : last ? `Last read ${ageS?.toFixed(1) ?? "?"} s ago · not live`
+              : telemetryConnected ? "Waiting for parameter readback" : "Dashboard disconnected"}
+          <button className="btn" onClick={() => void load()} aria-label="Refresh parameter readback">↻ Refresh</button>
+        </div>
+      </header>
 
       {status === "loading" && !snapshot && <p role="status">Loading the robot's tuning state…</p>}
       {snapshot && !snapshot.available && (
@@ -349,12 +366,10 @@ export function TuningPanel() {
         </p>
       )}
       {snapshot?.available && !editable && <p className="tuning-readonly-banner" role="status">{disabledReason}</p>}
-      {snapshot?.available && editable && <p className="tuning-writable-banner" role="status">Administrator: complete valid changes save to the robot’s own configuration.</p>}
+      {snapshot?.available && editable && <p className="tuning-writable-banner" role="status">Administrator · edits save targets only. Live values are shown separately.</p>}
       {!snapshot?.catalogFromServer && (
         <p className="subtext">Source catalogue from {REGISTRY_PROVENANCE.baseline_commit.slice(0, 10)} ({REGISTRY_PROVENANCE.inspected}). {REGISTRY_CAPABILITY.advertised ? "" : "The runtime capability is not advertised."}</p>
       )}
-
-      <SpeedGauges limits={telemetryConnected ? limits : null} limitsAt={limitsAt} />
 
       {Object.keys(useTuningStore.getState().drafts).length > 0 && (
         <div className="tuning-drafts">
@@ -364,18 +379,19 @@ export function TuningPanel() {
         </div>
       )}
 
-      {ceilingEntries.length > 0 && (
-        <section className="tuning-ceilings" aria-label="Maximum speed ceilings">
-          <h3>Maximum speeds</h3>
-          {ceilingEntries.map((entry) => <NumberField key={entry.id} entry={entry}
-            editable={editable && entry.accepts_edits && !entry.protected}
-            disabledReason={disabledReason ?? "The usable speed range is not commissioned."} />)}
-        </section>
-      )}
-
-      {groups.map(({ group, entries }) => (
-        <CollapsibleGroup key={group} group={group} entries={entries} editable={editable} disabledReason={disabledReason} />
-      ))}
+      <div className="tuning-columns">
+        <div className="tuning-column">{renderGroup("amcl")}</div>
+        <div className="tuning-column">
+          {renderGroup("nav2_controller", "Nav2 controller")}
+          {renderGroup("nav2_velocity_smoother", "Nav2 smoother")}
+          {renderGroup("nav2_behavior", "Nav2 behavior")}
+        </div>
+        <div className="tuning-column">
+          {renderGroup("speed_ceiling", "Maximum speeds")}
+          <ParameterGroup group="protected" title="Safety & topology · read-only"
+            entries={protection} editable={false} disabledReason="Protected setting — observation only." />
+        </div>
+      </div>
 
       {livePending.length > 0 && (
         <div className="tuning-live-apply">
@@ -387,15 +403,18 @@ export function TuningPanel() {
       )}
 
       <div className="tuning-sticky" aria-label="Pending deployment">
+        <span className="tuning-change-summary">{!snapshot?.available ? "Pending state unknown"
+          : pending.count ? `${pending.count} saved change${pending.count === 1 ? "" : "s"} waiting for apply`
+            : "No saved changes waiting for apply"}</span>
         <button className={`btn primary${canRedeploy ? " is-active" : ""}`} onClick={openRedeploy}
           disabled={!canRedeploy} title={redeployReason ?? undefined}>
-          Redeploy with new params{pending.count > 0 ? ` (${pending.count})` : ""}
+          Apply saved changes{pending.count > 0 ? ` (${pending.count})` : ""}
         </button>
-        {canRedeploy && <span className="tuning-sticky-detail">Affects: {pending.services.join(", ")}</span>}
-        {redeployReason && <span className="tuning-sticky-detail">{redeployReason}</span>}
         {admin && snapshot?.lastKnownGoodRevision !== null && snapshot?.lastKnownGoodRevision !== undefined && (
           <button className="btn" onClick={openRestore} disabled={!!disabledReason || busy || !snapshot.safeApply.allowed}>Restore last known good</button>
         )}
+        {canRedeploy && <span className="tuning-sticky-detail">Affects: {pending.services.join(", ")}</span>}
+        {redeployReason && pending.count > 0 && <span className="tuning-sticky-detail">{redeployReason}</span>}
       </div>
 
       {snapshot?.available && <RedeployDialog snapshot={snapshot} />}

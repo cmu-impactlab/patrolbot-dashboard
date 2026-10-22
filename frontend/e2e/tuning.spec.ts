@@ -8,7 +8,7 @@ test("advanced tuning shows measured odom without AMCL and never arms from setti
   await page.goto("/?advanced=1");
   await fixture.wsReady;
   await expect(page.getByRole("heading", { name: "Speed and tuning" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Redeploy with new params/ })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /Apply saved changes/ })).toBeDisabled();
   expect(fixture.commands).toHaveLength(0);
   fixture.send("telemetry.base_state", { ...READY_BASE_STATE, dock_state_valid: true, dock_state: "CLEAR_CONFIRMED" });
   fixture.send("telemetry.motion", { linear_velocity: -.12, angular_velocity: .2, source: "raw_odom",
