@@ -207,7 +207,7 @@ export function TopBar() {
             <DropdownMenu.Content className="dropdown-content" sideOffset={6} align="end">
               <DropdownMenu.Label className="dropdown-label">{authUser.display_name} ({authUser.role})</DropdownMenu.Label>
               <DropdownMenu.Item asChild>
-                <a className="dropdown-item" href="/?advanced=1" target="_blank" rel="noopener noreferrer">Advance</a>
+                <a className="dropdown-item" href="/?advanced=1" target="_blank" rel="noopener noreferrer">Advanced</a>
               </DropdownMenu.Item>
               {authUser.auth_mode === "oidc" && <DropdownMenu.Item asChild>
                 <a className="dropdown-item" href="/auth/logout"><LogOut size={14} /> Sign out</a>

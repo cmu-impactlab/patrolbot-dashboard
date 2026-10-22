@@ -15,7 +15,7 @@ function editable(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && !!target.closest("input, textarea, select, [contenteditable=true]");
 }
 
-export function ManualDrive() {
+export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const user = useAuthStore(state => state.user);
   const telemetry = useTelemetryStore();
   useCommandStore();
@@ -101,7 +101,7 @@ export function ManualDrive() {
     useTeleopStore.getState().input(y * limits.linear_m_s.max, -x * limits.angular_rad_s.max, true);
   };
 
-  return <section ref={panel} className="manual-panel" aria-label="Manual drive keyboard panel" tabIndex={0}
+  return <section ref={panel} className={`manual-panel${compact ? " manual-compact" : ""}`} aria-label="Manual drive keyboard panel" tabIndex={0}
     onKeyDown={keyDown} onKeyUp={keyUp} onBlur={event => {
       if (useTeleopStore.getState().deadman || !event.currentTarget.contains(event.relatedTarget)) reset();
     }}>
@@ -109,7 +109,9 @@ export function ManualDrive() {
     <p role="status">{PHASE_COPY[state.phase]}</p>
     {reason && <p className="nav-disabled-banner">{reason}</p>}
     {state.detail && <p className="subtext">{state.detail}</p>}
-    <p id="manual-instructions">Arm, then hold and drag the joystick. For keyboard input, focus this panel and hold Space plus Arrow keys or WASD. Release Space or the pointer to end input. Arm again for a new session.</p>
+    <p id="manual-instructions">{compact
+      ? "Arm, then hold the joystick or Space + arrows/WASD. Release to end input; arm again for a new session."
+      : "Arm, then hold and drag the joystick. For keyboard input, focus this panel and hold Space plus Arrow keys or WASD. Release Space or the pointer to end input. Arm again for a new session."}</p>
     <div className="manual-actions">
       <button className="btn primary" disabled={!!reason || state.phase !== "idle"} onClick={() => { state.arm(); panel.current?.focus(); }}>Arm manual drive</button>
       {state.phase === "idle" && /in control of the robot|another operator|lease/i.test(state.detail ?? "") && <button className="btn danger" disabled={!!reason} onClick={() => { state.arm(true); panel.current?.focus(); }}>Take over</button>}

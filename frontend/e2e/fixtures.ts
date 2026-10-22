@@ -11,7 +11,8 @@ export const READY_BASE_STATE = {
   raw_odom_age_s: .02,
 };
 
-export async function dashboardFixture(page: Page, role = "operator", preset = "Operator", largeMap = false) {
+export async function dashboardFixture(page: Page, role = "operator", preset = "Operator", largeMap = false,
+  capabilities: string[] = []) {
   const commands: { command: string; command_id: string; goal: unknown }[] = [];
   const teleopFrames: { command_id: string; seq: number; linear: number; angular: number; deadman: boolean }[] = [];
   const saves: LayoutDoc[] = [];
@@ -70,7 +71,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
       map_version: 1, pose: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
       battery: { voltage: 25, percentage: 85, charging: false },
       resources: { cpu_percent: 20, memory_percent: 40, disk_percent: 30, wifi_signal_dbm: -52 },
-      base_state: baseState,
+      base_state: baseState, capabilities,
       events: [{ id: 1, ts: new Date().toISOString(), severity: "warning", title: "Long alert", message: "Long message ".repeat(35) }], slice_ages_s: {pose: 0, base_state: 0, battery: 0, resources: 0},
     });
     clearInterval(baseTimer);

@@ -22,7 +22,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   useAuthStore.setState({ user: { id: 1, username: "admin", display_name: "Admin", role: "administrator", auth_mode: "local" } });
   useTelemetryStore.setState({ wsConnected: true });
-  useTuningStore.setState({ snapshot: snapshot(), status: "ready", drafts: {}, savePhase: {}, saveDetail: {},
+  useTuningStore.setState({ snapshot: snapshot(), receivedAt: null, status: "ready", drafts: {}, savePhase: {}, saveDetail: {},
     saveRequestIds: {}, draftBaseRevision: 1, conflictIds: [], redeploy: { phase: "idle", detail: null, requestId: null },
     restore: { phase: "idle", detail: null, requestId: null } });
 });
@@ -43,10 +43,11 @@ describe("robot-owned autosave", () => {
     const initial = { ...snapshot(), desiredRevision: null, activeRevision: null, activeKnown: false };
     expect(savedPhaseFor(initial, BUNDLED_ENTRIES.find(entry => entry.id === "amcl.alpha1")!)).toBe("idle");
   });
-  it("requires readback before labeling a saved value active", () => {
+  it("does not invent a pending edit merely because a live readback is missing", () => {
     const entry = BUNDLED_ENTRIES.find(entry => entry.id === "amcl.alpha1")!;
     const unknown = { ...snapshot(), activeKnown: false, fieldActiveKnown: { [entry.id]: false } };
-    expect(savedPhaseFor(unknown, entry)).toBe("saved_pending");
+    expect(savedPhaseFor(unknown, entry)).toBe("saved");
+    expect(savedPhaseFor({ ...unknown, pendingKeys: [entry.id] }, entry)).toBe("saved_pending");
     expect(savedPhaseFor(snapshot(), entry)).toBe("saved");
   });
   it("refresh never carries old saved-active labels into an unsaved YAML snapshot", async () => {
@@ -94,6 +95,33 @@ describe("robot-owned autosave", () => {
     useAuthStore.setState({ user: { id: 2, username: "op", display_name: "Op", role: "operator", auth_mode: "local" } });
     useTuningStore.getState().setDraft("amcl.alpha1", ".08");
     await useTuningStore.getState().commitGroup("amcl");
+    expect(postTuningRequest).not.toHaveBeenCalled();
+  });
+
+  it("coalesces overlapping reads so a slow response cannot create a growing request queue", async () => {
+    let finish!: (value: ReturnType<typeof snapshot>) => void;
+    vi.mocked(fetchTuningSnapshot).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const first = useTuningStore.getState().load();
+    const second = useTuningStore.getState().load();
+    expect(first).toBe(second);
+    expect(fetchTuningSnapshot).toHaveBeenCalledTimes(1);
+    finish(snapshot());
+    await Promise.all([first, second]);
+    vi.mocked(fetchTuningSnapshot).mockResolvedValue(snapshot());
+    await useTuningStore.getState().load();
+    expect(fetchTuningSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps last confirmed values visible but disabled without refreshing observation ages on failure", async () => {
+    const prior = { ...snapshot(), catalogFromServer: true };
+    useTuningStore.setState({ snapshot: prior, receivedAt: 0 });
+    vi.mocked(fetchTuningSnapshot).mockResolvedValue(normalizeSnapshot(null));
+    await useTuningStore.getState().load();
+    const state = useTuningStore.getState();
+    expect(state.snapshot?.desired).toEqual(prior.desired);
+    expect(state.snapshot?.available).toBe(false);
+    expect(state.snapshot?.writable).toBe(false);
+    expect(state.receivedAt).toBe(0);
     expect(postTuningRequest).not.toHaveBeenCalled();
   });
 });

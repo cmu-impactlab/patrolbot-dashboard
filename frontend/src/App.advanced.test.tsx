@@ -11,7 +11,7 @@ vi.mock("./websocket/useTelemetrySocket", () => ({ useTelemetrySocket: vi.fn() }
 const operator = { id: 1, username: "op", display_name: "Operator", role: "operator", auth_mode: "local" as const };
 const originalCheck = useAuthStore.getState().check;
 
-describe("Advance profile link and authenticated route", () => {
+describe("Advanced profile link and authenticated route", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/?advanced=1");
     useAuthStore.setState({ user: operator, check: vi.fn(async () => {}) });
@@ -20,10 +20,10 @@ describe("Advance profile link and authenticated route", () => {
   });
   afterEach(() => { cleanup(); useAuthStore.setState({ check: originalCheck }); window.history.replaceState(null, "", "/"); });
 
-  it("profile menu exposes exact Advance label and a safe new-tab link in local authentication mode", async () => {
+  it("profile menu exposes exact Advanced label and a safe new-tab link in local authentication mode", async () => {
     render(<QueryClientProvider client={new QueryClient()}><TopBar /></QueryClientProvider>);
     fireEvent.keyDown(screen.getByRole("button", { name: "User profile" }), { key: "Enter" });
-    const link = await screen.findByRole("menuitem", { name: "Advance" });
+    const link = await screen.findByRole("menuitem", { name: "Advanced" });
     expect(link.getAttribute("href")).toBe("/?advanced=1");
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");

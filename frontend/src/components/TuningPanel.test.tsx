@@ -64,6 +64,7 @@ function snapshot(entries: TuningCatalogEntry[], desired: Record<string, number>
     session_id: SESSION,
     desired_revision: desiredRevision,
     active_revision: desiredRevision,
+    committed_active_revision: desiredRevision,
     last_known_good_revision: desiredRevision,
     active_known: false,
     writable: true,
@@ -104,7 +105,7 @@ describe("declared bounds are never fabricated", () => {
     snap.safeApply = { allowed: false, reason: "Physical deadman is held." };
     ready(snap);
     render(<TuningPanel />);
-    const button = screen.getByRole("button", { name: /Redeploy with new params/ }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: /Apply saved changes/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.title).toBe("Physical deadman is held.");
     expect(postTuningRequest).not.toHaveBeenCalled();
@@ -212,7 +213,7 @@ describe("the numeric text field is never clamped or replaced", () => {
     // The editable field preserves the raw number so an edit starts from the
     // real value; only the human-readable status line may round for display.
     expect(inputFor("Precise parameter").value).toBe("0.12345");
-    expect(screen.getByText(/Saved 0\.123 m\/s/)).toBeTruthy();
+    expect(screen.getByText(/Saved target: 0\.123 m\/s/)).toBeTruthy();
     expect(postTuningRequest).not.toHaveBeenCalled();
   });
 });
@@ -244,15 +245,15 @@ describe("saved versus starting value labelling", () => {
   it("shows Saved only when the robot reports a saved revision", () => {
     ready(snapshot([MIN_APPROACH], { [MIN_APPROACH.id]: 0.08 }, 7));
     render(<TuningPanel />);
-    expect(screen.getByText(/Saved 0\.08/)).toBeTruthy();
+    expect(screen.getByText(/Saved target: 0\.08/)).toBeTruthy();
     expect(screen.queryByText(/Initial YAML value 0\.08/)).toBeNull();
   });
 
   it("shows the initial YAML value, not Saved, when no saved revision is reported", () => {
     ready(snapshot([MIN_APPROACH], { [MIN_APPROACH.id]: 0.08 }, null));
     render(<TuningPanel />);
-    expect(screen.getByText(/Initial YAML value 0\.08/)).toBeTruthy();
-    expect(screen.queryByText(/^Saved/)).toBeNull();
+    expect(screen.getByText(/Initial YAML target: 0\.08/)).toBeTruthy();
+    expect(screen.queryByText(/^Saved target:/)).toBeNull();
   });
 });
 
@@ -266,8 +267,8 @@ describe("read-only fallback", () => {
         values: { [SIGMA.id]: .17 }, limits: null } });
     ready(snap);
     render(<TuningPanel />);
-    expect(screen.getByText(/0\.17 m\/s \(live readback\)/)).toBeTruthy();
-    expect(screen.getByText(/Live readback 0\.17/)).toBeTruthy();
+    expect(screen.getByText("0.17").closest(".field-live")?.className).toContain("is-fresh");
+    expect(screen.getByText(/Live readback: 0\.17/)).toBeTruthy();
     expect(screen.queryByText(/bundled source catalogue/)).toBeNull();
     expect(screen.queryByRole("slider")).toBeNull();
   });
@@ -286,9 +287,9 @@ describe("read-only fallback", () => {
       accepts_edits: false, activatable: false, default: 0.2 });
     ready(snapshot([readOnly], {}));
     render(<TuningPanel />);
-    expect(screen.getByText(/— \(live readback unavailable\)/)).toBeTruthy();
+    expect(screen.getByText("Not received").closest(".field-live")?.textContent).toContain("—");
     expect(screen.queryByRole("slider")).toBeNull();
-    expect(screen.getByText(/^Live readback unavailable$/)).toBeTruthy();
+    expect(screen.queryByText("0.2")).toBeNull();
     expect(document.body.textContent).not.toMatch(/source candidate/);
   });
 });

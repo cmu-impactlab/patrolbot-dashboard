@@ -70,6 +70,14 @@ describe("uninitialized live parameter observations", () => {
     expect(freshReadback(snapshot, 1000, 900, 1)).toBeNull();
     expect(freshReadback(snapshot, 1000, 1100, 2)).toBeNull();
   });
+  it("retains an expired observation as last-known, without live limits", () => {
+    const raw = uninitialized();
+    raw.readback.age_s = 4;
+    const snapshot = normalizeSnapshot(raw);
+    expect(snapshot.readback?.values["amcl.alpha1"]).toBe(.123);
+    expect(snapshot.readback?.limits).toBeNull();
+    expect(freshReadback(snapshot, 1000, 1000, 1)).toBeNull();
+  });
   it("never uses an unobserved or out-of-envelope number as a gauge cap", () => {
     const raw = uninitialized();
     raw.readback.limits.max_linear_m_s = .4;
@@ -83,6 +91,7 @@ function serverSnapshot(overrides: Record<string, unknown> = {}) {
     session_id: "session-1",
     desired_revision: 5,
     active_revision: 4,
+    committed_active_revision: 4,
     last_known_good_revision: 3,
     active_known: true,
     writable: true,
@@ -301,7 +310,7 @@ describe("write gating and badges", () => {
 
 describe("pending deployment detection", () => {
   it("counts restart-required fields the robot has not activated", () => {
-    const snapshot = normalizeSnapshot(serverSnapshot());
+    const snapshot = normalizeSnapshot(serverSnapshot({ pending_keys: ["max_linear_m_s"] }));
     const fields = unappliedRestartFields(snapshot);
     expect(fields.map((field) => field.id)).toContain("max_linear_m_s");
     expect(affectedServices(fields).length).toBeGreaterThan(0);
@@ -313,6 +322,35 @@ describe("pending deployment detection", () => {
   it("flags an explicitly pending key even before the active read-back differs", () => {
     const snapshot = normalizeSnapshot(serverSnapshot({ desired: { max_linear_m_s: 0.3, "amcl.alpha1": 0.2 }, active: { max_linear_m_s: 0.3, "amcl.alpha1": 0.2 }, pending_keys: ["amcl.alpha1"] }));
     expect(unappliedRestartFields(snapshot).map((field) => field.id)).toContain("amcl.alpha1");
+  });
+  it("does not mistake unchanged clamped targets for additional pending edits", () => {
+    const id = "nav2.controller.rotate_to_heading_angular_vel";
+    const raw = serverSnapshot({ desired_revision: 2, active_revision: 1,
+      desired: { max_linear_m_s: .27, [id]: .9 }, active: { max_linear_m_s: .3, [id]: .7 },
+      committed_active: { max_linear_m_s: .3, [id]: .9 }, pending_keys: ["max_linear_m_s"] });
+    expect(unappliedRestartFields(normalizeSnapshot(raw)).map(e => e.id)).toEqual(["max_linear_m_s"]);
+  });
+  it("treats the robot's explicit empty pending list as authoritative even when readback is missing", () => {
+    const raw = serverSnapshot({ active_known: false, active: {}, pending_keys: [] });
+    expect(unappliedRestartFields(normalizeSnapshot(raw))).toEqual([]);
+  });
+  it("uses committed targets, not effective runtime clamps, for a legacy missing-pending-list fallback", () => {
+    const id = "nav2.velocity_smoother.max_velocity_theta";
+    const raw = serverSnapshot({ pending_keys: undefined, desired: { [id]: 1 },
+      committed_active: { [id]: 1 }, active: { [id]: .7 } });
+    expect(unappliedRestartFields(normalizeSnapshot(raw))).toEqual([]);
+  });
+  it("does not label every parameter when a never-activated store reports all desired keys", () => {
+    const raw = serverSnapshot({ active_known: false, active_revision: null,
+      committed_active_revision: null, committed_active: null, active: {},
+      desired: { max_linear_m_s: .27 }, pending_keys: ["max_linear_m_s"] });
+    expect(unappliedRestartFields(normalizeSnapshot(raw))).toEqual([]);
+  });
+  it("still shows a real pending key when the live readback is unavailable but a committed baseline exists", () => {
+    const raw = serverSnapshot({ active_known: false, active_revision: null, active: {},
+      committed_active_revision: 4, committed_active: { max_linear_m_s: .3 },
+      desired: { max_linear_m_s: .27 }, pending_keys: ["max_linear_m_s"] });
+    expect(unappliedRestartFields(normalizeSnapshot(raw)).map(e => e.id)).toEqual(["max_linear_m_s"]);
   });
 });
 
