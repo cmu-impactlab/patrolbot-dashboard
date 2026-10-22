@@ -5,6 +5,8 @@ const TELEOP_BASE = { ...READY_BASE_STATE, dock_state_valid: true, dock_state: "
 test("profile Advanced opens a fresh authenticated advanced tab without starting input", async ({ page, context }) => {
   await dashboardFixture(page);
   await page.goto("/");
+  // isVisible() does not wait: an unmounted header is not the mobile layout.
+  await expect(page.getByRole("banner")).toBeVisible();
   const profile = page.getByRole("button", { name: "User profile" });
   if (!(await profile.isVisible())) await page.getByRole("button", { name: "Menu", exact: true }).click();
   await profile.click();
@@ -28,7 +30,9 @@ test("profile Advanced opens a fresh authenticated advanced tab without starting
 });
 
 test("advanced tab samples pointer and focused keyboard and ends with exact zero frames", async ({ page }) => {
-  const fixture = await dashboardFixture(page);
+  // Each startup/reconnect snapshot must advertise the capability. A one-shot
+  // frame can otherwise reach React StrictMode's discarded first socket.
+  const fixture = await dashboardFixture(page, "operator", "Operator", false, ["web_teleop_v1"]);
   await page.goto("/?advanced=1");
   await expect(page.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
   await fixture.wsReady;
@@ -63,7 +67,7 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
 });
 
 test("a second advanced tab has no inherited intent and simulated focus loss ends first-tab input", async ({ page, context }) => {
-  const first = await dashboardFixture(page);
+  const first = await dashboardFixture(page, "operator", "Operator", false, ["web_teleop_v1"]);
   await page.goto("/?advanced=1");
   await expect(page.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
   await first.wsReady;
@@ -74,7 +78,7 @@ test("a second advanced tab has no inherited intent and simulated focus loss end
   await page.keyboard.down("w"); await page.keyboard.down("Space");
   await expect.poll(() => first.teleopFrames.some(frame => frame.deadman && frame.linear > 0)).toBe(true);
   const secondPage = await context.newPage();
-  const second = await dashboardFixture(secondPage);
+  const second = await dashboardFixture(secondPage, "operator", "Operator", false, ["web_teleop_v1"]);
   await secondPage.goto("/?advanced=1"); await secondPage.bringToFront();
   await expect(secondPage.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
   await second.wsReady;
