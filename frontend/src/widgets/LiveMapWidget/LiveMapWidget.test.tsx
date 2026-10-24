@@ -13,8 +13,14 @@ vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string
 } }), useMapsQuery: () => ({ data: [{ map_id: "cmuq-floor1", map_revision: "test-first", name: "Floor 1" }, { map_id: "cmuq-floor2", map_revision: "test-revision", name: "Floor 2" }] }) }));
 vi.mock("./bitmap", () => ({ buildMapBitmap: () => document.createElement("canvas") }));
 let paint: FrameRequestCallback;
+let clock = 1000;
 const sender = vi.fn((_frame: string) => true);
 beforeEach(() => {
+  // Geometry/gesture assertions must not accidentally expire their 500 ms
+  // hardware fixture under CPU contention. Expiry is tested explicitly below;
+  // production clocks and freshness limits are unchanged.
+  clock = 1000;
+  vi.spyOn(performance, "now").mockImplementation(() => clock);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { paint = callback; return 1; });
   vi.stubGlobal("cancelAnimationFrame", () => {});
   class TestPointer extends MouseEvent {
@@ -68,6 +74,12 @@ describe("live map command boundary", () => {
     const canvas = mount(); down(canvas); up(canvas);
     fireEvent.click(screen.getByRole("button", { name: "Set location" }));
     expect(JSON.parse(sender.mock.calls[0][0]).data.seed_profile).toBeUndefined();
+  });
+  it("refuses confirmation when the original hardware fixture expires before the click", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    clock += 501;
+    fireEvent.click(screen.getByRole("button", { name: "Set location" }));
+    expect(sender).not.toHaveBeenCalled();
   });
   it("supports measured mouse selection and preserves screen-up heading", () => {
     const canvas = mount();

@@ -110,6 +110,43 @@ export interface TuningJob {
   [key: string]: unknown;
 }
 
+/** Fixed-operation preview produced by the robot, never inferred from UI groups. */
+export interface ActivationPlan {
+  version: 1;
+  operation: "apply" | "restore";
+  desired_revision: number;
+  revision: number;
+  digest: string;
+  base_revision: number;
+  base_digest: string;
+  session_id: string;
+  hardware_generation: string;
+  plan_hash: string;
+  execution_kind: "scoped_parameters" | "scoped_lifecycle" | "robot_docker" | "nav2_redeploy";
+  nodes: string[];
+  services: string[];
+  seed_required: boolean;
+  disruption: string;
+  executable: boolean;
+  reasons: { code: string; detail: string }[];
+  changes: { id: string; before: TuningValue | null; after: TuningValue }[];
+}
+
+function activationPlan(raw: unknown): ActivationPlan | null {
+  if (!isPlainObject(raw) || raw.version !== 1 || !["apply", "restore"].includes(String(raw.operation))
+    || safeRevision(raw.desired_revision) === null || safeRevision(raw.revision) === null
+    || safeRevision(raw.base_revision) === null || typeof raw.session_id !== "string"
+    || typeof raw.hardware_generation !== "string"
+    || ![raw.digest, raw.base_digest, raw.plan_hash].every(value => typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value))
+    || !["scoped_parameters", "scoped_lifecycle", "robot_docker", "nav2_redeploy"].includes(String(raw.execution_kind))
+    || ![raw.nodes, raw.services].every(value => Array.isArray(value) && value.every(item => typeof item === "string"))
+    || typeof raw.seed_required !== "boolean" || typeof raw.executable !== "boolean" || typeof raw.disruption !== "string"
+    || !Array.isArray(raw.reasons) || !raw.reasons.every(reason => isPlainObject(reason) && typeof reason.code === "string" && typeof reason.detail === "string")
+    || !Array.isArray(raw.changes) || !raw.changes.every(change => isPlainObject(change) && typeof change.id === "string"
+      && (change.before === null || scalar(change.before) !== null) && scalar(change.after) !== null)) return null;
+  return raw as unknown as ActivationPlan;
+}
+
 /** Coordination-contract shape, with every field optional so a partial or
  *  older response is handled honestly instead of defaulting to "active". */
 export interface RawTuningSnapshot {
@@ -135,6 +172,8 @@ export interface RawTuningSnapshot {
   digest?: unknown;
   desired_digest?: unknown;
   compatibility?: unknown;
+  activation_plan?: unknown;
+  restore_plan?: unknown;
   /** Slice-1 contract fallback. */
   kind?: unknown;
   runtime?: unknown;
@@ -171,6 +210,8 @@ export interface NormalizedSnapshot {
   committedActive?: Record<string, TuningValue>;
   entries: TuningCatalogEntry[];
   catalogFromServer: boolean;
+  activationPlan?: ActivationPlan | null;
+  restorePlan?: ActivationPlan | null;
 }
 
 export interface ParameterReadback {
@@ -375,6 +416,8 @@ export function normalizeSnapshot(raw: unknown): NormalizedSnapshot {
     latestJob: isPlainObject(raw.latest_job) ? (raw.latest_job as TuningJob) : null,
     digest: typeof raw.digest === "string" ? raw.digest : null,
     desiredDigest: typeof raw.desired_digest === "string" ? raw.desired_digest : null,
+    activationPlan: activationPlan(raw.activation_plan),
+    restorePlan: activationPlan(raw.restore_plan),
     desired,
     active,
     fieldActiveKnown,
@@ -691,6 +734,7 @@ export interface CanonicalRequest {
   target?: "last_known_good";
   job_id?: string;
   changes?: BatchChange[];
+  review?: { digest: string; plan_hash: string };
 }
 
 export function newRequestId(): string {

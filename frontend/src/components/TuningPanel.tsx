@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { isAdministrator, useAuthStore } from "../stores/authStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useTeleopStore } from "../stores/teleopStore";
@@ -19,7 +19,7 @@ import {
   valuesEqual,
 } from "../lib/tuning";
 import type { NormalizedSnapshot, TuningCatalogEntry, TuningValue } from "../lib/tuning";
-import { pendingRedeploy, useTuningStore } from "../stores/tuningStore";
+import { dirtyDraftIds, pendingRedeploy, saveDisabledReason, useTuningStore } from "../stores/tuningStore";
 import type { SavePhase } from "../stores/tuningStore";
 import { useTuningReadback } from "../lib/useTuningReadback";
 
@@ -63,10 +63,9 @@ function StatusLine({ entry }: { entry: TuningCatalogEntry }) {
   return (
     <div className="field-status">
       {pending && <span className={`badge badge-${badge}`}>
-        {badge === "redeploy" ? "Redeploy required" : "Apply required"}</span>}
+        Apply required</span>}
       {phaseText && <span className={`field-phase phase-${phase}`} role="status">{phaseText}</span>}
       {detail && <span className="field-detail">{detail}</span>}
-      {phase === "unknown" && <button className="btn" onClick={() => void useTuningStore.getState().resolveUnknownSave(entry.group)}>Query saved request outcome</button>}
     </div>
   );
 }
@@ -81,9 +80,6 @@ function NumberField({ entry, editable, disabledReason }: {
   const server = useTuningStore((state) => state.snapshot?.desired[entry.id]);
   const conflict = useTuningStore((state) => state.conflictIds.includes(entry.id));
   const setDraft = useTuningStore((state) => state.setDraft);
-  const commitGroup = useTuningStore((state) => state.commitGroup);
-  const debounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const dragging = useRef(false);
   // The editable fallback is the robot's exact reported number, never the
   // rounded display text: rounding here would silently swap an in-progress
   // edit's starting point (0.12345 would read back as 0.123).
@@ -107,20 +103,6 @@ function NumberField({ entry, editable, disabledReason }: {
   const keyLabel = entry.source.key.split(".").at(-1)!.replaceAll("_", " ");
   const shortLabel = entry.source.key === "max_velocity" && entry.source.index !== null
     ? entry.source.index === 0 ? "linear max" : "angular max" : keyLabel;
-  const commit = () => commitGroup(entry.group);
-  const schedule = () => {
-    clearTimeout(debounce.current);
-    debounce.current = setTimeout(commit, 400);
-  };
-  useEffect(() => () => clearTimeout(debounce.current), []);
-  const numericKey = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") { event.preventDefault(); clearTimeout(debounce.current); commit(); }
-  };
-  const sliderRelease = (event: ReactPointerEvent<HTMLInputElement>) => {
-    dragging.current = false;
-    clearTimeout(debounce.current);
-    if (event.type === "pointerup") commit();
-  };
   return (
     <div className={`field-row${conflict ? " field-conflict" : ""}`} data-parameter={entry.id}>
       <label className="field-label" htmlFor={id} title={entry.label}>
@@ -128,21 +110,18 @@ function NumberField({ entry, editable, disabledReason }: {
         <small className="field-unit">{unitText(entry)}</small>
       </label>
       <div className="field-controls">
-        {canEdit ? (
+        {canEdit || (draft !== undefined && !protectedField) ? (
           <>
             <input id={id} className="field-number" type="text" inputMode="decimal" value={value}
+              disabled={!canEdit}
               aria-label={entry.label}
               aria-describedby={`${id}-status`}
               onChange={(event) => setDraft(entry.id, event.target.value)}
-              onBlur={() => { clearTimeout(debounce.current); commit(); }}
-              onKeyDown={numericKey} />
-            {range && (
+              onKeyDown={event => { if (event.key === "Enter") event.preventDefault(); }} />
+            {range && canEdit && (
               <input className="field-slider" type="range" aria-label={`${entry.label} slider`}
                 min={range.min} max={range.max} step={range.step} value={sliderValue}
-                onPointerDown={() => { dragging.current = true; clearTimeout(debounce.current); }}
-                onChange={(event) => { setDraft(entry.id, event.target.value); if (!dragging.current) schedule(); }}
-                onPointerUp={sliderRelease} onPointerCancel={sliderRelease}
-                onKeyUp={(event) => { if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End") schedule(); }} />
+                onChange={(event) => setDraft(entry.id, event.target.value)} />
             )}
           </>
         ) : (
@@ -218,64 +197,47 @@ function ConfirmDialog({ title, children, confirmLabel, onConfirm, onCancel, con
   );
 }
 
-function DiffList({ entries, snapshot }: { entries: TuningCatalogEntry[]; snapshot: NormalizedSnapshot }) {
-  return (
-    <ul className="tuning-diff">
-      {entries.map((entry) => (
-        <li key={entry.id}>
-          <strong>{entry.label}</strong>: {formatValue(snapshot.desired[entry.id], entry)} {unitText(entry)}
-          {" "}(active {snapshot.fieldActiveKnown[entry.id] ? formatValue(snapshot.active[entry.id], entry) : "unknown"})
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function RedeployDialog({ snapshot }: { snapshot: NormalizedSnapshot }) {
-  const { fields, count, services } = pendingRedeploy(snapshot);
-  const open = useTuningStore((state) => state.redeployOpen);
-  const redeploy = useTuningStore((state) => state.redeploy);
-  const reviewedRevision = useTuningStore((state) => state.reviewedRevision);
-  const reviewedDigest = useTuningStore((state) => state.reviewedDigest);
+function ApplyDialog({ snapshot }: { snapshot: NormalizedSnapshot }) {
+  const review = useTuningStore((state) => state.review);
+  const apply = useTuningStore((state) => state.apply);
   const job = useTuningStore((state) => state.job);
-  const closeRedeploy = useTuningStore((state) => state.closeRedeploy);
-  const confirmRedeploy = useTuningStore((state) => state.confirmRedeploy);
+  const close = useTuningStore((state) => state.closeApplyReview);
+  const confirm = useTuningStore((state) => state.confirmApply);
   const queryJob = useTuningStore((state) => state.queryJob);
-  if (!open) return null;
-  const jobId = typeof job?.job_id === "string" ? job.job_id : typeof job?.id === "string" ? job.id : undefined;
+  const drafts = useTuningStore(state => state.drafts);
+  const conflicts = useTuningStore(state => state.conflictIds);
+  const save = useTuningStore(state => state.save);
+  if (!review) return null;
+  const plan = review.plan;
+  const current = plan.operation === "restore" ? snapshot.restorePlan : snapshot.activationPlan;
+  const changed = apply.phase !== "saved" && (plan.plan_hash !== current?.plan_hash || plan.desired_revision !== snapshot.desiredRevision
+    || review.snapshot.desiredDigest !== snapshot.desiredDigest || plan.session_id !== snapshot.sessionId);
+  const dirty = dirtyDraftIds({ drafts, snapshot }).length > 0;
+  const jobId = typeof job?.job_id === "string" ? job.job_id : apply.requestId ?? undefined;
   return (
-    <ConfirmDialog title="Apply saved parameter changes" confirmLabel="Apply the reviewed revision"
-      onCancel={closeRedeploy} onConfirm={() => void confirmRedeploy()}
-      confirmDisabled={redeploy.phase === "saving" || !snapshot.safeApply.allowed
-        || !snapshot.activationSupported || reviewedRevision !== snapshot.desiredRevision}>
-      <p>This activates the saved parameters and reloads the affected robot scope. It does not rebuild images or restart the whole system.</p>
-      <p><strong>Reviewed revision {reviewedRevision ?? "unknown"}</strong>{reviewedDigest ? ` (${reviewedDigest.slice(0, 12)}…)` : ""}. The exact reviewed revision is deployed, never “latest”.</p>
-      <DiffList entries={fields} snapshot={snapshot} />
-      <p>{count} change{count === 1 ? "" : "s"} affect: {services.length ? services.join(", ") : "no services"}.</p>
-      <p role="alert">Motion may be interrupted while the affected services reload. Only deploy while the robot is stationary and idle.</p>
+    <ConfirmDialog title={plan.operation === "restore" ? "Review last-known-good restore" : "Review saved changes"} confirmLabel="Apply the reviewed revision"
+      onCancel={close} onConfirm={() => void confirm()}
+      confirmDisabled={["saving", "unknown", "saved"].includes(apply.phase) || ["saving", "unknown"].includes(save.phase)
+        || !snapshot.safeApply.allowed || !snapshot.activationSupported || !plan.executable || changed || dirty || conflicts.length > 0}>
+      <p><strong>Reviewed revision {plan.revision}</strong> ({plan.digest}). Confirmation applies only this exact revision and scope.</p>
+      <ul className="tuning-diff">{plan.changes.map(change => {
+        const entry = review.snapshot.entries.find(entry => entry.id === change.id);
+        return <li key={change.id}><strong>{entry?.label ?? change.id}</strong>: {String(change.before ?? "unknown")} → {String(change.after)} {entry ? unitText(entry) : ""}</li>;
+      })}</ul>
+      <p>{plan.execution_kind === "nav2_redeploy" ? "Whole Nav2 stack redeploy" : plan.execution_kind === "robot_docker"
+        ? "Full robot Docker redeploy" : plan.execution_kind === "scoped_lifecycle"
+        ? "Affected-node lifecycle reload" : "Hot parameter update (no redeploy)"}.</p>
+      <p>Affected nodes: {plan.nodes.join(", ") || "none"}. Services: {plan.services.join(", ") || "none"}.</p>
+      <p>{plan.disruption}</p>
+      <p>{plan.seed_required ? "Localization will be invalidated. Navigation will wait for a fresh operator-supplied seed. No old pose is replayed."
+        : "Localization dependencies are unaffected; existing valid localization is preserved."}</p>
+      <p role="alert">Command-idle maintenance is not measured standstill. Motors may remain on. Without fresh odometry, software cannot verify physical zero motion.</p>
+      {changed && <p role="alert">The saved revision or activation plan changed. Close this review and review again.</p>}
+      {plan.reasons.map((reason, index) => <p key={`${reason.code}-${index}`} role="status">{reason.detail}</p>)}
       {!snapshot.safeApply.allowed && <p role="status">{snapshot.safeApply.reason}</p>}
-      {redeploy.detail && <p className={`tuning-op detail-${redeploy.phase}`} role="status">{redeploy.detail}</p>}
+      {apply.detail && <p className={`tuning-op detail-${apply.phase}`} role="status">{apply.detail}</p>}
       {jobId && <p className="tuning-job">Job {jobId}: {typeof job?.state === "string" ? job.state : "status unknown"}
         {" "}<button className="btn" onClick={() => void queryJob(jobId)}>Check progress</button></p>}
-    </ConfirmDialog>
-  );
-}
-
-function RestoreDialog({ snapshot }: { snapshot: NormalizedSnapshot }) {
-  const open = useTuningStore((state) => state.restoreOpen);
-  const restore = useTuningStore((state) => state.restore);
-  const closeRestore = useTuningStore((state) => state.closeRestore);
-  const confirmRestore = useTuningStore((state) => state.confirmRestore);
-  const target = useTuningStore((state) => state.restoreTarget);
-  if (!open) return null;
-  return (
-    <ConfirmDialog title="Restore last known good" confirmLabel={`Restore revision ${target ?? "?"}`}
-      onCancel={closeRestore} onConfirm={() => void confirmRestore()}
-      confirmDisabled={restore.phase === "saving" || target === null}>
-      <p>Restoring is a new audited activation of the last known good revision; it never deletes history.</p>
-      <p>Current saved revision {snapshot.desiredRevision ?? "unknown"} → restore to <strong>revision {target ?? "unknown"}</strong> (exact revision, not “latest”).</p>
-      <p role="alert">Restoring reloads the affected services and may interrupt motion. Only restore while stationary.</p>
-      {restore.detail && <p className={`tuning-op detail-${restore.phase}`} role="status">{restore.detail}</p>}
     </ConfirmDialog>
   );
 }
@@ -297,9 +259,11 @@ export function TuningPanel() {
   const load = useTuningStore((state) => state.load);
   const job = useTuningStore((state) => state.job);
   const apply = useTuningStore((state) => state.apply);
-  const applyLive = useTuningStore((state) => state.applyLive);
-  const openRedeploy = useTuningStore((state) => state.openRedeploy);
-  const openRestore = useTuningStore((state) => state.openRestore);
+  const openApplyReview = useTuningStore((state) => state.openApplyReview);
+  const saveDrafts = useTuningStore(state => state.saveDrafts);
+  const save = useTuningStore(state => state.save);
+  const drafts = useTuningStore(state => state.drafts);
+  const conflicts = useTuningStore(state => state.conflictIds);
   const user = useAuthStore((state) => state.user);
   const telemetryConnected = useTelemetryStore((state) => state.wsConnected);
   const admin = isAdministrator(user);
@@ -324,14 +288,17 @@ export function TuningPanel() {
         ? "The SBC link is disconnected or stale — editing is disabled." : null);
   const editable = disabledReason === null;
   const pending = pendingRedeploy(snapshot);
-  const livePending = snapshot?.entries.filter((entry) => fieldBadge(entry) === "live"
-    && snapshot.pendingKeys.includes(entry.id)) ?? [];
+  const dirtyCount = dirtyDraftIds({ drafts, snapshot }).length;
+  const saveReason = saveDisabledReason(useTuningStore.getState(), now);
   const busy = job !== null && typeof job.state === "string" && !["succeeded", "failed", "canceled", "done"].includes(job.state);
 
   const redeployReason = !admin ? "An administrator account is required."
     : !snapshot?.available ? "The robot tuning state is unknown."
-    : pending.count === 0 ? "No saved restart-required changes are waiting."
+    : pending.count === 0 ? "No saved changes are waiting."
+    : dirtyCount > 0 || conflicts.length > 0 ? "Save or resolve your unsaved drafts before reviewing Apply."
+    : ["saving", "unknown"].includes(save.phase) || ["saving", "unknown"].includes(apply.phase) ? "Resolve the in-flight or unknown request first."
     : !snapshot.activationSupported ? "Runtime apply is not commissioned on this robot. Saving targets is still available."
+    : !snapshot.activationPlan ? "The robot has not provided a reviewable activation plan."
     : !snapshot.safeApply.allowed ? snapshot.safeApply.reason
     : !telemetryConnected ? "The dashboard server is offline."
     : busy ? "A deployment job is already running."
@@ -362,19 +329,26 @@ export function TuningPanel() {
       {status === "loading" && !snapshot && <p role="status">Loading the robot's tuning state…</p>}
       {snapshot && !snapshot.available && (
         <p className="nav-disabled-banner" role="status">
-          {snapshot.reason} The list below is a bundled source catalogue, shown as read-only candidates — not active robot values.
+          {snapshot.reason} {snapshot.catalogFromServer
+            ? "Last-confirmed targets and last-known observations remain visible; writes are disabled."
+            : "The list below is a bundled source catalogue, shown as read-only candidates — not active robot values."}
         </p>
       )}
       {snapshot?.available && !editable && <p className="tuning-readonly-banner" role="status">{disabledReason}</p>}
-      {snapshot?.available && editable && <p className="tuning-writable-banner" role="status">Administrator · edits save targets only. Live values are shown separately.</p>}
+      {snapshot?.available && editable && <p className="tuning-writable-banner" role="status">Administrator · edits are drafts until you click Save changes. Saving never changes running parameters.</p>}
       {!snapshot?.catalogFromServer && (
         <p className="subtext">Source catalogue from {REGISTRY_PROVENANCE.baseline_commit.slice(0, 10)} ({REGISTRY_PROVENANCE.inspected}). {REGISTRY_CAPABILITY.advertised ? "" : "The runtime capability is not advertised."}</p>
       )}
 
-      {Object.keys(useTuningStore.getState().drafts).length > 0 && (
+      {Object.keys(drafts).length > 0 && (
         <div className="tuning-drafts">
           <p>Unsaved drafts are kept in this tab only. Reconnect never replays them.</p>
-          <button className="btn" onClick={() => useTuningStore.getState().discardAllDrafts()}>Discard unsaved drafts</button>
+          {conflicts.length > 0 && <ul>{conflicts.map(id => <li key={id}>
+            {snapshot?.entries.find(entry => entry.id === id)?.label ?? id}: saved {String(snapshot?.desired[id] ?? "unknown")}; draft {drafts[id] ?? "none"}
+          </li>)}</ul>}
+          <button className="btn" disabled={["saving", "unknown"].includes(save.phase)} onClick={() => useTuningStore.getState().discardAllDrafts()}>Discard unsaved drafts</button>
+          {conflicts.length > 0 && <button className="btn" disabled={["saving", "unknown"].includes(save.phase)}
+            onClick={() => useTuningStore.getState().rebaseDrafts()}>Keep drafts against reviewed saved values</button>}
           <button className="btn" onClick={() => void load()}>Refresh robot state</button>
         </div>
       )}
@@ -393,32 +367,30 @@ export function TuningPanel() {
         </div>
       </div>
 
-      {livePending.length > 0 && (
-        <div className="tuning-live-apply">
-          {snapshot?.safeApply.allowed
-            ? <button className="btn" onClick={() => void applyLive()} disabled={apply.phase === "saving"}>Apply live changes</button>
-            : <button className="btn" disabled title={snapshot?.safeApply.reason}>Apply live changes</button>}
-          <span>{snapshot?.safeApply.allowed ? "Live-capable saved changes are ready to apply." : `Live apply unavailable: ${snapshot?.safeApply.reason}`}</span>
-        </div>
-      )}
-
       <div className="tuning-sticky" aria-label="Pending deployment">
+        <span>{dirtyCount} unsaved change{dirtyCount === 1 ? "" : "s"}</span>
+        <button className="btn primary" disabled={!!saveReason} title={saveReason ?? undefined} onClick={() => void saveDrafts()}>Save changes</button>
         <span className="tuning-change-summary">{!snapshot?.available ? "Pending state unknown"
           : pending.count ? `${pending.count} saved change${pending.count === 1 ? "" : "s"} waiting for apply`
             : "No saved changes waiting for apply"}</span>
-        <button className={`btn primary${canRedeploy ? " is-active" : ""}`} onClick={openRedeploy}
+        <button className={`btn primary${canRedeploy ? " is-active" : ""}`} onClick={openApplyReview}
           disabled={!canRedeploy} title={redeployReason ?? undefined}>
-          Apply saved changes{pending.count > 0 ? ` (${pending.count})` : ""}
+          Apply changes{pending.count > 0 ? ` (${pending.count})` : ""}
         </button>
         {admin && snapshot?.lastKnownGoodRevision !== null && snapshot?.lastKnownGoodRevision !== undefined && (
-          <button className="btn" onClick={openRestore} disabled={!!disabledReason || busy || !snapshot.safeApply.allowed}>Restore last known good</button>
+          <button className="btn" onClick={() => useTuningStore.getState().openRestoreReview()}
+            disabled={!snapshot.restorePlan || !snapshot.activationSupported || !snapshot.safeApply.allowed || busy
+              || dirtyCount > 0 || conflicts.length > 0 || ["saving", "unknown"].includes(save.phase) || ["saving", "unknown"].includes(apply.phase)}
+            title={!snapshot.restorePlan ? "A robot-provided exact restore plan is required." : undefined}>Restore last known good</button>
         )}
-        {canRedeploy && <span className="tuning-sticky-detail">Affects: {pending.services.join(", ")}</span>}
+        {save.detail && <span role="status">{save.detail}</span>}
+        {save.phase === "unknown" && <button className="btn" onClick={() => void useTuningStore.getState().resolveUnknownSave()}>Query saved request outcome</button>}
+        {apply.phase === "unknown" && apply.requestId && <button className="btn" onClick={() => void useTuningStore.getState().queryJob(apply.requestId!)}>Query apply request outcome</button>}
+        {canRedeploy && <span className="tuning-sticky-detail">Affects: {snapshot?.activationPlan?.nodes.join(", ") || pending.services.join(", ") || "no changed runtime values"}</span>}
         {redeployReason && pending.count > 0 && <span className="tuning-sticky-detail">{redeployReason}</span>}
       </div>
 
-      {snapshot?.available && <RedeployDialog snapshot={snapshot} />}
-      {snapshot?.available && <RestoreDialog snapshot={snapshot} />}
+      {snapshot?.available && <ApplyDialog snapshot={snapshot} />}
     </section>
     </ObservedValues.Provider>
   );

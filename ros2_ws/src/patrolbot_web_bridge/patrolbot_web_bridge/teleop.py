@@ -13,6 +13,8 @@ import time
 from typing import Callable, Mapping, NamedTuple
 from uuid import UUID
 
+from .tuning import maintenance_context, maintenance_payload
+
 
 CAPABILITY = "web_teleop_v1"
 HARDWARE_TIMEOUT_S = 0.5  # Existing raw hardware/odometry freshness contract.
@@ -199,6 +201,7 @@ class TeleopSession:
         self.last_received = None
         self.acknowledged = False
         self.preparing_at = None
+        self.admission_after = None
         self._lock = threading.RLock()
         # Closed IDs cannot re-open after release, delayed dispatch or reconnect.
         self._seen: set[str] = set()
@@ -248,6 +251,8 @@ class TeleopSession:
                 reason = "This manual session has already ended; start a new session."
             elif received_at is None or not 0 <= self.clock() - received_at <= self.timeout:
                 reason = "The manual-drive request is stale. Start again explicitly."
+            elif self.admission_after is not None and received_at <= self.admission_after:
+                reason = 'Configuration maintenance ended that arm request. Start again explicitly.'
             else:
                 reason = self.safety()
                 if reason is None:
@@ -423,7 +428,7 @@ class RosTeleop:
                  policy: Callable | None = None, policy_required: bool | None = None):
         from action_msgs.msg import GoalStatusArray
         from geometry_msgs.msg import Twist
-        from std_msgs.msg import Bool
+        from std_msgs.msg import Bool, String
         from std_srvs.srv import Trigger
 
         self.node, self.ws = node, ws
@@ -454,6 +459,16 @@ class RosTeleop:
         self.session_evidence = node.create_publisher(
             Bool, "/patrolbot/web_teleop_session_active", 10)
         self._tuning_hold = False
+        self._tuning_legacy_hold = False
+        # This service is installed with the paired core interfaces/package. A
+        # legacy image lacking it remains unable to acknowledge reviewed apply.
+        self._maintenance_owner = None
+        self._maintenance_released = None
+        self._maintenance_staged = None
+        self._maintenance_committed = False
+        self._last_output = None
+        self._maintenance_source_stamp = 0
+        self._maintenance_source_gid = None
         self.manual_at = None
         self.action_active = {name: False for name in ACTION_NAMES}
         self.idle_at = None
@@ -464,8 +479,14 @@ class RosTeleop:
         self._Trigger = Trigger
         self.session = TeleopSession(publish=self._publish, send=ws.send, safety=self.safety,
                                     contract=self.contract, policy=policy,
-                                     policy_required=policy_required)
+                                      policy_required=policy_required)
+        try:
+            from patrolbot_interfaces.srv import TuningMaintenance
+            node.create_service(TuningMaintenance, "/patrolbot/web_tuning_maintenance", self._tuning_maintenance)
+        except ImportError:
+            pass
         node.create_subscription(Bool, "/patrolbot/tuning_hold", self._on_tuning_hold, 10)
+        node.create_subscription(String, '/patrolbot/tuning_runtime_policy', self._on_maintenance_policy, 10)
         node.create_service(Trigger, "/patrolbot/web_tuning_idle", self._tuning_idle)
         node.create_subscription(Bool, self.contract["topics"]["joystick_evidence"]["name"],
                                  self._on_joystick, 10)
@@ -481,6 +502,7 @@ class RosTeleop:
         self._publish(0.0, 0.0, False)
 
     def _publish(self, linear, angular, active):
+        self._last_output = None
         # False evidence precedes a stop; true never appears before its Twist.
         if not active:
             self.evidence.publish(self._Bool(data=False))
@@ -489,6 +511,7 @@ class RosTeleop:
         self.velocity.publish(message)
         if active:
             self.evidence.publish(self._Bool(data=True))
+        self._last_output = (float(linear), float(angular), bool(active))
 
     def _on_joystick(self, message):
         if message.data:
@@ -499,12 +522,159 @@ class RosTeleop:
             self.manual_at = None
 
     def _on_tuning_hold(self, message):
-        self._tuning_hold = bool(message.data)
-        if self._tuning_hold and self.session.active:
-            self.session.end("Configuration maintenance owns motion. Start manual input again explicitly.")
+        with self.session._lock:
+            self._tuning_legacy_hold = bool(message.data)
+            self._tuning_hold = self._tuning_legacy_hold or self._maintenance_owner is not None
+            if self._tuning_hold and self.session.active:
+                self.session.end("Configuration maintenance owns motion. Start manual input again explicitly.")
+            self._sync_maintenance_input_gate()
+
+    def _sync_maintenance_input_gate(self):
+        previous = bool(getattr(self.node, '_tuning_input_blocked', False))
+        if previous != self._tuning_hold:
+            self.node._tuning_input_after = time.monotonic()
+        self.node._tuning_input_blocked = self._tuning_hold
+
+    def _maintenance_idle(self):
+        # Actual local session and successfully published zero/released evidence;
+        # an absent packet or a failed publication is not a released input.
+        return (not self.session.active and self.session.preparing_at is None
+                and self._last_output == (0.0, 0.0, False))
+
+    def _maintenance_publisher(self):
+        endpoints = self.node.get_publishers_info_by_topic('/patrolbot/tuning_runtime_policy')
+        if (len(endpoints) != 1 or endpoints[0].node_name != 'patrolbot_bridge'
+                or endpoints[0].node_namespace != '/' or endpoints[0].topic_type != 'std_msgs/msg/String'):
+            raise ValueError('core policy publisher is missing or ambiguous')
+        return bytes(endpoints[0].endpoint_gid)
+
+    def _on_maintenance_policy(self, message, info):
+        tuning = getattr(self.node, '_tuning', None)
+        if tuning is None:
+            return
+        try:
+            gid = self._maintenance_publisher()
+            stamp = info['source_timestamp'] if isinstance(info, dict) else info.source_timestamp
+            source_gid = info['publisher_gid'] if isinstance(info, dict) else info.publisher_gid
+            age = (self.node.get_clock().now().nanoseconds - stamp) / 1e9
+            if (bytes(source_gid) != gid or stamp <= self._maintenance_source_stamp
+                    or not 0 <= age <= HARDWARE_TIMEOUT_S or len(message.data.encode()) > 4096):
+                raise ValueError('core policy observation is stale or foreign')
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ValueError('duplicate policy observation field')
+                    result[key] = value
+                return result
+            observed = json.loads(message.data, object_pairs_hook=pairs)
+            maintenance_context(observed)
+            expected = {key: observed[key] for key in ('version', 'revision', 'session_id',
+                        'hardware_session_generation', 'effective_limits')}
+            maintenance_payload(json.dumps(expected, allow_nan=False))
+            self._maintenance_source_stamp, self._maintenance_source_gid = stamp, gid
+            tuning.observe_maintenance_policy(observed, received_at=time.monotonic() - age)
+        except (ValueError, KeyError, AttributeError, TypeError, OverflowError, RecursionError, RuntimeError):
+            tuning.observe_maintenance_policy(None)
+
+    def _maintenance_observe(self, owner, expected, *, committed=False, bind=False):
+        tuning = getattr(self.node, '_tuning', None)
+        if tuning is None:
+            raise ValueError('core runtime policy observer unavailable')
+        if tuning._maintenance_observed is not None:
+            if self._maintenance_publisher() != self._maintenance_source_gid:
+                tuning.observe_maintenance_policy(None)
+                raise ValueError('core policy publisher changed')
+        result = tuning.maintenance_policy(owner, expected, committed=committed)
+        if bind:
+            tuning.bind_committed_maintenance_policy(owner, expected)
+        return result
+
+    def _tuning_maintenance(self, request, response):
+        # No signing key is available here. This fixed local consumer endpoint
+        # only reserves already-released input; core verifies signed authority.
+        # This is the same lock used by start/frame/end, so admission cannot race
+        # a web session into the gap between idle inspection and lease ownership.
+        with self.session._lock:
+            try:
+                value = maintenance_context(request)
+                operation = request.operation
+                if operation not in ('acquire', 'block', 'observe', 'inspect', 'stage', 'committed', 'release'):
+                    raise ValueError('unallowlisted maintenance operation')
+                raw = getattr(request, 'payload_json', '')
+                if operation not in ('stage', 'committed') and raw not in ('', '{}'):
+                    raise ValueError('unexpected maintenance payload')
+                accepted = False
+                # Check/encode live evidence before releasing any ownership.
+                policy = self.policy() if self.policy is not None else None
+                if len(json.dumps(policy, allow_nan=False).encode()) > 4096:
+                    raise ValueError('policy evidence too large')
+                if operation in ('acquire', 'block'):
+                    accepted = (self._maintenance_owner == value if self._maintenance_owner is not None
+                                else self._maintenance_idle() and value != self._maintenance_released
+                                and (operation == 'acquire' or self._tuning_legacy_hold))
+                    if accepted:
+                        if self._maintenance_owner is None:
+                            self.session.admission_after = self.session.clock()
+                        self._maintenance_owner = value
+                elif operation == 'inspect':
+                    accepted = self._maintenance_owner == value
+                elif operation == 'observe':
+                    accepted = True
+                elif operation in ('stage', 'committed'):
+                    if self._maintenance_owner == value and self._maintenance_idle():
+                        expected = maintenance_payload(raw)
+                        if self._maintenance_staged is not None and expected != self._maintenance_staged:
+                            raise ValueError('candidate policy cannot change under an existing job')
+                        if operation == 'committed' and self._maintenance_staged is None:
+                            raise ValueError('candidate policy must be staged first')
+                        self._maintenance_observe(value, expected, committed=operation == 'committed',
+                                                  bind=operation == 'committed')
+                        self._maintenance_staged = expected
+                        self._maintenance_committed = operation == 'committed'
+                        accepted = True
+                elif operation == 'release':
+                    accepted = (self._maintenance_owner == value or (
+                        self._maintenance_owner is None and self._maintenance_released == value))
+                    if accepted and self._maintenance_owner is not None:
+                        if not self._maintenance_idle():
+                            raise ValueError('web input release/zero evidence unknown')
+                        if self._maintenance_staged is not None:
+                            if not self._maintenance_committed:
+                                raise ValueError('candidate policy is not verified committed ACTIVE')
+                            self._maintenance_observe(value, self._maintenance_staged, committed=True)
+                        self._maintenance_owner, self._maintenance_released = None, value
+                        self.session.admission_after = self.session.clock()
+                        self._maintenance_staged, self._maintenance_committed = None, False
+                self._tuning_hold = self._tuning_legacy_hold or self._maintenance_owner is not None
+                response.accepted = bool(accepted)
+                response.detail = ('Web input maintenance acknowledged' if accepted
+                                   else 'Web input or another maintenance job owns admission')
+                tuning = getattr(self.node, '_tuning', None)
+                observed_policy = None
+                if tuning is not None:
+                    with tuning._policy_lock:
+                        received = tuning._maintenance_at
+                        if received is not None and 0 <= time.monotonic() - received <= 3.:
+                            observed_policy = tuning._maintenance_observed
+                response.evidence_json = json.dumps({'version': 2, 'owner': self._maintenance_owner,
+                    'policy_handshake_version': 1,
+                    'input_blocked': self._tuning_hold,
+                    'idle': self._maintenance_idle(), 'input_released': self._maintenance_idle(),
+                    'session_active': self.session.active, 'buffers': self._last_output,
+                    'policy': policy, 'staged_policy': self._maintenance_staged,
+                    'committed': self._maintenance_committed, 'observed_policy': observed_policy}, sort_keys=True, allow_nan=False)
+                if len(response.evidence_json.encode()) > 20 * 1024:
+                    raise ValueError('maintenance evidence too large')
+            except (ValueError, TypeError, AttributeError, OverflowError, RecursionError, RuntimeError):
+                response.accepted, response.detail, response.evidence_json = False, 'Invalid or unavailable maintenance context/evidence', '{}'
+            finally:
+                self._tuning_hold = self._tuning_legacy_hold or self._maintenance_owner is not None
+                self._sync_maintenance_input_gate()
+        return response
 
     def _tuning_idle(self, request, response):
-        response.success = self._tuning_hold and not self.session.active
+        response.success = self._tuning_hold and self._maintenance_idle()
         response.message = "Web session idle" if response.success else "Web session busy"
         return response
 

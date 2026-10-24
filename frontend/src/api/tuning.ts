@@ -56,8 +56,9 @@ export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSn
   try {
     const snapshot = normalizeSnapshot(await response.json());
     // Bound observation age conservatively by the complete HTTP round-trip.
-    return snapshot.readback ? { ...snapshot, readback: { ...snapshot.readback,
-      ageS: snapshot.readback.ageS + Math.max(0, performance.now() - started) / 1000 } } : snapshot;
+    if (!snapshot.readback) return snapshot;
+    const ageS = snapshot.readback.ageS + Math.max(0, performance.now() - started) / 1000;
+    return { ...snapshot, readback: { ...snapshot.readback, ageS, limits: ageS <= 3 ? snapshot.readback.limits : null } };
   } catch {
     return normalizeSnapshot(null);
   }
@@ -68,13 +69,27 @@ export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSn
 
 /** POST one canonical request. Caller maps failures to visible statuses. */
 export async function postTuningRequest(robotId: string, request: CanonicalRequest): Promise<TuningResponse> {
+  const started = performance.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
   const response = await fetch(base(robotId), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(request),
+    signal: controller.signal,
   });
   if (!response.ok) throw new TuningHttpError(response.status, await reasonFrom(response));
-  return parseTuningResponse(await response.json());
+  const parsed = parseTuningResponse(await response.json());
+  if (parsed.snapshot?.readback) {
+    const ageS = parsed.snapshot.readback.ageS + Math.max(0, performance.now() - started) / 1000;
+    parsed.snapshot = { ...parsed.snapshot, readback: {
+      ...parsed.snapshot.readback, ageS, limits: ageS <= 3 ? parsed.snapshot.readback.limits : null } };
+  }
+  return parsed;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** GET a durable job by id; used to resolve an unknown outcome, never to retry it. */

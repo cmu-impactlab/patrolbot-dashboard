@@ -518,6 +518,9 @@ class WebBridgeNode(Node):
             self._teleop.session.end("Dashboard connection changed; manual input ended.", "failed")
         while self._command_queue:
             data = self._command_queue.popleft()
+            received = data.pop('_input_received_at', None)
+            if self._maintenance_reject_command(data, received):
+                continue
             command = data.get("command")
             if command in {"teleop_start", "teleop_stop"}:
                 generation = data.pop("_ws_generation", None)
@@ -605,10 +608,27 @@ class WebBridgeNode(Node):
     def _enqueue_command(self, data):
         if not isinstance(data, dict):
             return
+        received = time.monotonic()
+        if self._maintenance_reject_command(data, received):
+            return
+        data = dict(data, _input_received_at=received)
         if data.get("command") in {"teleop_start", "teleop_stop"}:
             data = dict(data, _ws_generation=self.ws.connection_generation,
                         _received_at=time.monotonic())
         self._command_queue.append(data)
+
+    def _maintenance_reject_command(self, data, received):
+        # Stopping/releasing is always allowed. Other input is discarded, not
+        # queued for the new Nav2 stack or replayed after a hot apply completes.
+        if data.get('command') in {'stop', 'cancel', 'cancel_map', 'motor_disable', 'teleop_stop'}:
+            return False
+        after = getattr(self, '_tuning_input_after', 0.)
+        if (getattr(self, '_tuning_input_blocked', False)
+                or after > 0 and (type(received) not in (int, float) or received <= after)):
+            self.ws.send('command.ack', {'command_id': str(data.get('command_id', '')),
+                'accepted': False, 'reason': 'Configuration maintenance discards input. Submit a new command after Apply finishes.'})
+            return True
+        return False
 
     def _enqueue_teleop(self, frame):
         # Called by the WS thread: no ROS calls and no velocity backlog.
@@ -630,6 +650,8 @@ class WebBridgeNode(Node):
             if data.get("deadman") is False:
                 self._teleop_release_frame = sample
                 self._latest_teleop_frame = None
+                return
+            if getattr(self, '_tuning_input_blocked', False):
                 return
             if (self._teleop_release_frame is not None and
                     self._teleop_release_frame[0].get("command_id") == data.get("command_id")):

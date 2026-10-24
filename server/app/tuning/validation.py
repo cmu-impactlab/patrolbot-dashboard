@@ -18,6 +18,7 @@ server runtime does not depend on the dev/test-only contract requirements.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -415,9 +416,9 @@ _ALLOWED_KEYS = {
     "read": set(_REQUIRED_KEYS["read"]),
     "status": set(_REQUIRED_KEYS["status"]) | {"job_id"},
     "save": set(_REQUIRED_KEYS["save"]),
-    "apply": set(_REQUIRED_KEYS["apply"]),
-    "redeploy": set(_REQUIRED_KEYS["redeploy"]),
-    "restore": set(_REQUIRED_KEYS["restore"]),
+    "apply": set(_REQUIRED_KEYS["apply"]) | {"review"},
+    "redeploy": set(_REQUIRED_KEYS["redeploy"]) | {"review"},
+    "restore": set(_REQUIRED_KEYS["restore"]) | {"review"},
 }
 
 
@@ -454,6 +455,12 @@ def validate_request(payload: Any, registry: dict[str, Any] | None = None) -> di
 
     index = registry_index(registry if registry is not None else load_registry())
     _check_generation(payload)
+    if "review" in payload:
+        review = payload["review"]
+        if (not isinstance(review, dict) or set(review) != {"digest", "plan_hash"}
+                or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                       for value in review.values())):
+            raise TuningInvalid("The reviewed activation binding is invalid.", code="invalid_review")
 
     if operation == "save":
         _check_revision(payload, "base_revision")
@@ -515,6 +522,10 @@ def validate_snapshot(snapshot: Any, registry: dict[str, Any] | None = None) -> 
         raise TuningInvalid("snapshot must be an object.", code="bad_type")
     _scan(snapshot, max_bytes=RESPONSE_MAX_BYTES)
     index = registry_index(registry if registry is not None else load_registry())
+    for name, operation in (("activation_plan", "apply"), ("restore_plan", "restore")):
+        plan = snapshot.get(name)
+        if plan is not None:
+            _validate_activation_plan(plan, snapshot, index, operation)
 
     readback = snapshot.get("readback")
     if readback is not None:
@@ -646,6 +657,90 @@ def validate_snapshot(snapshot: Any, registry: dict[str, Any] | None = None) -> 
         raise TuningInvalid("snapshot.compatibility must be a bounded string.",
                             code="bad_type")
     return snapshot
+
+
+def _validate_activation_plan(plan, snapshot, index, operation):
+    """A preview is display data, never authority; reject unbound/malformed scope."""
+    nodes = {entry["source"]["node"] for entry in index.values() if entry.get("accepts_edits")}
+    nodes.add("patrolbot_joy_teleop")
+    def invalid():
+        raise TuningInvalid("The robot's reviewed activation plan is invalid.", code="invalid_activation_plan")
+    if not isinstance(plan, dict):
+        invalid()
+    if (type(plan.get("version")) is not int or plan["version"] != 1
+            or plan.get("operation") != operation
+            or plan.get("session_id") != snapshot.get("session_id")
+            or canonical_uuid(plan.get("session_id")) is None
+            or not isinstance(plan.get("hardware_generation"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", plan["hardware_generation"])
+            or type(plan.get("executable")) is not bool or type(plan.get("seed_required")) is not bool
+            or plan.get("execution_kind") not in ("scoped_parameters", "scoped_lifecycle", "robot_docker", "nav2_redeploy")
+            or not isinstance(plan.get("disruption"), str) or len(plan["disruption"]) > MAX_DETAIL):
+        invalid()
+    for key in ("revision", "desired_revision", "base_revision"):
+        if not is_strict_int(plan.get(key)) or not 0 <= plan[key] <= JS_SAFE_INT:
+            invalid()
+    if (plan["desired_revision"] != snapshot.get("desired_revision")
+            or plan["base_revision"] != snapshot.get("committed_active_revision")
+            or plan["revision"] != snapshot.get("desired_revision" if operation == "apply" else "last_known_good_revision")):
+        invalid()
+    for key in ("digest", "base_digest", "plan_hash"):
+        if not isinstance(plan.get(key), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", plan[key]):
+            invalid()
+    if plan["base_digest"] != snapshot.get("digest"):
+        invalid()
+    if operation == "apply" and plan["digest"] != snapshot.get("desired_digest"):
+        invalid()
+    if plan.get('execution_kind') == 'nav2_redeploy':
+        # This is a fixed navigation-container scope, not arbitrary caller
+        # selected services or a rename of the old whole-robot Docker fallback.
+        native_nodes = {'amcl', 'behavior_server', 'bt_navigator', 'collision_monitor', 'controller_server',
+            'joy_node', 'laser_static_tf', 'lifecycle_manager_localization', 'lifecycle_manager_navigation',
+            'map_server', 'nav2_container', 'patrolbot_controller_feedback', 'patrolbot_dock_manager',
+            'patrolbot_joy_teleop', 'patrolbot_safety_watchdog', 'planner_server', 'route_server',
+            'smoother_server', 'velocity_smoother', 'waypoint_follower'}
+        nodes |= native_nodes
+        if (plan.get('strategy') != 'hot_or_nav2_redeploy' or plan.get('services') != ['navigation']
+                or plan.get('seed_required') is not True or plan.get('image_rebuild') is not False
+                or not isinstance(plan.get('nodes'), list)
+                or not native_nodes <= set(item for item in plan['nodes'] if isinstance(item, str))):
+            invalid()
+    for key, allowed in (("nodes", nodes), ("services", {"bringup", "bridge", "navigation", "web-bridge"})):
+        values = plan.get(key)
+        if not isinstance(values, list) or any(not isinstance(item, str) or item not in allowed for item in values) or len(set(values)) != len(values):
+            invalid()
+    reasons = plan.get("reasons")
+    if not isinstance(reasons, list) or len(reasons) > 32:
+        invalid()
+    for reason in reasons:
+        if (not isinstance(reason, dict) or set(reason) != {"code", "detail"}
+                or not isinstance(reason["code"], str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", reason["code"])
+                or not isinstance(reason["detail"], str) or len(reason["detail"]) > MAX_DETAIL):
+            invalid()
+    if reasons and plan["executable"]:
+        invalid()
+    changes = plan.get("changes")
+    if not isinstance(changes, list) or len(changes) > MAX_CHANGES:
+        invalid()
+    seen = set()
+    for change in changes:
+        if not isinstance(change, dict) or set(change) != {"id", "before", "after"}:
+            invalid()
+        pid = change["id"]
+        if (not isinstance(pid, str) or pid not in index or pid in seen or not index[pid].get("accepts_edits")
+                or index[pid].get("protected") or index[pid].get("not_applicable") or change["after"] is None):
+            invalid()
+        seen.add(pid)
+        _snapshot_scalar(index[pid], change["before"], check_bounds=False)
+        _snapshot_scalar(index[pid], change["after"], check_bounds=True)
+        if operation == "apply" and change["after"] != snapshot.get("desired", {}).get(pid):
+            invalid()
+    # The core compares this same canonical hash before executing. Relays must
+    # not rewrite a node list, disruption or seed consequence after review.
+    canonical = json.dumps({key: value for key, value in plan.items() if key != "plan_hash"},
+                           sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    if plan["plan_hash"] != "sha256:" + hashlib.sha256(canonical).hexdigest():
+        invalid()
 
 
 def validate_actor(actor: Any) -> dict[str, Any]:

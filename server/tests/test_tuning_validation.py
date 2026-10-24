@@ -9,6 +9,8 @@ catalog does not allow.
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +99,78 @@ def test_canonical_uuid(value, expected):
 ])
 def test_valid_requests_pass(payload):
     assert validation.validate_request(payload) is payload
+
+
+@pytest.mark.parametrize("builder", [apply_request, redeploy_request, restore_request])
+def test_reviewed_binding_is_validated_without_exposing_node_or_service_inputs(builder):
+    request = builder(review={"digest": "sha256:" + "a" * 64, "plan_hash": "sha256:" + "b" * 64})
+    assert validation.validate_request(request) is request
+    request["review"]["node"] = "amcl"
+    with pytest.raises(TuningInvalid):
+        validation.validate_request(request)
+
+
+def _with_preview():
+    data = snapshot(committed_active_revision=2, desired_digest="sha256:" + "a" * 64,
+                    digest="sha256:" + "b" * 64, desired={"amcl.alpha1": .06})
+    plan = {"version": 1, "operation": "apply", "revision": 3, "desired_revision": 3,
+            "base_revision": 2, "digest": data["desired_digest"], "base_digest": data["digest"],
+            "session_id": data["session_id"], "hardware_generation": "sha256:" + "c" * 64,
+            "execution_kind": "scoped_lifecycle", "nodes": ["amcl"], "services": [],
+            "seed_required": True, "disruption": "AMCL reset; operator seed required.",
+            "executable": False, "reasons": [{"code": "implementation_unverified", "detail": "Native proof required."}],
+            "changes": [{"id": "amcl.alpha1", "before": .05, "after": .06}]}
+    plan["plan_hash"] = "sha256:" + hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    data["activation_plan"] = plan
+    return data
+
+
+def test_core_preview_is_displayable_but_does_not_claim_support_or_activity():
+    data = _with_preview()
+    assert validation.validate_snapshot(data) is data
+    assert not data["activation_supported"]
+
+
+def _rehash(plan):
+    content = {key: value for key, value in plan.items() if key != 'plan_hash'}
+    plan['plan_hash'] = 'sha256:' + hashlib.sha256(json.dumps(
+        content, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def _with_nav2_preview():
+    data = _with_preview()
+    runtime = json.loads((Path(__file__).resolve().parents[2] / 'contracts/robot-tuning-runtime.json').read_text())
+    data['activation_plan'].update(strategy='hot_or_nav2_redeploy', execution_kind='nav2_redeploy',
+        nodes=runtime['nav2_redeploy']['nodes'], services=['navigation'], image_rebuild=False,
+        disruption='Restart the complete navigation container; a fresh operator seed is required.')
+    _rehash(data['activation_plan'])
+    return data
+
+
+def test_whole_nav2_review_is_displayable_without_claiming_enabled_native_support():
+    data = _with_nav2_preview()
+    assert validation.validate_snapshot(data) is data
+    assert not data['activation_supported']
+
+
+@pytest.mark.parametrize('field,value', [('services', ['navigation', 'bridge']),
+    ('services', ['navigation', 'bringup']), ('services', ['bridge']), ('image_rebuild', True),
+    ('seed_required', False), ('strategy', 'robot_docker'), ('nodes', ['amcl'])])
+def test_rehashed_preview_cannot_rename_broad_restart_or_omit_nav2_seed_loss(field, value):
+    data = _with_nav2_preview()
+    data['activation_plan'][field] = value
+    _rehash(data['activation_plan'])  # Valid hash is not enough to make a scope valid.
+    with pytest.raises(TuningInvalid):
+        validation.validate_snapshot(data)
+
+
+@pytest.mark.parametrize("part,value", [("nodes", ["/bin/sh"]), ("services", ["host-reset"]),
+    ("seed_required", False), ("desired_revision", 4), ("session_id", new_uuid()), ("executable", True)])
+def test_modified_or_unbound_preview_is_refused(part, value):
+    data = _with_preview()
+    data["activation_plan"][part] = value
+    with pytest.raises(TuningInvalid):
+        validation.validate_snapshot(data)
 
 
 # -- validate_request: structural refusals -----------------------------------

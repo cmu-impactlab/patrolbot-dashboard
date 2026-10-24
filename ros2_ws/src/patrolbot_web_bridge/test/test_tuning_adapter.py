@@ -84,6 +84,19 @@ def test_capabilities_advertise_write_from_a_fresh_save_flag():
     assert adapter.capabilities() == ['robot_tuning_read_v1', 'robot_tuning_write_v1']
 
 
+def test_review_binding_is_relayed_intact_but_arbitrary_scope_arguments_are_refused():
+    data = wrapper('apply', 'administrator', signed=True)
+    data['request'].update(expected_revision=2, review={
+        'digest': 'sha256:' + 'a' * 64, 'plan_hash': 'sha256:' + 'b' * 64})
+    assert wrapper_reason(data) is None
+    adapter, calls, _, _, _ = rig()
+    adapter.enqueue(data)
+    adapter.tick()
+    assert json.loads(calls[0].payload_json) == data
+    data['request']['review']['service'] = 'arbitrary'
+    assert wrapper_reason(data) is not None
+
+
 def test_full_mutation_capability_requires_activation_supported():
     adapter, calls, sent, future, ws = rig()
     read_snapshot(adapter, future, {'save_supported': True,

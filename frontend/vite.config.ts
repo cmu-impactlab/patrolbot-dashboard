@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 const backend = process.env.PATROLBOT_DEV_BACKEND ?? "http://localhost:8000";
 
 export default defineConfig({
+  // Isolated browser runs must not overwrite a developer/container-owned cache.
+  cacheDir: process.env.PATROLBOT_VITE_CACHE_DIR,
   plugins: [react()],
   // react-draggable (inside react-grid-layout) reads process.env at runtime;
   // without this shim every drag start throws "process is not defined".

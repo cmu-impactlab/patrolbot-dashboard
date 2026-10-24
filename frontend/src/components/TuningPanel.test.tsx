@@ -77,11 +77,10 @@ function snapshot(entries: TuningCatalogEntry[], desired: Record<string, number>
 
 function ready(snap: NormalizedSnapshot, drafts: Record<string, string> = {}) {
   useTuningStore.setState({
+    ...useTuningStore.getInitialState(),
     snapshot: snap, status: "ready", drafts, savePhase: {}, saveDetail: {},
     receivedAt: performance.now(),
-    saveRequestIds: {}, draftBaseRevision: 1, conflictIds: [], job: null,
-    redeploy: { phase: "idle", detail: null, requestId: null },
-    restore: { phase: "idle", detail: null, requestId: null },
+    draftBaseRevision: snap.desiredRevision, draftSession: snap.sessionId, draftRobot: "test-robot", conflictIds: [], job: null,
   });
 }
 
@@ -105,9 +104,9 @@ describe("declared bounds are never fabricated", () => {
     snap.safeApply = { allowed: false, reason: "Physical deadman is held." };
     ready(snap);
     render(<TuningPanel />);
-    const button = screen.getByRole("button", { name: /Apply saved changes/ }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: /Apply changes/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    expect(button.title).toBe("Physical deadman is held.");
+    expect(button.title).toBe("The robot has not provided a reviewable activation plan.");
     expect(postTuningRequest).not.toHaveBeenCalled();
   });
   it("shows no range and no slider when a parameter declares no bounds", () => {
@@ -218,21 +217,29 @@ describe("the numeric text field is never clamped or replaced", () => {
   });
 });
 
-describe("a pending save stays scoped to the field's own group", () => {
-  it("submits only the edited group when the slider debounce fires", async () => {
+describe("explicit Save is the only mutation trigger", () => {
+  it("blur, Enter, slider release/cancel and timers never save; one click batches all dirty groups", async () => {
     vi.useFakeTimers();
     try {
       useTelemetryStore.setState({ baseStateAt: performance.now() });
-      const drafts = { [MIN_APPROACH.id]: "0.08", [SIGMA.id]: "0.3" };
-      ready(snapshot([MIN_APPROACH, SIGMA], { [MIN_APPROACH.id]: 0.08, [SIGMA.id]: 0.3 }), drafts);
+      ready(snapshot([MIN_APPROACH, SIGMA], { [MIN_APPROACH.id]: 0.08, [SIGMA.id]: 0.2 }));
       render(<TuningPanel />);
+      const input = inputFor(SIGMA.label);
+      fireEvent.change(input, { target: { value: "0.3" } });
+      fireEvent.blur(input);
+      fireEvent.keyDown(input, { key: "Enter" });
       const slider = screen.getByRole("slider", { name: "Min approach linear velocity slider" });
       fireEvent.change(slider, { target: { value: "0.12" } });
+      fireEvent.pointerUp(slider);
+      fireEvent.pointerCancel(slider);
+      fireEvent.keyUp(slider, { key: "ArrowRight" });
       await act(async () => { vi.advanceTimersByTime(400); });
+      expect(postTuningRequest).not.toHaveBeenCalled();
+      act(() => useTelemetryStore.setState({ baseStateAt: performance.now() }));
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save changes" })); });
       const calls = vi.mocked(postTuningRequest).mock.calls;
       expect(calls).toHaveLength(1);
-      // `amcl`'s draft must not be swept into the `nav2_controller` save.
-      expect(calls[0][1].changes!.map((change) => change.id)).toEqual([MIN_APPROACH.id]);
+      expect(calls[0][1].changes!.map((change) => change.id)).toEqual([SIGMA.id, MIN_APPROACH.id]);
       expect(useTuningStore.getState().drafts[SIGMA.id]).toBe("0.3");
       expect(useTuningStore.getState().drafts[MIN_APPROACH.id]).toBe("0.12");
     } finally {
@@ -281,6 +288,16 @@ describe("read-only fallback", () => {
       session_generation: 1, link_connected: false, telemetry_age: 0 } as never }));
     expect(screen.queryByRole("slider")).toBeNull();
     expect(screen.getAllByText(/SBC link is disconnected or stale/).length).toBeGreaterThan(0);
+  });
+  it("keeps exact unsaved text visible but disabled when the SBC link is lost", () => {
+    ready(snapshot([SIGMA], { [SIGMA.id]: .2 }));
+    render(<TuningPanel />);
+    fireEvent.change(inputFor(SIGMA.label), { target: { value: ".12345" } });
+    act(() => useTelemetryStore.setState({ baseState: {
+      session_generation: 1, link_connected: false, telemetry_age: 0 } as never }));
+    expect(inputFor(SIGMA.label).value).toBe(".12345");
+    expect(inputFor(SIGMA.label).disabled).toBe(true);
+    expect(postTuningRequest).not.toHaveBeenCalled();
   });
   it("does not substitute YAML for unavailable live readback", () => {
     const readOnly = entry({ id: "test.readonly", label: "Read-only parameter", group: "amcl",

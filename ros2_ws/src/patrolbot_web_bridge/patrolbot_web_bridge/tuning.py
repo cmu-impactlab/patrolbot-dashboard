@@ -70,6 +70,45 @@ def canonical_uuid(value: Any) -> str | None:
     return value if str(parsed) == value else None
 
 
+def maintenance_context(request) -> dict:
+    value = {key: request[key] if isinstance(request, dict) else getattr(request, key)
+             for key in ('job_id', 'digest', 'plan_hash')}
+    if canonical_uuid(value['job_id']) is None or any(
+            not isinstance(value[key], str) or re.fullmatch(r'sha256:[0-9a-f]{64}', value[key]) is None
+            for key in ('digest', 'plan_hash')):
+        raise ValueError('invalid maintenance owner')
+    return value
+
+
+def maintenance_payload(raw: str) -> dict:
+    """Fixed expected policy, not an authorization or a source of live values."""
+    if not isinstance(raw, str) or len(raw.encode()) > 2048:
+        raise ValueError('invalid maintenance payload size')
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError('duplicate maintenance field')
+            value[key] = item
+        return value
+    value = json.loads(raw, object_pairs_hook=pairs)
+    if (not isinstance(value, dict) or set(value) != {'version', 'revision', 'session_id',
+            'hardware_session_generation', 'effective_limits'}
+            or type(value['version']) is not int or value['version'] != 1
+            or type(value['revision']) is not int or not 1 <= value['revision'] <= MAX_SAFE_INT
+            or canonical_uuid(value['session_id']) is None
+            or type(value['hardware_session_generation']) is not int
+            or not 0 <= value['hardware_session_generation'] <= MAX_SAFE_INT):
+        raise ValueError('invalid expected policy binding')
+    limits = value['effective_limits']
+    if (not isinstance(limits, dict) or set(limits) != {'max_linear_m_s', 'max_angular_rad_s'}
+            or any(type(limits[key]) not in (int, float) or not math.isfinite(limits[key])
+                   or not 0 <= limits[key] <= hard for key, hard in
+                   (('max_linear_m_s', .30), ('max_angular_rad_s', .70)))):
+        raise ValueError('invalid expected policy limits')
+    return value
+
+
 def _finite_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -143,10 +182,16 @@ def wrapper_reason(wrapper: Any) -> str | None:
         return "Changing tuning requires a signed server authorization."
     common = {"contract", "version", "operation", "request_id", "generation"}
     extras = {"read": set(), "status": {"job_id"}, "save": {"base_revision", "changes"},
-              "apply": {"expected_revision"}, "redeploy": {"expected_revision"},
-              "restore": {"expected_revision", "restore_revision", "target"}}[operation]
+              "apply": {"expected_revision", "review"}, "redeploy": {"expected_revision", "review"},
+              "restore": {"expected_revision", "restore_revision", "target", "review"}}[operation]
     if set(request) - common - extras or not common.issubset(request):
         return "The tuning request has unexpected fields."
+    if "review" in request:
+        review = request["review"]
+        if (not isinstance(review, dict) or set(review) != {"digest", "plan_hash"}
+                or any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                       for value in review.values())):
+            return "The reviewed activation binding is invalid."
     for key in ("base_revision", "expected_revision", "restore_revision"):
         if key in extras and (type(request.get(key)) is not int or not 0 <= request[key] <= 2**53 - 1):
             return "The tuning revision is invalid."
@@ -210,6 +255,7 @@ class RosTuning:
         self.deadline_s = deadline_s
         self._clock = clock
         self._lock = threading.Lock()
+        self._policy_lock = threading.RLock()
         self._queue: deque[Any] = deque()
         self._inflight: dict[str, Any] | None = None
         self._srv_type = srv_type
@@ -219,6 +265,9 @@ class RosTuning:
         self.unknown_outcomes = 0
         self._snapshot = None
         self._snapshot_at = None
+        self._maintenance_observed = None
+        self._maintenance_at = None
+        self._committed_policy = None
         self._last_probe = float("-inf")
         self._policy_required = False
         if client_factory is not None:
@@ -289,8 +338,13 @@ class RosTuning:
         return self._policy_required
 
     def teleop_policy(self):
-        snapshot = self._snapshot
-        if not isinstance(snapshot, dict) or not snapshot.get("active_known") or self._snapshot_at is None:
+        with self._policy_lock:
+            snapshot, snapshot_at = self._snapshot, self._snapshot_at
+            committed = self._committed_policy
+        if committed is not None:
+            base = getattr(self.node, '_latest_base_state', None) or {}
+            return dict(committed) if committed['robot_generation'] == base.get('session_generation') else None
+        if not isinstance(snapshot, dict) or snapshot.get("active_known") is not True or snapshot_at is None:
             return None
         base = getattr(self.node, "_latest_base_state", None) or {}
         if snapshot.get("hardware_session_generation") != base.get("session_generation"):
@@ -299,7 +353,74 @@ class RosTuning:
         if not isinstance(limits, dict) or not isinstance(snapshot.get("digest"), str):
             return None
         return dict(limits, generation=f'{snapshot["session_id"]}:{snapshot["active_revision"]}:{snapshot["digest"].removeprefix("sha256:")}',
-                    received_mono=self._snapshot_at, robot_generation=base["session_generation"])
+                    received_mono=snapshot_at, robot_generation=base["session_generation"])
+
+    def maintenance_policy(self, owner: dict, expected: dict, *, committed: bool = False) -> dict:
+        """Match an expected cache against independently observed core runtime.
+
+        Core must supply ``maintenance_policy`` from its live candidate policy
+        observation under the exact command hold, never compiled DESIRED. Until
+        that hook is implemented staging fails closed. Committed verification
+        instead uses the ordinary ACTIVE/runtime readback binding.
+        """
+        with self._policy_lock:
+            snapshot, received = self._snapshot, self._snapshot_at
+            direct, direct_at = self._maintenance_observed, self._maintenance_at
+        if direct is not None and direct.get('phase') == ('committed' if committed else 'candidate'):
+            observed, received = direct, direct_at
+        else:
+            observed = snapshot.get('maintenance_policy') if isinstance(snapshot, dict) else None
+        if (not isinstance(snapshot, dict) or received is None
+                or not 0 <= self._clock() - received <= 3.0 or not self.ready):
+            raise ValueError('fresh core runtime policy observation required')
+        base = getattr(self.node, '_latest_base_state', None) or {}
+        if (type(base.get('session_generation')) is not int
+                or expected['hardware_session_generation'] != base['session_generation']
+                or snapshot.get('session_id') != expected['session_id']):
+            raise ValueError('core/hardware session changed')
+        if committed and (direct is None or direct.get('phase') != 'committed'):
+            if (snapshot.get('active_known') is not True
+                    or snapshot.get('active_revision') != expected['revision']
+                    or snapshot.get('committed_active_revision') != expected['revision']
+                    or snapshot.get('digest') != owner['digest']
+                    or snapshot.get('hardware_session_generation') != expected['hardware_session_generation']
+                    or snapshot.get('effective_limits') != expected['effective_limits']):
+                raise ValueError('committed ACTIVE runtime policy mismatch')
+        else:
+            fields = set(expected) | set(owner) | {'phase', 'runtime_verified', 'command_hold',
+                                                  'observed_age_s', 'committed_active_revision'}
+            if (not isinstance(observed, dict) or set(observed) != fields
+                    or observed.get('phase') != ('committed' if committed else 'candidate')
+                    or observed.get('committed_active_revision') != (expected['revision'] if committed else None)
+                    or observed.get('runtime_verified') is not True
+                    or observed.get('command_hold') is not True
+                    or any(observed.get(key) != value for key, value in dict(owner, **expected).items())):
+                raise ValueError('exact held candidate runtime observation required')
+            age = observed['observed_age_s']
+            if (type(age) not in (int, float) or not math.isfinite(age)
+                    or age < 0 or age + self._clock() - received > 3.0):
+                raise ValueError('candidate runtime observation expired')
+        return dict(expected, **owner, phase='committed' if committed else 'candidate')
+
+    def observe_maintenance_policy(self, observed: dict | None, *, received_at: float | None = None):
+        """Only the fixed, identity-checked local core topic supplies this hook.
+
+        This side channel avoids a writer/read-service cycle during apply. It is
+        not WebSocket ingress and is never populated from a browser request.
+        """
+        with self._policy_lock:
+            self._maintenance_observed = observed
+            self._maintenance_at = received_at
+
+    def bind_committed_maintenance_policy(self, owner: dict, expected: dict):
+        self.maintenance_policy(owner, expected, committed=True)
+        with self._policy_lock:
+            observed, received = self._maintenance_observed, self._maintenance_at
+            if observed is not None and observed.get('phase') == 'committed':
+                self._committed_policy = dict(expected['effective_limits'],
+                    generation=f'{expected["session_id"]}:{expected["revision"]}:{owner["digest"].removeprefix("sha256:")}',
+                    received_mono=received - observed['observed_age_s'],
+                    robot_generation=expected['hardware_session_generation'])
 
     # -- ingress ------------------------------------------------------------------
 
@@ -415,7 +536,19 @@ class RosTuning:
             return
         snapshot = data.get("snapshot")
         if data.get("outcome") == "ok" and isinstance(snapshot, dict):
-            self._snapshot, self._snapshot_at = snapshot, self._clock()
+            # Charge the complete service round trip to policy freshness.
+            with self._policy_lock:
+                self._snapshot, self._snapshot_at = snapshot, inflight['sent_at']
+                # Never replace an explicitly bound committed policy by an old
+                # delayed ACTIVE read. The normal reader takes over once it has
+                # observed this same (or a later) committed runtime revision.
+                if self._committed_policy is not None and snapshot.get('active_known') is True:
+                    bound = self._committed_policy['generation'].split(':')
+                    revision = snapshot.get('active_revision')
+                    if (type(revision) is int and snapshot.get('session_id') == bound[0]
+                            and (revision > int(bound[1]) or (revision == int(bound[1])
+                                and snapshot.get('digest') == 'sha256:' + bound[2]))):
+                        self._committed_policy = None
             # A previously configured policy must never silently downgrade to
             # legacy merely because a later read fails or the transport drops.
             self._policy_required = self._policy_required or snapshot.get("policy_required") is True
@@ -445,8 +578,11 @@ class RosTuning:
         """
         with self._lock:
             self._queue.clear()
-        self._snapshot = None
-        self._snapshot_at = None
+        with self._policy_lock:
+            self._snapshot = None
+            self._snapshot_at = None
+            self._maintenance_observed = self._maintenance_at = None
+            self._committed_policy = None
         if self._inflight is not None:
             self._inflight = None
             self.unknown_outcomes += 1
