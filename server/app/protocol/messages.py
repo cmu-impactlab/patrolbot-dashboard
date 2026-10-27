@@ -120,6 +120,9 @@ class BatteryData(BaseModel):
 
 
 class BaseStateData(MapContext):
+    operation_fault_reason: str = ""
+    operation_fault_request_id: str = ""
+    operation_outcome_unknown: bool = False
     lidar_state: Literal["UNKNOWN", "OFF", "STARTING", "READY", "FAULT"] = "UNKNOWN"
     lidar_power_supported: bool = False
     lidar_scan_age: float = Field(default=-1.0, ge=-1.0, allow_inf_nan=False)
@@ -254,7 +257,7 @@ CommandType = Literal[
     # the command anyway meant the dashboard offered a control the real
     # executor would reject as unknown, and only the mock made it look
     # implemented. Reinstate it when a real dock-in path is commissioned.
-    "charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power",
+    "charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power", "dock_reset",
 ]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 

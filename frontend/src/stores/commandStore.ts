@@ -39,7 +39,7 @@ export interface CommandResultInfo {
 /** Commands that hand the robot the ability to move, or take it away. A
  *  pending destination must not survive one — requiring a new, explicit
  *  operator action afterwards is the whole point. */
-const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power"];
+const CLEARS_PENDING_GOAL: CommandType[] = ["charge_release", "motor_enable", "motor_disable", "undock", "software_reset", "set_lidar_power", "dock_reset"];
 
 interface CommandState {
   active: ActiveCommand | null;

@@ -114,6 +114,9 @@ export interface BaseStateData extends MapContext {
   dock_state_valid?: boolean | null;
   dock_phase?: number | null;
   dock_phase_name?: string | null;
+  operation_fault_reason?: string;
+  operation_fault_request_id?: string;
+  operation_outcome_unknown?: boolean;
   undock_active?: boolean;
   undock_release_attempts?: number | null;
   minimum_rear_range?: number | null;
@@ -239,7 +242,7 @@ export type CommandType =
   // The guarded UI sends `undock` as one action. The two service-level
   // commands remain in the protocol for robot-side diagnostics and recovery.
   // There is no `dock`: the robot has no automatic dock-in path.
-  | "charge_release" | "motor_enable" | "motor_disable" | "undock" | "software_reset" | "set_lidar_power"
+  | "charge_release" | "motor_enable" | "motor_disable" | "undock" | "software_reset" | "set_lidar_power" | "dock_reset"
   | "teleop_start" | "teleop_stop";
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 

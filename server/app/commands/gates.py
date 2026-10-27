@@ -75,6 +75,7 @@ class StateFacts:
     motors_enabled: bool = False
     estop_pressed: bool = False
     fault_flags: int = 0
+    stall_value: int = 0
     bumpers_front: bool = False
     bumpers_rear: bool = False
     # Whether the two above mean anything. None is "the robot did not say",
@@ -83,6 +84,7 @@ class StateFacts:
     dock_state: str | None = None
     dock_state_valid: bool | None = None
     undock_active: bool = False
+    operation_outcome_unknown: bool = False
     undock_profile_commissioned: bool | None = None
     localized: bool = False
     # Set from the operator's per-command override, not from telemetry.
@@ -164,12 +166,14 @@ def facts_from_state(connection: str, base_state: Any | None, pose: Any | None,
         facts.motors_enabled = bool(base_state.motors_enabled)
         facts.estop_pressed = bool(base_state.estop_pressed)
         facts.fault_flags = int(base_state.fault_flags)
+        facts.stall_value = int(getattr(base_state, "stall_value", 0))
         facts.bumpers_front = bool(base_state.bumpers_front)
         facts.bumpers_rear = bool(base_state.bumpers_rear)
         facts.bumpers_valid = getattr(base_state, "bumpers_valid", None)
         facts.dock_state = getattr(base_state, "dock_state", None)
         facts.dock_state_valid = getattr(base_state, "dock_state_valid", None)
         facts.undock_active = bool(getattr(base_state, "undock_active", False))
+        facts.operation_outcome_unknown = bool(getattr(base_state, "operation_outcome_unknown", False))
         facts.undock_profile_commissioned = getattr(
             base_state, "undock_profile_commissioned", None)
         facts.odom_epoch_valid = bool(
@@ -335,6 +339,30 @@ def motor_enable_reason(facts: StateFacts) -> str | None:
     return None
 
 
+def dock_reset_reason(facts: StateFacts) -> str | None:
+    ages = (facts.telemetry_age, facts.base_state_age, facts.pose_age)
+    if any(age is None or not math.isfinite(age) or age < 0 for age in ages):
+        return "Wait for fresh, valid hardware and measured-motion readings before recovery."
+    reason = _hardware_reason(facts)
+    if reason:
+        return reason
+    if "dock_reset" not in facts.capabilities:
+        return "This robot does not support explicit fault recovery. Update its bridge first."
+    if facts.estop_pressed:
+        return "Release the physical E-stop only when safe; it cannot be bypassed."
+    if facts.operation_outcome_unknown:
+        return "The operation outcome is unknown. Inspect the robot; this fault cannot be bypassed."
+    if facts.stall_value & 0x0101:
+        return "A wheel stall is active. Inspect the wheels before recovery."
+    if facts.lidar_state == "FAULT":
+        return "Resolve the laser scanner fault before operation recovery."
+    if facts.undock_active or facts.navigating:
+        return "Stop the active operation and wait for its confirmed result before recovery."
+    if not facts.dock_state_valid or facts.dock_state not in {"FAULT_STOPPED", "CLEAR_CONFIRMED", "DOCKED_CONFIRMED"}:
+        return "Wait for a confirmed physical dock state before recovery."
+    return _stationary_reason(facts)
+
+
 def motor_disable_reason(facts: StateFacts) -> str | None:
     if not facts.online:
         return "The robot is not connected right now."
@@ -437,6 +465,7 @@ GATES = {
     "charge_release": charge_release_reason,
     "motor_enable": motor_enable_reason,
     "motor_disable": motor_disable_reason,
+    "dock_reset": dock_reset_reason,
     "undock": undock_reason,
     "software_reset": software_reset_reason,
 }
