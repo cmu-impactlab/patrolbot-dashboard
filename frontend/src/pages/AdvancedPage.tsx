@@ -3,6 +3,7 @@ import { TuningPanel } from "../components/TuningPanel";
 import { useTelemetrySocket } from "../websocket/useTelemetrySocket";
 import { useTuningReadback } from "../lib/useTuningReadback";
 import { SpeedGauges } from "../components/SpeedGauges";
+import { OperationFaultBanner } from "../components/OperationFaultBanner";
 
 /** AuthGate is the sole parent. This tab has its own fresh browser socket and
  * never loads a dashboard layout, saved command intent or another tab's lease. */
@@ -13,6 +14,7 @@ export function AdvancedPage() {
       <div><h1>Advanced controls</h1><p>Saved targets and live robot values, side by side.</p></div>
       <a className="btn" href="/">Dashboard</a>
     </header>
+    <OperationFaultBanner />
     <div className="advanced-workspace">
       <TuningPanel />
       <AdvancedSidebar />

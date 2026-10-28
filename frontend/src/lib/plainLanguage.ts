@@ -46,6 +46,7 @@ export const COMMAND_COPY: Record<CommandType, string> = {
   charge_release: "Release charging",
   motor_enable: "Turn motors on",
   motor_disable: "Turn motors off",
+  dock_reset: "Recover operation fault",
   software_reset: "Restart robot software",
   undock: "Undock",
   set_lidar_power: "Change LiDAR power",

@@ -6,6 +6,7 @@ import { DashboardTour } from "./components/DashboardTour";
 import { TourPrompt } from "./components/TourPrompt";
 import { MapSelectionHost } from "./components/MapSelectionHost";
 import { TopBar } from "./components/TopBar";
+import { OperationFaultBanner } from "./components/OperationFaultBanner";
 import { consumeTourUrl, shouldStartTourFromUrl } from "./lib/dashboardTour";
 import { replayIdFromUrl } from "./lib/replayTab";
 import { useLayoutStore, type SavedLayout } from "./stores/layoutStore";
@@ -46,6 +47,7 @@ function Dashboard() {
   return (
     <div className="app-shell">
       <TopBar />
+      <OperationFaultBanner />
       <MapSelectionHost />
       <div className="dashboard-scroll" data-tour="dashboard">
         <DashboardGrid />

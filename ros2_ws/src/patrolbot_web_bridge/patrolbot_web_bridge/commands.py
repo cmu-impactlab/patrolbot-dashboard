@@ -423,6 +423,14 @@ class CommandExecutor:
         self._motor_client = None
         self._motor_disable_client = None
         self._motor_disable_generation = 0
+        self._dock_reset_client = None
+        try:
+            from patrolbot_interfaces.srv import DockReset
+        except ImportError:
+            node.get_logger().warning("DockReset interface unavailable — fault recovery disabled")
+        else:
+            self._DockReset = DockReset
+            self._dock_reset_client = node.create_client(DockReset, "/patrolbot/dock_reset")
         self._undock_active: dict | None = None  # {command_id, goal_handle, started}
         self._last_undock_progress_mono = 0.0
         self._undock_server_misses = 0
@@ -559,6 +567,8 @@ class CommandExecutor:
             capabilities.append("motor_enable")
         if getattr(self, "_motor_disable_client", None) is not None and self._motor_disable_client.service_is_ready():
             capabilities.append("motor_disable")
+        if getattr(self, "_dock_reset_client", None) is not None and self._dock_reset_client.service_is_ready():
+            capabilities.append("dock_reset")
         if getattr(self, "_lidar_client", None) is not None and self._lidar_client.service_is_ready():
             capabilities.append("set_lidar_power")
         return capabilities
@@ -602,6 +612,18 @@ class CommandExecutor:
                 self._motor_disable(command_id)
             else:
                 self._motor_enable(command_id)
+            return
+        if command == "dock_reset":
+            base = base_state or {}
+            if data.get("operator_authorized") is not True:
+                self._ack(command_id, False, "Fault recovery requires operator authorization.")
+                return
+            if (self._active or self._undock_active or self._map_active
+                    or base.get("undock_active") or base.get("operation_outcome_unknown")):
+                self._ack(command_id, False, "Wait for a confirmed terminal operation before recovery.")
+                return
+            self._call_dock_service(command_id, getattr(self, "_dock_reset_client", None),
+                                    getattr(self, "_DockReset", None), "recover the operation fault")
             return
         if getattr(self, "_lidar_pending", None) is not None and command not in {"stop", "motor_enable"}:
             self._ack(command_id, False, "LiDAR power is pending or its outcome is unknown. Wait for its result.")

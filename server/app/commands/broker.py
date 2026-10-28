@@ -48,6 +48,7 @@ COMMAND_LABELS = {
     "charge_release": "Release charging",
     "motor_enable": "Enable motors",
     "motor_disable": "Disable motors",
+    "dock_reset": "Recover operation fault",
     "undock": "Move robot off its charging dock",
     "software_reset": "Restart robot software",
     "set_lidar_power": "Change LiDAR power",
@@ -436,6 +437,21 @@ class CommandBroker:
         if any(entry.command == "undock" and entry.robot_id == session.robot_id
                for entry in self.active.values()):
             facts.undock_active = True
+        if command == "dock_reset":
+            # Recovery must work without AMCL/map pose, just like manual drive.
+            # Only session-bound raw measured motion can establish a stop.
+            motion = state.motion.data
+            age = state.motion.age()
+            facts.pose_age = None
+            facts.stationary = False
+            if motion is not None and age is not None and state.base_state.data is not None:
+                ages = (age, motion.sample_age_s, motion.receipt_age_s)
+                if (all(math.isfinite(value) and value >= 0 for value in ages)
+                        and sum(ages) <= 1.5
+                        and motion.session_generation == state.base_state.data.session_generation):
+                    facts.pose_age = sum(ages)
+                    facts.stationary = (abs(motion.linear_velocity) <= gates.STATIONARY_LINEAR_MS
+                                        and abs(motion.angular_velocity) <= gates.STATIONARY_ANGULAR_RPS)
         return gates.rejection_reason(command, facts)
 
     def _remember(self, command_id: str) -> None:
