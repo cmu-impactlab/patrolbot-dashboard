@@ -1,22 +1,23 @@
-name: Mobile browser acceptance
+name: Manual browser acceptance
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   browser:
-    # Draft implementation work runs the unit CI without starting acceptance
-    # environments. Ready-for-review is an explicit later acceptance gate.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+    # Optional operator-invoked acceptance only. PR/main CI keeps the frontend
+    # unit tests, TypeScript and production build in ci.yml; no browser shards.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Match frontend/package-lock.json. Browsers AND native libraries are baked
+    # into this immutable image: installing them from the runner's apt mirror
+    # consumed the entire job timeout before any test ran (twice on PR #38).
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --ipc=host --init
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,23 +30,22 @@ jobs:
           python-version: "3.12"
       - run: npm ci --no-audit --no-fund
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium webkit
+      - name: Verify preinstalled browser runtime
+        run: node ../scripts/check-browser-runtime.mjs
+        timeout-minutes: 2
         working-directory: frontend
       - run: npm run check:e2e
         working-directory: frontend
-      - run: npm run test:e2e -- --shard=${{ matrix.shard }}/6 --reporter=line
+      - run: npm run test:e2e -- --reporter=line
         working-directory: frontend
-      - if: matrix.shard == 1
-        run: python -m venv server/.venv
-      - if: matrix.shard == 1
-        run: server/.venv/bin/pip install ./server ./mock-robot
-      - if: matrix.shard == 1
-        run: npm run test:mock-browser
+      - run: python -m venv server/.venv
+      - run: server/.venv/bin/pip install ./server ./mock-robot
+      - run: npm run test:mock-browser
         working-directory: frontend
       - uses: actions/upload-artifact@v4
         if: failure() || cancelled()
         with:
-          name: mobile-browser-traces-${{ matrix.shard }}
+          name: manual-browser-traces
           path: |
             frontend/test-results/
             frontend/test-results-mock/

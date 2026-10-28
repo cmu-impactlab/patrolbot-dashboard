@@ -51,3 +51,21 @@ without a clear area and an operator at the physical E-stop.
   removal of the fault banner before a new robot state arrives.
 
 These are software/isolated checks, not live robot acceptance or a deployment.
+
+## Browser CI policy
+
+PR #38's browser shard 1 was cancelled twice after the 20-minute job limit while
+`playwright install --with-deps` was still downloading Ubuntu packages from
+`azure.archive.ubuntu.com`. Neither attempt reached the browser tests.
+
+At the operator's request, browser acceptance is now **manual-only** through
+`workflow_dispatch`, with no automatic PR/main trigger or shard matrix. Automatic
+CI still requires frontend unit tests, TypeScript, production build and bundle
+budget checks, alongside the existing Python/contract checks. Browser test files
+remain available; this is an explicit CI policy change, not a claimed test pass.
+
+The optional manual job uses the digest-pinned Playwright 1.63.0 image matching the
+lockfile, rather than apt-installing browser dependencies on every runner. An
+early no-download check launches and renders with Chromium and WebKit, and fails
+clearly if the image and lockfile drift. Both runtimes and the previously blocked
+123-test shard were verified locally in that image with external networking off.
