@@ -1,5 +1,34 @@
 # Isolated teleop harness investigation (2026-11-20)
 
+## Final parent validation (2026-11-21)
+
+The executable candidate `a21479d` passed **six fixed-count native cases**:
+three serial and three bounded-load cases. Each passed all seven exact receipt
+checks, supervisor exit validation and complete teardown, with zero retries.
+Load was one additional busy CPU worker inside a container pinned to two CPUs
+with a two-CPU quota. The deliberately stale-odometry case still required the
+exact failed outcome/detail and zero/inactive subscriber receipts.
+
+Validation used allowlisted packaged candidate sources, rebuilt current robot
+interfaces and web adapter, and real installed mux/smoother. The cached public
+static assets satisfied packaging only; this was not a frontend/browser build.
+The smoother source-fixture SHA-256 matched current robot main:
+`deef967e197037669d14ab145860ca4024ac0671c969b5538658ed96a5b87736`.
+Containers were network-none/private IPC, non-root/read-only, with only dedicated
+evidence writable. No production freshness/safety guards changed.
+
+Evidence is retained in `/tmp/opencode/native-ci/lab-matrix-a21479d/`:
+each case has the exact command/load settings, checker/native logs, config hash,
+`run.json`, `teardown.json` and matrix verification. The earlier `d62b6b1`
+six-case matrix is retained separately: all receipt checks passed, but every
+case correctly failed premature-context teardown. These failures were fixed,
+not suppressed or retried. Separate local Codex review of `a21479d` found no
+actionable blocker. Complete portable `scripts/tests`: **256 passed**.
+
+This is bounded software-lab evidence, not arbitrary-overload tolerance,
+physical-stop acceptance, deployment authorization or GitHub maintainer approval.
+The sections below preserve the earlier investigation and intermediate results.
+
 ## Packaged candidate follow-up (2026-11-21)
 
 Base HEAD: `1f73539ca567b08bff1ead29bbf08c1b6cff1872`. The parent's actual
