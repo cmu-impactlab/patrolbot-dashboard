@@ -1,5 +1,87 @@
 # Isolated teleop harness investigation (2026-11-20)
 
+## Packaged candidate follow-up (2026-11-21)
+
+Base HEAD: `1f73539ca567b08bff1ead29bbf08c1b6cff1872`. The parent's actual
+`lab-initial-34ccad3-env2/full.log` failed with `PackageNotFoundError` for
+`patrolbot-launch`. The test toolchain copies the launch source fixture but does
+not build its package index. Lab startup now resolves the actual smoother YAML
+in this order: `TELEOP_LAB_SMOOTHER_CONFIG` when explicitly supplied, otherwise
+the indexed `patrolbot-launch/param/defaults/smoother.yaml`, otherwise (only if
+the package is absent) the documented source fixture
+`/opt/patrolbot/ros2_ws/src/patrolbot-launch/param/defaults/smoother.yaml`.
+A missing selected file fails startup; no smoother YAML is synthesized and no
+library defaults substitute for it. `smoother-config.json` and stdout record
+the selected source, absolute path and SHA-256. The native mux/smoother still run.
+
+Task disposal follows the inspected, completed core helper in commit
+`70b2345c0b3983d48f89056279352e433a23699e`. After dispatcher/pool drain, inactive
+tasks are canceled with their task lock held, and real coroutine handlers are
+closed while guards remain valid. The cached Jazzy Task.cancel already closes
+pending handlers; explicit closure also supports the older state-only variant
+and already-canceled handlers. Completed exceptions remain teardown failures.
+Tasks created by cancellation are disposed too. Unknown internals, active
+handlers and blocked finalizers fail cleanup and retain ROS handles.
+
+Never-awaited coroutine RuntimeWarnings are promoted to errors. Thread and
+unraisable hooks record failures in teardown and delegate to the existing hooks.
+The supervisor also rejects never-awaited, background-thread, unraisable and
+unretrieved-exception diagnostics in retained logs, including interpreter exit
+output or warnings emitted under a local filter override. No warning is hidden.
+
+The existing six acceptance checks retain their command correlation/outcome
+rules. A seventh starts healthy, keeps velocity production alive, then stops
+synthetic odometry via `odom_stale`. It requires the bridge's actual stale-odom
+safety reason and age with continuing base/tick receipts, actual zero and
+inactive web-input receipts, and the exact robot/start's `failed` terminal with
+`data.detail == "Raw odometry is missing or stale."`. The protocol's
+`CommandResultData.detail` holds this reason; `TeleopSession.tick()` and `.frame()`
+emit it through `end(reason, 'failed')`, and the server broker forwards the
+payload unchanged. A separate explicit expected-fault helper requires this pair;
+`finish()` and `terminal_id()` retain their existing policies. Wrong identities
+cannot satisfy the fault check; canceled/succeeded terminals and wrong/missing
+details fail. Healthy sessions still reject failed terminals, including this one.
+A fresh start must be refused with the server gate's exact `command.ack` reason,
+`Manual drive requires fresh base, raw odometry and LiDAR readings.`, before
+healthy publishing is restored. Fault observation is a separate `fault_observed`
+field; it never labels stale sensors ready.
+
+The earlier canceled-terminal requirement was an incorrect parent assumption,
+now corrected, not a production-runtime blocker or runtime fix. Production
+deliberately reports `failed` for stale odometry; only producer timeout maps to
+`canceled`. A different raced outcome still fails this specific fault acceptance.
+
+Portable checks cover the resolver's installed/source/override/missing paths,
+real coroutine finalization and cancellation, follow-up tasks, active/unknown
+task refusal, completed exceptions, background error reporting, log rejection,
+and the acceptance workflow with mocked I/O. No new helper or packaging path is
+needed. The packager continues to reject missing `frontend/dist`; the parent
+will supply cached static assets for harness-only validation, which does not
+validate a frontend build. Parent-owned native serial/load runs remain required.
+
+Focused command (no ROS/network/install):
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=scripts:server /tmp/opencode/ci-audit/bridge-minimal-venv/bin/python -W 'error:coroutine .* was never awaited:RuntimeWarning' -m pytest -q -p no:cacheprovider -W error::pytest.PytestUnraisableExceptionWarning -W error::pytest.PytestUnhandledThreadExceptionWarning scripts/tests/test_teleop_lab.py scripts/tests/test_check_teleop_receipt.py`
+
+Corrected acceptance result: **203 passed**, zero warnings/skips/deselections.
+Python compilation, runner shell syntax and `git diff --check` pass. Focused
+fault tests reject wrong robot/command/type, canceled/succeeded/timeout outcomes,
+missing/wrong detail (including a reason in the wrong field or a zero-publication
+failure suffix), absent zero/inactive receipts, incorrect/missing refusal reason,
+accepted restart and unobserved fault. Deadline noise cannot extend the wait.
+The workflow exercises the real expected-fault helper; healthy `finish()` still
+rejects the exact stale failure. Prior follow-up result was **183 passed**.
+An earlier offline self-check loaded the supplied cached `jazzy-task.py` directly
+and finalized both pending and canceled coroutine Tasks with this adapter.
+A separate direct `TeleopSession` check confirmed the deliberate stale-safety
+terminal is `failed`; the test expectation now follows that runtime contract.
+This was not a native run. The parent reports its core `70b2345` native validation
+passed all 1163 tests with zero warnings, skips, deselections or surviving groups,
+and a clean localCodex final review. That evidence does not validate this
+dashboard resolver/task-cleanup follow-up or the corrected seventh acceptance;
+the parent will run their actual native validation.
+The referenced `RTK.md` remains absent from the checkout and its ancestors.
+Git worktree metadata is read-only; the parent must commit these local changes.
+
 ## Cached Jazzy teardown follow-up (2026-11-21)
 
 The supplied `executor-shutdown-baseline.json` reports `shutdown_result=true`
@@ -82,7 +164,8 @@ prevent a later scheduling gap.
   server and bridge safety checks. No receipt timestamps are rewritten.
 - The missing-hardware refusal waits for the fault to reach both bridge and
   server instead of sleeping a guessed interval. Exact command IDs and terminal
-  outcomes remain unchanged. Failed terminals still fail immediately.
+  outcomes remain unchanged. Failed terminals in the six existing checks still
+  fail immediately; only the deliberate seventh fault expects its exact failure.
 - Receiver, bridge, probe, HTTP, WebSocket and native child ownership includes
   partial startup. Transport intent and callbacks quiesce before session closure
   and node destruction. Cleanup shares a 20 s budget; surviving workers, early

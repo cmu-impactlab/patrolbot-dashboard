@@ -42,6 +42,19 @@ def terminal_id(frame, robot, expected):
     return command_id
 
 
+async def expected_stale_odom_fault(socket, robot, command_id, timeout=6):
+    """Only the deliberately injected odometry fault may expect a failed result."""
+    deadline = time.monotonic() + timeout
+    while True:
+        budget = deadline - time.monotonic()
+        assert budget > 0, "Missing exact stale-odometry terminal"
+        frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=budget))
+        assert time.monotonic() < deadline, "Late stale-odometry terminal"
+        if terminal_id(frame, robot, {command_id: {"failed"}}) is not None:
+            assert frame["data"].get("detail") == "Raw odometry is missing or stale.", frame
+            return
+
+
 async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
     deadline = time.monotonic() + timeout
 
@@ -245,6 +258,47 @@ async def main():
             await reply(command_id, accepted=False)
             results.append("missing_hardware_refuses_without_localization_bypass")
             await client.post("/lab/fault", json={"fault": "healthy"})
+
+            command_id = await start()
+            begin = await stream(command_id, .1, 0., duration=.15)
+            await wait_receipt('/input/teleop', lambda item: item['linear'] == .1, begin)
+            # Keep the producer alive so only the deliberate sensor fault ends input.
+            producer = asyncio.create_task(stream(command_id, .1, 0., duration=20))
+            try:
+                begin = time.monotonic()
+                response = await client.post('/lab/fault', json={'fault': 'odom_stale'})
+                response.raise_for_status()
+                assert response.json()['accepted'] is True
+                deadline = time.monotonic() + 3
+                observed = None
+                while time.monotonic() < deadline:
+                    observed = (await client.get(
+                        f'/lab/ready?after={begin}&fault=odom_stale')).json()
+                    if observed.get('fault_observed'):
+                        break
+                    await asyncio.sleep(.02)
+                else:
+                    raise AssertionError(f'Bridge did not observe deliberately stale odometry: {observed}')
+                print(json.dumps({'stale_odom_observation': observed}), flush=True)
+                await wait_receipt('/input/teleop',
+                    lambda item: item['linear'] == 0. and item['angular'] == 0., begin)
+                await wait_receipt('/patrolbot/web_teleop_active', lambda item: item['active'] is False, begin)
+                await expected_stale_odom_fault(socket, robot, command_id)
+            finally:
+                producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+            refused_id = str(uuid4())
+            await socket.send(encode('command.request', robot, 1,
+                {'command_id': refused_id, 'command': 'teleop_start'}))
+            refusal = await reply(refused_id, accepted=False)
+            assert refusal['data'].get('reason') == 'Manual drive requires fresh base, raw odometry and LiDAR readings.', refusal
+            results.append('stale_odometry_failed_zero_inactive_and_refuses_fresh_start')
+            await client.post('/lab/fault', json={'fault': 'healthy'})
+            await wait_ready()
+
         data = (await client.get("/lab/status")).json()
         print(json.dumps({"passed": True, "checks": results,
                           "physical_acceptance": False, "simulated_hardware": True,

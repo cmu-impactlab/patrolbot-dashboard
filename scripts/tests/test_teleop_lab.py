@@ -1,5 +1,8 @@
 """Portable harness checks: no ROS imports, network, Docker or hardware."""
 import io
+import gc
+import hashlib
+import inspect
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
@@ -22,6 +25,170 @@ import teleop_lab as lab
 def executor_fixture(**kwargs):
     return NS(_tasks_lock=threading.Lock(), _pending_tasks={}, _ready_tasks=deque(),
               wake=Mock(), shutdown=Mock(return_value=True), **kwargs)
+
+
+@pytest.mark.parametrize('origin', ['installed', 'source-fixture', 'explicit'])
+def test_smoother_config_records_actual_file(tmp_path, origin):
+    class Missing(LookupError):
+        pass
+    installed = tmp_path / 'share'
+    source, override = tmp_path / 'source.yaml', tmp_path / 'override.yaml'
+    path = {'installed': installed / 'param/defaults/smoother.yaml',
+            'source-fixture': source, 'explicit': override}[origin]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('actual fixture bytes\n')
+    get_share = Mock(return_value=str(installed))
+    if origin != 'installed':
+        get_share.side_effect = Missing('no launch index')
+    resolved, evidence = lab.resolve_smoother_config(
+        get_share, Missing, str(override) if origin == 'explicit' else None, source)
+    assert resolved == path
+    assert evidence == dict(source=origin, path=str(path.resolve()),
+                            sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    if origin == 'explicit':
+        get_share.assert_not_called()
+
+
+@pytest.mark.parametrize('origin', ['installed', 'source-fixture', 'explicit'])
+def test_missing_smoother_fails_without_substituting_defaults(tmp_path, origin):
+    class Missing(LookupError):
+        pass
+    source = tmp_path / 'source.yaml'
+    # An indexed package with missing config and an invalid override must fail,
+    # even when a source fixture exists.
+    if origin != 'source-fixture':
+        source.write_text('fixture\n')
+    get_share = Mock(return_value=str(tmp_path / 'share'))
+    if origin == 'source-fixture':
+        get_share.side_effect = Missing()
+    with pytest.raises(AssertionError, match='configuration missing'):
+        lab.resolve_smoother_config(get_share, Missing,
+            str(tmp_path / 'missing.yaml') if origin == 'explicit' else None, source)
+
+
+def inactive_task(coroutine, closes=True):
+    task = NS(_handler=coroutine, _task_lock=threading.Lock(), _executing=False,
+              done=Mock(return_value=False), cancelled=Mock(return_value=False))
+    task.cancel = Mock(side_effect=coroutine.close if closes else None)
+    return task
+
+
+@pytest.mark.parametrize('closes', [False, True])
+@pytest.mark.parametrize('state', ['created', 'suspended', 'canceled'])
+def test_disposal_closes_real_coroutine_before_guards(closes, state):
+    events = []
+    class Pause:
+        def __await__(self):
+            yield
+    async def handler():
+        try:
+            await Pause()
+        finally:
+            events.append('finalized')
+    coroutine = handler()
+    if state == 'suspended':
+        coroutine.send(None)
+    task = inactive_task(coroutine, closes)
+    task.cancelled.return_value = state == 'canceled'
+    if closes:
+        task.cancel.side_effect = lambda: None if task.cancelled() else coroutine.close()
+    # SimpleNamespace is not hashable, unlike an rclpy task.
+    wrapper = Mock(wraps=task)
+    wrapper._handler, wrapper._task_lock, wrapper._executing = coroutine, task._task_lock, False
+    executor = executor_fixture()
+    executor._ready_tasks.append(wrapper)
+    executor.shutdown.side_effect = lambda **_: events.append('shutdown') or True
+    resources = lab.LabResources()
+    resources.executors.append(('bridge', executor, None))
+    try:
+        assert resources.close()
+        task.cancel.assert_called_once()
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+        assert events == (['finalized', 'shutdown'] if state == 'suspended' else ['shutdown'])
+    finally:
+        coroutine.close()
+
+
+@pytest.mark.parametrize('active', ['lock', 'executing', 'unknown'])
+def test_disposal_never_closes_active_or_unknown_handler(active):
+    async def handler():
+        pass
+    coroutine = handler()
+    task = inactive_task(coroutine)
+    if active == 'lock':
+        task._task_lock.acquire()
+    elif active == 'executing':
+        task._executing = True
+    else:
+        del task._executing
+    try:
+        with pytest.raises(RuntimeError, match='still active|unsupported'):
+            lab.dispose_task(task)
+        task.cancel.assert_not_called()
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CREATED
+    finally:
+        if active == 'lock':
+            task._task_lock.release()
+        coroutine.close()
+
+
+def test_disposal_discovers_followups_and_keeps_completed_errors_on_failure(tmp_path):
+    executor = executor_fixture()
+    first, followup, broken = Mock(), Mock(), Mock()
+    for task in (first, followup, broken):
+        task._handler, task._task_lock, task._executing = None, threading.Lock(), False
+        task.done.return_value = False
+    first.cancel.side_effect = lambda: executor._ready_tasks.append(followup)
+    broken.cancel.side_effect = ValueError('cancel failed')
+    completed = Future()
+    completed.set_exception(ValueError('completed failure'))
+    executor._ready_tasks.extend((first, broken, completed))
+    resources = lab.LabResources()
+    resources.directory = tmp_path
+    resources.executors.append(('bridge', executor, None))
+    destroy = Mock()
+    resources.nodes.append(('bridge', NS(destroy_node=destroy)))
+    assert not resources.close()
+    first.cancel.assert_called_once()
+    followup.cancel.assert_called_once()
+    executor.shutdown.assert_not_called()
+    destroy.assert_not_called()
+    errors = json.loads((tmp_path / 'teardown.json').read_text())['teardown']['errors']
+    assert 'cancel failed' in str(errors) and 'completed failure' in str(errors)
+
+
+def test_blocked_coroutine_finalizer_retains_handles():
+    release = threading.Event()
+    class Pause:
+        def __await__(self):
+            yield
+    async def handler():
+        try:
+            await Pause()
+        finally:
+            release.wait(2)
+    coroutine = handler()
+    coroutine.send(None)
+    task = Mock()
+    task._handler, task._task_lock, task._executing = coroutine, threading.Lock(), False
+    task.done.return_value = False
+    task.cancel.side_effect = coroutine.close
+    executor = executor_fixture()
+    executor._ready_tasks.append(task)
+    resources = lab.LabResources()
+    resources.executors.append(('bridge', executor, None))
+    destroy = Mock()
+    resources.nodes.append(('bridge', NS(destroy_node=destroy)))
+    try:
+        assert not resources.close(timeout=.04)
+        executor.shutdown.assert_not_called()
+        destroy.assert_not_called()
+    finally:
+        release.set()
+        for worker in threading.enumerate():
+            if worker.name == 'cleanup-bridge-tasks-disposed':
+                worker.join(1)
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
 
 
 def setup_readiness(monkeypatch):
@@ -93,6 +260,64 @@ def test_fault_readiness_requires_both_runtime_and_server_observation(monkeypatc
     assert not lab.readiness_snapshot(*args)["ready"]
     args[2]["link_connected"] = False
     assert lab.readiness_snapshot(*args)["ready"]
+
+
+@pytest.mark.parametrize('failure', [None, 'healthy', 'reason', 'fresh', 'missing', 'base', 'tick'])
+def test_stale_fault_requires_bridge_receipt_reason_and_continuing_events(monkeypatch, failure):
+    args = setup_readiness(monkeypatch)
+    args[3]['fault'] = args[7] = 'odom_stale'
+    teleop = args[0]._teleop
+    teleop.state.return_value = ({'link_connected': True}, 9.9, object(), 9.2)
+    teleop.safety.return_value = 'Raw odometry is missing or stale.'
+    if failure == 'healthy':
+        args[3]['fault'] = 'healthy'
+    elif failure == 'reason':
+        teleop.safety.return_value = 'Robot hardware data is invalid or stale.'
+    elif failure in {'fresh', 'missing', 'base'}:
+        values = list(teleop.state.return_value)
+        values[1 if failure == 'base' else 3] = {'fresh': 9.9, 'missing': None, 'base': 8.}[failure]
+        teleop.state.return_value = values
+    elif failure == 'tick':
+        args[5]['tick_at'] = 8.
+    result = lab.readiness_snapshot(*args)
+    assert result['fault_observed'] is (failure is None)
+    assert result['ready'] is False
+
+
+@pytest.mark.parametrize('kind', ['coroutine', 'thread', 'unraisable'])
+def test_main_reports_background_errors_without_suppressing_hooks(monkeypatch, tmp_path, kind):
+    thread_hook, unraisable_hook = Mock(), Mock()
+    monkeypatch.setattr(lab.threading, 'excepthook', thread_hook)
+    monkeypatch.setattr(lab.sys, 'unraisablehook', unraisable_hook)
+    monkeypatch.setattr(lab.signal, 'signal', Mock())
+    def run(resources):
+        resources.directory = tmp_path
+        if kind == 'thread':
+            def fail():
+                raise ValueError('background failure')
+            worker = threading.Thread(target=fail)
+            worker.start()
+            worker.join()
+        elif kind == 'unraisable':
+            class Broken:
+                def __del__(self):
+                    raise ValueError('unraisable failure')
+            del_object = Broken()
+            del del_object
+        else:
+            async def handler():
+                pass
+            coroutine = handler()
+            del coroutine
+        gc.collect()
+    monkeypatch.setattr(lab, 'run_lab', run)
+    with pytest.raises(RuntimeError, match='teardown failed'):
+        lab.main()
+    errors = json.loads((tmp_path / 'teardown.json').read_text())['teardown']['errors']
+    assert any(error['step'] == ('background-thread' if kind == 'thread' else 'unraisable')
+               for error in errors)
+    (thread_hook if kind == 'thread' else unraisable_hook).assert_called_once()
+    assert lab.threading.excepthook is thread_hook and lab.sys.unraisablehook is unraisable_hook
 
 
 def test_cleanup_quiesces_all_executors_before_session_and_handles(capsys, tmp_path):
@@ -205,7 +430,8 @@ def test_shell_runner_propagates_supervisor_exit(tmp_path):
 @pytest.mark.parametrize("case,expected", [("success", 0), ("checker", 7), ("lab", 3),
     ("startup", 1), ("spawn", 1), ("forced", 1), ("teardown", 1), ("missing-teardown", 1),
     ("run-timeout", 1), ("checker-cleanup-error", 1), ("orphan-checker", 1),
-    ("orphan-lab", 1), ("orphan-native", 1)])
+    ("orphan-lab", 1), ("orphan-native", 1), ("never-awaited", 1),
+    ("unraisable", 1), ("background-thread", 1)])
 def test_supervisor_preserves_status_and_full_logs(monkeypatch, tmp_path, capsys, case, expected):
     monkeypatch.setattr(lab, "require_isolation", Mock())
     monkeypatch.setattr(lab.tempfile, "mkdtemp", lambda **_: str(tmp_path))
@@ -237,6 +463,11 @@ def test_supervisor_preserves_status_and_full_logs(monkeypatch, tmp_path, capsys
             raise OSError("startup spawn failure")
         is_lab = Path(argv[-1]).name == "teleop_lab.py"
         kwargs["stdout"].write("first line\n" + "middle\n" * 100 + "last line\n")
+        warning = {'never-awaited': "RuntimeWarning: coroutine 'handler' was never awaited",
+                   'unraisable': 'Exception ignored in: <coroutine object handler>',
+                   'background-thread': 'Exception in thread worker:'}.get(case)
+        if warning:
+            kwargs['stdout'].write(warning + '\n')
         proc = NS(pid=123 if is_lab else 124, returncode=7 if case == "checker" and not is_lab else 0)
         proc.poll = lambda: ((0 if case == "startup" else None) if is_lab else
                             (None if case in {"run-timeout", "checker-cleanup-error"} else

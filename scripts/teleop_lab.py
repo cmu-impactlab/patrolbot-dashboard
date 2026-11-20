@@ -8,6 +8,9 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+import gc
+import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -18,10 +21,58 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 
 
 ROBOT_ID = "isolated-web-teleop"
 PORT = 8027
+
+
+def resolve_smoother_config(get_share, package_missing, override=None,
+        source=Path('/opt/patrolbot/ros2_ws/src/patrolbot-launch/param/defaults/smoother.yaml')):
+    """LAB ONLY: use the actual installed config or the packaged source fixture."""
+    if override is not None:
+        path, origin = Path(override), 'explicit'
+    else:
+        try:
+            path = Path(get_share('patrolbot-launch')) / 'param/defaults/smoother.yaml'
+            origin = 'installed'
+        except package_missing:
+            path, origin = Path(source), 'source-fixture'
+    assert path.is_file(), f'Native lab smoother configuration missing ({origin}): {path}'
+    return path, {'source': origin, 'path': str(path.resolve()),
+                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def dispose_task(task):
+    """LAB ONLY: match the core NativeFixture adapter after all workers drain."""
+    # concurrent.futures represent submitted pool calls, not ROS handlers.
+    from concurrent.futures import Future
+    if isinstance(task, Future):
+        if task.done() and not task.cancelled():
+            return task.exception()
+        if not task.cancelled():
+            raise RuntimeError('lab pool future still pending after worker drain')
+        return
+    handler = getattr(task, '_handler', None)
+    lock = getattr(task, '_task_lock', None)
+    if (not hasattr(task, '_handler') or not isinstance(lock, type(threading.Lock()))
+            or not isinstance(getattr(task, '_executing', None), bool)
+            or not (handler is None or callable(handler) or inspect.iscoroutine(handler))):
+        raise RuntimeError('unsupported lab executor task internals; update LAB ONLY adapter')
+    if not lock.acquire(blocking=False):
+        raise RuntimeError('lab executor task still active after worker drain')
+    try:
+        if task._executing or (inspect.iscoroutine(handler) and handler.cr_running):
+            raise RuntimeError('lab executor task still active after worker drain')
+        if task.done():
+            return task.exception()
+        task.cancel()
+        # Older rclpy versions only change state; cached Jazzy also closes here.
+        if inspect.iscoroutine(handler):
+            handler.close()
+    finally:
+        lock.release()
 
 
 def executor_tasks(executor):
@@ -74,6 +125,11 @@ def readiness_snapshot(bridge, node, server, state, lifecycle, metrics, after, f
                 and state["fault"] == fault and graph_ready
                 and lifecycle["state"] == 3 and teleop._path_identity() is not None
                 and all(at is not None and after < at <= now for at in observed.values())),
+            "fault_observed": bool(fault == 'odom_stale' and state['fault'] == fault
+                and reason == 'Raw odometry is missing or stale.'
+                and odom_at is not None and now - odom_at > .5
+                and all(at is not None and after < at <= now
+                        for at in (base_at, metrics['tick_at']))),
             "physical_acceptance": False, "observed_mono": now,
             "has_amcl_pose": bridge._latest_amcl is not None,
             "detail": {"runtime_safety_reason": reason, "subscribers": subscribers,
@@ -102,6 +158,7 @@ class LabResources:
         self.dispatch_stopped = threading.Event()
         self.spin_errors = []
         self.directory = None
+        self.background_errors = []
 
     def start_executor(self, index):
         name, executor, _ = self.executors[index]
@@ -172,15 +229,30 @@ class LabResources:
                 ok = attempt(name + "-pool-drain", lambda e=executor:
                              e._executor.shutdown(wait=True, cancel_futures=True))
             if ok:
-                ok = attempt(name + "-tasks-drained", lambda e=executor: tasks.extend(executor_tasks(e)))
-                for task in dict.fromkeys(tasks):
-                    if task.done() and not task.cancelled():
-                        def check_task(t=task):
-                            error = t.exception()
+                def dispose(e=executor, tasks=tasks, task_name=name):
+                    seen = set()
+                    failed = False
+                    while True:
+                        tasks.extend(executor_tasks(e))
+                        pending = dict.fromkeys(t for t in tasks if t not in seen)
+                        if not pending:
+                            if failed:
+                                raise RuntimeError('lab task disposal failed; handles retained')
+                            return
+                        for task in pending:
+                            seen.add(task)
+                            try:
+                                error = dispose_task(task)
+                            except BaseException as error:
+                                errors.append({'step': task_name + '-task-dispose', 'error': repr(error)})
+                                failed = True
+                                continue
                             if error is not None:
-                                raise error
-                        attempt(name + "-task-exception", check_task)
+                                errors.append({'step': task_name + '-task-exception', 'error': repr(error)})
+                ok = attempt(name + "-tasks-disposed", dispose)
             quiesced = ok and quiesced
+        if quiesced:
+            quiesced = attempt('task-gc', gc.collect)
         if quiesced:
             for name, executor, _ in joined:
                 quiesced = attempt(name + "-shutdown", lambda e=executor:
@@ -256,6 +328,7 @@ class LabResources:
         for worker in set(threading.enumerate()) - self.initial_workers:
             if worker.is_alive():
                 errors.append({"step": "worker", "error": "thread survived", "name": worker.name})
+        errors.extend(self.background_errors)
         report = {"teardown": {"passed": not errors, "steps": steps, "errors": errors,
                                 "elapsed_s": timeout - remaining()}}
         if self.directory is not None:
@@ -483,9 +556,11 @@ def run_lab(resources):
     import yaml
     mux_config = directory / "mux.yaml"
     mux_config.write_text(yaml.safe_dump(config))
-    from ament_index_python.packages import get_package_share_directory
-    smoother_config = Path(get_package_share_directory("patrolbot-launch")) / "param/defaults/smoother.yaml"
-    assert smoother_config.is_file(), f"Installed native smoother configuration missing: {smoother_config}"
+    from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
+    smoother_config, config_evidence = resolve_smoother_config(
+        get_package_share_directory, PackageNotFoundError, os.environ.get('TELEOP_LAB_SMOOTHER_CONFIG'))
+    (directory / 'smoother-config.json').write_text(json.dumps(config_evidence) + '\n')
+    print(json.dumps({'smoother_config': config_evidence}), flush=True)
     commands = [
         ["ros2", "run", "twist_mux", "twist_mux", "--ros-args", "-r", "__node:=cmd_vel_mux",
          "--params-file", str(mux_config)],
@@ -610,13 +685,26 @@ def run_lab(resources):
 
 def main():
     resources = LabResources()
+    previous_thread, previous_unraisable = threading.excepthook, sys.unraisablehook
+    def thread_error(args):
+        resources.background_errors.append({'step': 'background-thread', 'error': repr(args.exc_value)})
+        previous_thread(args)
+    def unraisable(args):
+        resources.background_errors.append({'step': 'unraisable', 'error': repr(args.exc_value)})
+        previous_unraisable(args)
+    threading.excepthook, sys.unraisablehook = thread_error, unraisable
     signal.signal(signal.SIGTERM, lambda *_: resources.stopped.set())
     signal.signal(signal.SIGINT, lambda *_: resources.stopped.set())
     try:
-        run_lab(resources)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message='coroutine .* was never awaited', category=RuntimeWarning)
+            try:
+                run_lab(resources)
+            finally:
+                if not resources.close():
+                    raise RuntimeError("Isolated lab teardown failed; see teardown evidence")
     finally:
-        if not resources.close():
-            raise RuntimeError("Isolated lab teardown failed; see teardown evidence")
+        threading.excepthook, sys.unraisablehook = previous_thread, previous_unraisable
 
 
 def supervise():
@@ -744,7 +832,15 @@ def supervise():
             path = directory / name
             print(f"--- full {name}: {path} ---", flush=True)
             if path.exists():
-                print(path.read_text(errors="replace"), flush=True)
+                output = path.read_text(errors="replace")
+                print(output, flush=True)
+                issues = [line for line in output.splitlines() if
+                    ('was never awaited' in line and ('RuntimeWarning' in line or 'coroutine' in line))
+                    or 'Exception ignored in' in line or 'Exception in thread' in line
+                    or 'exception was never retrieved' in line]
+                if issues:
+                    status = status or 1
+                    print(json.dumps({'unexpected_background_errors': issues, 'log': name}), flush=True)
         summary = {"lab_run": {"passed": status == 0, "returncode": status,
                                "teardown": teardown, "evidence_dir": str(directory), "port": port,
                                "physical_acceptance": False}}
