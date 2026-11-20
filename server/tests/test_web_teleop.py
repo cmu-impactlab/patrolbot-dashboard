@@ -106,6 +106,8 @@ async def lab():
 
 async def started(lab):
     start_id = await request(lab)
+    assert lab.robot.frames, [f["data"].get("reason") for f in browser_frames(lab.client)
+                              if f["type"] == "command.ack"]
     assert lab.robot.frames[-1]["data"]["command_id"] == start_id
     assert lab.robot.frames[-1]["data"]["operator_authorized"] is True
     await reply(lab, start_id)
@@ -450,11 +452,16 @@ async def test_reset_explicitly_retires_unknown_without_resuming(lab):
     assert len(lab.robot.frames) == before  # reset itself remains a barrier
 
 
-async def test_persistent_start_dedupe_and_audit_not_per_velocity(lab, tmp_path):
+@pytest.mark.parametrize("setup_age", [0, 1], ids=["fresh-setup", "aged-setup"])
+async def test_persistent_start_dedupe_and_audit_not_per_velocity(lab, tmp_path, setup_age):
+    # Model setup outlasting the hardware receipt window without sleeping.
+    lab.session.state.base_state.received_mono -= setup_age
     db = Database(str(tmp_path / "isolated.db"))
     await db.init()
     lab.hub.db = db
     try:
+        # Database setup is not part of the fresh hardware precondition.
+        lab.session.state.record_base_state(fake_base())
         start_id = await started(lab)
         assert await velocity(lab, start_id)
         # End by actual robot terminal; only the start is in the audit.
@@ -484,6 +491,7 @@ async def test_stop_during_start_audit_cancels_before_publication(lab, tmp_path,
         await original(robot_id, command_id, command, *args, **kwargs)
 
     monkeypatch.setattr(db, "add_command_audit", delayed_audit)
+    lab.session.state.record_base_state(fake_base())
     pending = asyncio.create_task(request(lab))
     try:
         await entered.wait()
@@ -521,15 +529,22 @@ async def test_hardware_rechecked_after_audit_await(lab, tmp_path, monkeypatch):
     await db.init()
     lab.hub.db = db
     original = db.add_command_audit
+    audit_entered = False
 
     async def expire_during_audit(*args, **kwargs):
+        nonlocal audit_entered
         await original(*args, **kwargs)
+        audit_entered = True
         lab.session.state.base_state.received_mono -= 1
 
     monkeypatch.setattr(db, "add_command_audit", expire_during_audit)
     try:
+        lab.session.state.record_base_state(fake_base())
         await request(lab)
+        assert audit_entered
         assert not lab.robot.frames
+        acks = [f for f in browser_frames(lab.client) if f["type"] == "command.ack"]
+        assert acks[-1]["data"]["reason"] == "Manual input canceled before publication."
         assert ROBOT not in lab.hub.commands.teleop.owners
     finally:
         lab.hub.db = None
