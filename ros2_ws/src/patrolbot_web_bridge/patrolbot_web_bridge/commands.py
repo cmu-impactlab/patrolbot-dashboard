@@ -1177,13 +1177,16 @@ class CommandExecutor:
         active["goal_handle"] = goal_handle
         self._undock_server_misses = 0
         self._ack(command_id, True)
+        deferred_cancel = active.get("cancel_requested", False)
         try:
             result_future = goal_handle.get_result_async()
             result_future.add_done_callback(lambda f: self._on_undock_result(command_id, f))
         except Exception as exc:
             self._fail_undock(f"Undock result is unknown: {exc}.")
-            return
-        if active.get("cancel_requested", False):
+            # _fail_undock sends a new cancel, but skips an earlier deferred one.
+            if not deferred_cancel:
+                return
+        if deferred_cancel and self._undock_active is active:
             try:
                 cancel_future = goal_handle.cancel_goal_async()
             except Exception as exc:
@@ -1193,7 +1196,13 @@ class CommandExecutor:
             stops = active.get("stop_command_ids", [])
             if stops:
                 stop_id = stops[0]
-                cancel_future.add_done_callback(lambda f: self._on_cancel_response(stop_id, f))
+                try:
+                    cancel_future.add_done_callback(lambda f: self._on_cancel_response(stop_id, f))
+                except Exception as exc:
+                    # The request was issued, but its cancellation response is
+                    # unknown. Keep the owner and the actual result subscription
+                    # instead of letting callback setup tear down the executor.
+                    self._fail_undock(f"Undock cancellation response is unknown: {exc}.")
 
     def _on_undock_feedback(self, command_id: str, feedback_msg) -> None:
         active = self._undock_active

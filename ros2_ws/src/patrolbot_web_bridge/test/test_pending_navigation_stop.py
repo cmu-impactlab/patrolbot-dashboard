@@ -412,14 +412,20 @@ def test_fault_recovery_cannot_override_pending_navigation_owner(executor, unkno
     assert e._nav_pending is owner
 
 
-@pytest.mark.parametrize("failure", ["send", "accept_callback", "result", "result_callback"])
-def test_undock_transport_exceptions_retain_uncertain_owner(executor, failure):
+@pytest.fixture
+def undock_executor(executor):
     e = executor
     e._node = Mock()
     e._Undock = NS(Goal=NS)
     e._undock_config = {}
     e._undock_client = Mock(server_is_ready=lambda: True,
                             send_goal_async=Mock(return_value=e.acceptance))
+    return e
+
+
+@pytest.mark.parametrize("failure", ["send", "accept_callback", "result", "result_callback"])
+def test_undock_transport_exceptions_retain_uncertain_owner(undock_executor, failure):
+    e = undock_executor
     handle = Handle()
     if failure == "send":
         e._undock_client.send_goal_async.side_effect = RuntimeError("send lost")
@@ -440,3 +446,64 @@ def test_undock_transport_exceptions_retain_uncertain_owner(executor, failure):
     e._undock("replacement", True)
     assert e._undock_active is owner
     assert not frames(e, "command.ack", "replacement")[-1]["accepted"]
+
+
+@pytest.mark.parametrize("source", ["stop", "cancel", "motor_disable"])
+@pytest.mark.parametrize("failure", [None, "result", "result_callback"])
+def test_deferred_undock_cancel_survives_result_subscription_failure(
+        undock_executor, source, failure):
+    e = undock_executor
+    e._undock("undock", True)
+    owner = e._undock_active
+    if source == "stop":
+        e._stop("stop")
+    elif source == "cancel":
+        cancel(e, "undock")
+    else:
+        e._call_dock_service = Mock()
+        e._motor_disable("off")
+    handle = Handle()
+    if failure == "result":
+        handle.get_result_async = Mock(side_effect=RuntimeError("result lost"))
+    elif failure == "result_callback":
+        handle.result_future.add_done_callback = Mock(side_effect=RuntimeError("callback lost"))
+    e.acceptance.resolve(handle)
+    assert handle.cancel_calls == 1
+    assert owner["goal_handle"] is handle and e._undock_active is owner
+    assert bool(owner.get("uncertain")) is (failure is not None)
+    assert owner.get("stop_command_ids", []) == (["stop"] if source == "stop" else [])
+    handle.cancel_future.resolve(NS(goals_canceling=[object()], return_code=0))
+    assert not results(e, "undock") and not results(e, "stop")
+    assert e._undock_active is owner
+    e._undock("replacement", True)
+    assert e._undock_active is owner
+    assert not frames(e, "command.ack", "replacement")[-1]["accepted"]
+    if failure is None:
+        handle.result_future.resolve(NS(status=5, result=NS(success=False, code=9, message="")))
+        assert e._undock_active is None
+        assert results(e, "undock")[0]["outcome"] == "canceled"
+        assert [r["outcome"] for r in results(e, "stop")] == (["succeeded"] if source == "stop" else [])
+
+
+@pytest.mark.parametrize("failure", ["send", "callback"])
+def test_deferred_undock_cancel_failure_still_subscribes_to_result(undock_executor, failure):
+    e = undock_executor
+    e._undock("undock", True)
+    e._stop("stop")
+    handle = Handle()
+    if failure == "send":
+        handle.cancel_error = RuntimeError("cancel send lost")
+    else:
+        handle.cancel_future.add_done_callback = Mock(side_effect=RuntimeError("cancel callback lost"))
+    e.acceptance.resolve(handle)
+    assert handle.cancel_calls == 1
+    assert len(handle.result_future.callbacks) == 1
+    assert e._undock_active is not None and not results(e, "undock")
+    if failure == "callback":
+        assert e._undock_active["uncertain"]
+        assert e._undock_active["stop_command_ids"] == ["stop"]
+    handle.result_future.resolve(NS(status=5, result=NS(success=False, code=9, message="")))
+    assert e._undock_active is None
+    assert results(e, "undock")[0]["outcome"] == "canceled"
+    if failure == "callback":
+        assert results(e, "stop")[0]["outcome"] == "succeeded"
