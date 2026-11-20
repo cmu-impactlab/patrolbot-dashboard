@@ -54,7 +54,8 @@ export function manualDriveReason(): string | null {
   if (operationalLimits() === null) return "A fresh verified active speed policy is required for manual drive.";
   const manual = useTeleopStore.getState();
   if (manual.externalBusy && !manual.session) return "Another tab is using manual drive. End manual input there or use Stop first.";
-  if (commands.active || b?.undock_active || ["navigating", "recording"].includes(t.status.status)) return "Stop navigation first — another robot action is active.";
+  // Passive recording does not own motion; actual command/navigation owners do.
+  if (commands.active || b?.undock_active || t.status.status === "navigating") return "Stop navigation first — another robot action is active.";
   if (commands.lidarPending || commands.lidarRecoveryRequired || (commands.lidarStateAfter !== null && (t.baseStateAt === null || t.baseStateAt <= commands.lidarStateAfter))) return "Wait for fresh LiDAR state after the power command.";
   const lidar = lidarReadyReason(b, t.baseStateAt);
   if (lidar) return lidar;
