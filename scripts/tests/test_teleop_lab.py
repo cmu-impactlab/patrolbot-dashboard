@@ -1,5 +1,7 @@
 """Portable harness checks: no ROS imports, network, Docker or hardware."""
 import io
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import teleop_lab as lab
+
+
+def executor_fixture(**kwargs):
+    return NS(_tasks_lock=threading.Lock(), _pending_tasks={}, _ready_tasks=deque(),
+              wake=Mock(), shutdown=Mock(return_value=True), **kwargs)
 
 
 def setup_readiness(monkeypatch):
@@ -95,14 +102,15 @@ def test_cleanup_quiesces_all_executors_before_session_and_handles(capsys, tmp_p
     resources.bridge = NS(ws=NS(stop=lambda: events.append("transport")),
                           _teleop=NS(shutdown=lambda: events.append("session")))
     for name in ("receiver", "bridge", "probe"):
-        executor = NS(shutdown=lambda timeout_sec, n=name: events.append(n + "-shutdown"))
+        executor = executor_fixture()
+        executor.shutdown = lambda timeout_sec, n=name: events.append(n + "-shutdown")
         worker = NS(ident=1, join=lambda timeout, n=name: events.append(n + "-join"), is_alive=lambda: False)
         resources.executors.append((name, executor, worker))
         resources.nodes.append((name, NS(destroy_node=lambda n=name: events.append(n + "-destroy"))))
     resources.context_shutdown = lambda: events.append("context")
     assert resources.close()
-    assert events == ["transport", "probe-shutdown", "probe-join", "bridge-shutdown", "bridge-join",
-                      "receiver-shutdown", "receiver-join", "session", "probe-destroy",
+    assert events == ["transport", "probe-join", "bridge-join", "receiver-join", "probe-shutdown",
+                      "bridge-shutdown", "receiver-shutdown", "session", "probe-destroy",
                       "bridge-destroy", "receiver-destroy", "context"]
     assert json.loads((tmp_path / "teardown.json").read_text())["teardown"]["passed"]
 
@@ -115,7 +123,9 @@ def test_cleanup_failure_retains_handles_but_still_stops_http(failure):
             raise RuntimeError("broken executor")
         return failure != "false"
     worker = NS(ident=1, join=Mock(), is_alive=lambda: failure == "survives")
-    resources.executors.append(("probe", NS(shutdown=shutdown), worker))
+    executor = executor_fixture()
+    executor.shutdown = shutdown
+    resources.executors.append(("probe", executor, worker))
     destroy = Mock()
     resources.nodes.append(("probe", NS(destroy_node=destroy)))
     server = NS(should_exit=False)
@@ -128,7 +138,9 @@ def test_cleanup_failure_retains_handles_but_still_stops_http(failure):
 def test_cleanup_one_budget_even_when_stop_blocks():
     resources = lab.LabResources()
     release = threading.Event()
-    resources.executors.append(("probe", NS(shutdown=lambda timeout_sec: release.wait(1)), None))
+    executor = executor_fixture()
+    executor.shutdown = lambda timeout_sec: release.wait(1)
+    resources.executors.append(("probe", executor, None))
     server = NS(should_exit=False)
     resources.server = (server, NS(join=Mock(), is_alive=lambda: False))
     started = time.monotonic()
@@ -192,7 +204,8 @@ def test_shell_runner_propagates_supervisor_exit(tmp_path):
 
 @pytest.mark.parametrize("case,expected", [("success", 0), ("checker", 7), ("lab", 3),
     ("startup", 1), ("spawn", 1), ("forced", 1), ("teardown", 1), ("missing-teardown", 1),
-    ("run-timeout", 1), ("checker-cleanup-error", 1)])
+    ("run-timeout", 1), ("checker-cleanup-error", 1), ("orphan-checker", 1),
+    ("orphan-lab", 1), ("orphan-native", 1)])
 def test_supervisor_preserves_status_and_full_logs(monkeypatch, tmp_path, capsys, case, expected):
     monkeypatch.setattr(lab, "require_isolation", Mock())
     monkeypatch.setattr(lab.tempfile, "mkdtemp", lambda **_: str(tmp_path))
@@ -207,10 +220,17 @@ def test_supervisor_preserves_status_and_full_logs(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: io.BytesIO(json.dumps(
         dict(robot_id=lab.ROBOT_ID, physical_acceptance=False)).encode()))
     kills = []
+    orphan = {"orphan-checker": 124, "orphan-lab": 123, "orphan-native": 125}.get(case)
+    if case == "orphan-native":
+        (tmp_path / "native-pids.json").write_text("[125]")
     def killpg(pid, sig):
-        kills.append((pid, sig))
         if case == "checker-cleanup-error" and pid == 124:
             raise PermissionError("mock cleanup failure")
+        if sig == 0:
+            if pid != orphan or (pid, signal.SIGKILL) in kills:
+                raise ProcessLookupError
+            return
+        kills.append((pid, sig))
     monkeypatch.setattr(lab.os, "killpg", killpg)
     def spawn(argv, **kwargs):
         if case == "spawn":
@@ -240,6 +260,8 @@ def test_supervisor_preserves_status_and_full_logs(monkeypatch, tmp_path, capsys
         assert "first line\n" + "middle\n" * 100 + "last line" in output
     if case == "forced":
         assert kills == [(123, signal.SIGKILL)]
+    if orphan is not None:
+        assert (orphan, signal.SIGKILL) in kills
     if case == "checker-cleanup-error":
         assert (tmp_path / "teardown.json").exists(), "lab cleanup must survive checker cleanup error"
     assert json.loads((tmp_path / "run.json").read_text())["lab_run"]["returncode"] == expected
@@ -252,3 +274,161 @@ def test_supervisor_checks_isolation_before_binding(monkeypatch):
     with pytest.raises(AssertionError):
         lab.supervise()
     bind.assert_not_called()
+
+
+@pytest.mark.parametrize("layout", ["jazzy", "legacy"])
+@pytest.mark.parametrize("pooled", [False, True])
+@pytest.mark.parametrize("failure", [False, True])
+def test_real_pool_drains_before_guards_and_reports_task_errors(layout, pooled, failure, tmp_path):
+    resources = lab.LabResources()
+    resources.directory = tmp_path
+    executor = executor_fixture()
+    task = Future()
+    if layout == "legacy":
+        del executor._pending_tasks, executor._ready_tasks
+        executor._tasks = [(task, None, None)]
+    else:
+        executor._pending_tasks[task] = NS(source_node=None, source_entity=None)
+        executor._ready_tasks.append(task)
+    finished = threading.Event()
+    def complete():
+        if failure:
+            task.set_exception(ValueError("late callback failure"))
+        else:
+            task.set_result(None)
+        finished.set()
+    if pooled:
+        executor._executor = ThreadPoolExecutor(1)
+        executor._futures = [task]
+        def callback():
+            time.sleep(.03)
+            complete()
+        executor._executor.submit(callback)
+    else:
+        complete()
+    def shutdown(timeout_sec):
+        assert finished.is_set(), "guard destroyed before callback completed"
+        if pooled:
+            assert all(not thread.is_alive() for thread in executor._executor._threads)
+        return True
+    executor.shutdown = Mock(side_effect=shutdown)
+    resources.executors.append(("probe", executor, None))
+    resources.nodes.append(("probe", NS(destroy_node=Mock())))
+    assert resources.close() is not failure
+    executor.shutdown.assert_called_once()
+    errors = json.loads((tmp_path / "teardown.json").read_text())["teardown"]["errors"]
+    assert any("late callback failure" in str(error) for error in errors) is failure
+
+
+def test_pool_timeout_retains_guards_nodes_and_context():
+    resources = lab.LabResources()
+    executor = executor_fixture(_executor=ThreadPoolExecutor(1), _futures=[])
+    release = threading.Event()
+    executor._executor.submit(release.wait)
+    resources.executors.append(("probe", executor, None))
+    destroy = Mock()
+    resources.nodes.append(("probe", NS(destroy_node=destroy)))
+    resources.context_shutdown = Mock()
+    started = time.monotonic()
+    try:
+        assert not resources.close(timeout=.04)
+        assert time.monotonic() - started < .5
+        executor.shutdown.assert_not_called()
+        destroy.assert_not_called()
+        resources.context_shutdown.assert_not_called()
+    finally:
+        release.set()
+        executor._executor.shutdown(wait=True)
+        for thread in threading.enumerate():
+            if thread.name == "cleanup-probe-pool-drain":
+                thread.join(1)
+
+
+def test_unknown_task_layout_retains_handles():
+    resources = lab.LabResources()
+    executor = executor_fixture()
+    del executor._pending_tasks
+    resources.executors.append(("probe", executor, None))
+    resources.context_shutdown = Mock()
+    assert not resources.close()
+    executor.shutdown.assert_not_called()
+    resources.context_shutdown.assert_not_called()
+
+
+def test_spinner_stops_dispatch_before_shutdown():
+    resources = lab.LabResources()
+    executor = executor_fixture()
+    dispatched = threading.Event()
+    executor.spin_once = lambda timeout_sec: dispatched.set() or time.sleep(.005)
+    resources.executors.append(("probe", executor, None))
+    resources.start_executor(0)
+    assert dispatched.wait(1)
+    assert resources.close()
+    assert not resources.executors[0][2].is_alive()
+
+
+@pytest.mark.parametrize("code,passed", [(0, True), (-2, True), (130, True), (254, True),
+                                       (1, False), (139, False), (255, False)])
+def test_native_exit_codes_checked(monkeypatch, code, passed):
+    resources = lab.LabResources()
+    resources.processes.append(NS(pid=45678, poll=lambda: None, wait=lambda timeout: code))
+    def killpg(pid, sig):
+        if sig == 0:
+            raise ProcessLookupError
+    monkeypatch.setattr(lab.os, "killpg", killpg)
+    assert resources.close() is passed
+
+
+def test_packaging_requires_built_frontend(tmp_path):
+    import shutil
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts/package_teleop_lab.py"
+    shutil.copy2(Path(lab.__file__).with_name(script.name), script)
+    for source in ("server", "ros2_ws/src/patrolbot_web_bridge", "contracts", "shared/schemas"):
+        (root / source).mkdir(parents=True)
+    output = tmp_path / "context"
+    result = subprocess.run([sys.executable, str(script), str(output)], capture_output=True, text=True)
+    assert result.returncode != 0 and "frontend/dist" in result.stderr
+    assert not output.exists()
+    (root / "frontend/dist").mkdir(parents=True)
+    (root / "frontend/dist/index.html").write_text("lab build")
+    (root / "infrastructure/teleop-lab").mkdir(parents=True)
+    (root / "infrastructure/teleop-lab/Dockerfile").write_text("FROM lab\n")
+    for name in ("teleop_lab.py", "check_teleop_receipt.py", "run_teleop_lab.sh"):
+        (root / "scripts" / name).write_text("# lab\n")
+    result = subprocess.run([sys.executable, str(script), str(output)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((output / "CONTEXT.sha256.json").read_text())
+    assert set(manifest) == {"Dockerfile", "frontend/dist/index.html", "scripts/teleop_lab.py",
+                             "scripts/check_teleop_receipt.py", "scripts/run_teleop_lab.sh"}
+
+
+def test_spinner_exception_is_retained_after_task_removed(monkeypatch, tmp_path):
+    resources = lab.LabResources()
+    resources.directory = tmp_path
+    executor = executor_fixture()
+    def spin_once(timeout_sec):
+        raise ValueError("removed task failed")
+    executor.spin_once = spin_once
+    hook = Mock()
+    monkeypatch.setattr(threading, "excepthook", hook)
+    resources.executors.append(("probe", executor, None))
+    resources.start_executor(0)
+    resources.executors[0][2].join(1)
+    assert not resources.close()
+    hook.assert_called_once()
+    assert "removed task failed" in (tmp_path / "teardown.json").read_text()
+
+
+def test_native_group_retired_even_after_launcher_exit(monkeypatch):
+    resources = lab.LabResources()
+    resources.processes.append(NS(pid=45678, poll=lambda: 0, wait=lambda timeout: 0))
+    signals = []
+    def killpg(pid, sig):
+        if sig == 0:
+            raise ProcessLookupError
+        signals.append(sig)
+    monkeypatch.setattr(lab.os, "killpg", killpg)
+    assert not resources.close(), "early launcher exit must remain a failure"
+    assert signals == [signal.SIGINT]

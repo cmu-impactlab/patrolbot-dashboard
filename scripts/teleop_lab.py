@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,28 @@ import time
 
 ROBOT_ID = "isolated-web-teleop"
 PORT = 8027
+
+
+def executor_tasks(executor):
+    """LAB ONLY: support legacy triples and cached Jazzy 7.1.11 task storage."""
+    if not hasattr(executor, "_tasks_lock"):
+        raise RuntimeError("unsupported lab executor task lock; update LAB ONLY adapter")
+    with executor._tasks_lock:
+        if isinstance(getattr(executor, "_tasks", None), list):
+            tasks = [task for task, _entity, _node in executor._tasks]
+        elif (isinstance(getattr(executor, "_pending_tasks", None), dict)
+              and isinstance(getattr(executor, "_ready_tasks", None), deque)):
+            tasks = list(executor._pending_tasks) + list(executor._ready_tasks)
+        else:
+            raise RuntimeError("unsupported lab executor task storage; update LAB ONLY adapter")
+    if hasattr(executor, "_executor"):
+        if (not isinstance(executor._executor, ThreadPoolExecutor)
+                or not isinstance(getattr(executor, "_futures", None), list)):
+            raise RuntimeError("unsupported lab executor worker pool; update LAB ONLY adapter")
+        tasks += executor._futures
+    elif hasattr(executor, "_futures"):
+        raise RuntimeError("unsupported lab executor without worker pool")
+    return tasks
 
 
 def require_isolation():
@@ -76,7 +99,22 @@ class LabResources:
         self.context_shutdown = None
         self.log = None
         self.stopped = threading.Event()
+        self.dispatch_stopped = threading.Event()
+        self.spin_errors = []
         self.directory = None
+
+    def start_executor(self, index):
+        name, executor, _ = self.executors[index]
+        def spin():
+            try:
+                while not self.dispatch_stopped.is_set():
+                    executor.spin_once(timeout_sec=.05)
+            except BaseException as error:
+                self.spin_errors.append({"step": name + "-spin", "error": repr(error)})
+                raise
+        worker = threading.Thread(target=spin, name="lab-" + name, daemon=True)
+        self.executors[index] = (name, executor, worker)
+        worker.start()
 
     def close(self, timeout=20):
         deadline = time.monotonic() + timeout
@@ -113,14 +151,41 @@ class LabResources:
             if ws_worker is not None and ws_worker.is_alive():
                 errors.append({"step": "transport-stop", "error": "websocket worker survived"})
                 quiesced = False
+        self.dispatch_stopped.set()
+        for name, executor, _ in self.executors:
+            quiesced = attempt(name + "-wake", lambda e=executor: e.wake()) and quiesced
+        joined = []
         for name, executor, worker in reversed(self.executors):
-            ok = attempt(name + "-shutdown", lambda e=executor: e.shutdown(timeout_sec=min(2, remaining())))
+            ok = True
             if worker is not None and worker.ident is not None:
                 worker.join(min(1, remaining()))
                 if worker.is_alive():
                     errors.append({"step": name, "error": "executor worker survived"})
                     ok = False
+            joined.append((name, executor, ok))
+        for name, executor, ok in joined:
+            tasks = []
+            if ok:
+                ok = attempt(name + "-tasks", lambda e=executor: tasks.extend(executor_tasks(e)))
+            if ok and hasattr(executor, "_executor"):
+                # Jazzy shutdown can return True with submitted callbacks still running.
+                ok = attempt(name + "-pool-drain", lambda e=executor:
+                             e._executor.shutdown(wait=True, cancel_futures=True))
+            if ok:
+                ok = attempt(name + "-tasks-drained", lambda e=executor: tasks.extend(executor_tasks(e)))
+                for task in dict.fromkeys(tasks):
+                    if task.done() and not task.cancelled():
+                        def check_task(t=task):
+                            error = t.exception()
+                            if error is not None:
+                                raise error
+                        attempt(name + "-task-exception", check_task)
             quiesced = ok and quiesced
+        if quiesced:
+            for name, executor, _ in joined:
+                quiesced = attempt(name + "-shutdown", lambda e=executor:
+                                   e.shutdown(timeout_sec=min(2, remaining()))) and quiesced
+        errors.extend(self.spin_errors)
         if quiesced and self.bridge is not None and self.bridge._teleop is not None:
             quiesced = attempt("session-end", self.bridge._teleop.shutdown)
         if quiesced:
@@ -134,9 +199,11 @@ class LabResources:
                 if code is not None:
                     errors.append({"step": "native-child", "error": "exited before cleanup", "returncode": code})
                 # Signal the group even if ros2's parent exited before its native child.
+                sent = []
                 for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
                     try:
                         os.killpg(process.pid, sig)
+                        sent.append(sig)
                     except ProcessLookupError:
                         break
                     except OSError as error:
@@ -164,6 +231,12 @@ class LabResources:
                         break
                 else:
                     errors.append({"step": "native-child", "error": "process group survived", "pid": process.pid})
+                code = process.wait(timeout=remaining())
+                # ros2 run can sys.exit() with the native child's negative signal code.
+                accepted = ({0} | {-sig for sig in sent} | {128 + sig for sig in sent}
+                            | {256 - sig for sig in sent})
+                if code not in accepted:
+                    errors.append({"step": "native-child", "error": "unexpected exit", "returncode": code})
             except Exception as error:
                 errors.append({"step": "native-child", "error": repr(error)})
         if self.server is not None:
@@ -176,7 +249,7 @@ class LabResources:
                 errors.append({"step": "http", "error": "server worker survived"})
         if self.listener is not None:
             attempt("listener-close", self.listener.close)
-        if self.context_shutdown is not None:
+        if quiesced and self.context_shutdown is not None:
             attempt("context-shutdown", self.context_shutdown)
         if self.log is not None:
             attempt("log-close", self.log.close)
@@ -395,9 +468,7 @@ def run_lab(resources):
 
     node.create_timer(.04, sensors)
     executor.add_node(node)
-    worker = threading.Thread(target=executor.spin, name="lab-receiver", daemon=True)
-    resources.executors[0] = ("receiver", executor, worker)
-    worker.start()
+    resources.start_executor(0)
 
     # Actual native arbitration/smoothing, using the published shared limits.
     contract = read_contract()
@@ -441,10 +512,8 @@ def run_lab(resources):
     resources.nodes.append(("bridge", bridge))
     holder["bridge"] = bridge
     bridge_executor.add_node(bridge)
-    bridge_worker = threading.Thread(target=bridge_executor.spin, name="lab-bridge", daemon=True)
-    resources.executors[1] = ("bridge", bridge_executor, bridge_worker)
     holder["executor"] = bridge_executor
-    bridge_worker.start()
+    resources.start_executor(1)
 
     # Diagnostics: counters prove which executor/entity still runs, and an
     # independent probe node with its own executor distinguishes a stuck
@@ -499,9 +568,7 @@ def run_lab(resources):
     probe_executor = SingleThreadedExecutor()
     resources.executors.append(("probe", probe_executor, None))
     probe_executor.add_node(probe_node)
-    probe_worker = threading.Thread(target=probe_executor.spin, name="lab-probe", daemon=True)
-    resources.executors[2] = ("probe", probe_executor, probe_worker)
-    probe_worker.start()
+    resources.start_executor(2)
 
     print(json.dumps({"lab_started": True, "port": PORT, "robot_id": ROBOT_ID,
                       "physical_acceptance": False, "evidence_dir": str(directory)}), flush=True)
@@ -608,7 +675,10 @@ def supervise():
             finally:
                 def stop_checker():
                     if checker is not None and checker.poll() is None:
-                        os.killpg(checker.pid, signal.SIGKILL)
+                        try:
+                            os.killpg(checker.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         checker.wait(timeout=2)
                 def stop_lab():
                     nonlocal status
@@ -635,19 +705,36 @@ def supervise():
                         status = status or 1
                 cleanup_step("checker", stop_checker)
                 cleanup_step("lab", stop_lab)
+                # Launchers can exit while descendants keep their process group alive.
+                def retire_group(pid):
+                    nonlocal status
+                    try:
+                        os.killpg(pid, 0)
+                    except ProcessLookupError:
+                        return
+                    status = status or 1
+                    print(json.dumps({"surviving_process_group": pid, "action": "SIGKILL"}), flush=True)
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        return
+                    deadline = time.monotonic() + 2
+                    while True:
+                        try:
+                            os.killpg(pid, 0)
+                        except ProcessLookupError:
+                            return
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(f"process group survived forced retirement: {pid}")
+                        time.sleep(.02)
+                for process in (checker, lab):
+                    if process is not None:
+                        cleanup_step(f"group-{process.pid}", lambda p=process: retire_group(p.pid))
                 cleanup_step("teardown-evidence", check_teardown)
                 native_pids = directory / "native-pids.json"
                 if native_pids.exists():
-                    def stop_native(pid):
-                        nonlocal status
-                        try:
-                            os.killpg(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            return
-                        print(json.dumps({"surviving_native_group_killed": pid}), flush=True)
-                        status = status or 1
                     for pid in json.loads(native_pids.read_text()):
-                        cleanup_step(f"native-{pid}", lambda p=pid: stop_native(p))
+                        cleanup_step(f"native-{pid}", lambda p=pid: retire_group(p))
     except Exception as error:
         print(json.dumps({"supervisor_error": repr(error)}), flush=True)
         status = status or 1
