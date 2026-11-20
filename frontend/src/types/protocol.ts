@@ -247,8 +247,8 @@ export type CommandType =
 export type CommandOutcome = "succeeded" | "failed" | "rejected" | "canceled" | "timeout";
 
 export interface CommandRequestData {
-  seed_profile?: "measured";
-  enabled?: boolean;
+  seed_profile?: "measured" | null;
+  enabled?: boolean | null;
   command_id: string;
   command: CommandType;
   goal?: GoalData | null;
