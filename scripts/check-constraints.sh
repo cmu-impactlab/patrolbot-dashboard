@@ -73,14 +73,12 @@ check_server_tests_against_constraints() {
     # server directory.
     if docker run --rm -v "$REPO:/repo:ro" "$IMAGE" bash -c '
         set -euo pipefail
-        mkdir -p /tmp/repo
-        # The tuning catalog is runtime data, not a test fixture; the server
-        # suite must see it at the same checkout-relative path production uses.
-        cp -r /repo/server /repo/shared /repo/infrastructure /repo/contracts /tmp/repo/
-        rm -rf /tmp/repo/server/.venv /tmp/repo/server/*.egg-info
+        bash /repo/scripts/copy-constrained-test-sources.sh /repo /tmp/repo
         pip install --quiet --no-cache-dir --root-user-action=ignore \
             -c /tmp/repo/server/constraints.txt "/tmp/repo/server[dev]" >/dev/null
-        cd /tmp/repo/server && python -m pytest tests -m "not external" -q
+        cd /tmp/repo/server
+        PYTHONPATH=/tmp/repo/server:/tmp/repo/ros2_ws/src/patrolbot_web_bridge \
+            python -m pytest tests -m "not external" -q
     ' >/tmp/constrained-tests.log 2>&1; then
         echo "OK   server suite passes on the constrained set"
     else
