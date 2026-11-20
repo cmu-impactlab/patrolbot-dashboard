@@ -6,11 +6,75 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
-import httpx
-import websockets
+
+def session_stop_id(audit, robot, command_id):
+    """Resolve the sole stop after this start in the newest-first lab audit."""
+    starts = [index for index, row in enumerate(audit)
+              if row["command_id"] == command_id]
+    assert len(starts) == 1, "Exact manual start missing from command audit"
+    index = starts[0]
+    start = audit[index]
+    assert start["robot_id"] == robot and start["command"] == "teleop_start", start
+    newer = [row for row in audit[:index] if row["robot_id"] == robot]
+    # shortcut: the wire has no parent session ID for stops; require the isolated
+    # lab's sole intervening command, upgrade when the protocol exposes a link.
+    assert len(newer) <= 1, "Ambiguous commands after manual start"
+    if not newer:
+        return None
+    stop = newer[0]
+    assert stop["command"] == "teleop_stop", stop
+    for key in ("user_id", "username", "source_ip", "session_generation"):
+        assert start.get(key) is not None and stop.get(key) == start[key], (key, stop)
+    assert stop["command_id"] and stop["command_id"] != command_id, stop
+    assert not stop.get("rejection_reason"), stop
+    return stop["command_id"]
+
+
+def terminal_id(frame, robot, expected):
+    """Return only an expected exact robot/command terminal; reject bad outcomes."""
+    if frame.get("robot_id") != robot or frame.get("type") != "command.result":
+        return None
+    data = frame["data"]
+    command_id = data.get("command_id")
+    if command_id not in expected:
+        return None
+    assert data.get("outcome") in expected[command_id], frame
+    return command_id
+
+
+async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        budget = deadline - time.monotonic()
+        assert budget > 0, "Manual session did not close with expected terminals"
+        return budget
+
+    expected = {command_id: {"succeeded", "canceled"} if expect_stop else {"canceled"}}
+    if expect_stop:
+        while True:
+            budget = remaining()
+            response = await asyncio.wait_for(
+                client.get("/api/commands?limit=500"), timeout=budget)
+            response.raise_for_status()
+            stop_id = session_stop_id(response.json(), robot, command_id)
+            if stop_id is not None:
+                expected[stop_id] = {"succeeded"}
+                break
+            await asyncio.sleep(min(.02, remaining()))
+    done = set()
+    while done != expected.keys():
+        budget = remaining()
+        frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=budget))
+        matched = terminal_id(frame, robot, expected)
+        if matched is not None:
+            done.add(matched)
 
 
 async def main():
+    import httpx
+    import websockets
+
     assert os.environ.get("PATROLBOT_ISOLATED_TEST") == "1"
     assert {path.name for path in Path("/sys/class/net").iterdir()} == {"lo"}
     root = "http://127.0.0.1:8027"
@@ -45,29 +109,13 @@ async def main():
             async def reply(command_id, accepted=True):
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=5))
-                    if frame["type"] == "command.ack" and frame["data"]["command_id"] == command_id:
+                    frame = json.loads(await asyncio.wait_for(
+                        socket.recv(), timeout=max(.001, deadline - time.monotonic())))
+                    if (frame["type"] == "command.ack" and frame.get("robot_id") == robot
+                            and frame["data"]["command_id"] == command_id):
                         assert frame["data"]["accepted"] is accepted, frame
                         return frame
                 raise AssertionError("No exact-session acknowledgement")
-
-            async def finish(command_id, expect_stop):
-                # A browser release or producer-loss revoke makes the server
-                # issue its own audited teleop_stop: ownership closes only after
-                # BOTH the session result and that stop's result. The F710 path
-                # self-closes with the session result alone.
-                session_done = False
-                stop_done = not expect_stop
-                deadline = time.monotonic() + 6
-                while not (session_done and stop_done):
-                    if time.monotonic() > deadline:
-                        raise AssertionError("Manual session did not close with expected terminals")
-                    frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=6))
-                    if frame["type"] == "command.result":
-                        if frame["data"]["command_id"] == command_id:
-                            session_done = True
-                        else:
-                            stop_done = True
 
             seq = 0
 
@@ -98,7 +146,7 @@ async def main():
                     "angular": 0., "deadman": False}))
                 await wait_receipt("/input/teleop", lambda item: item["linear"] == 0. and item["angular"] == 0., begin)
                 await wait_receipt("/patrolbot/web_teleop_active", lambda item: item["active"] is False, begin)
-                await finish(command_id, expect_stop=True)
+                await finish(socket, client, robot, command_id, expect_stop=True)
 
             command_id = await start()
             begin = await stream(command_id, .18, 0.)
@@ -121,7 +169,7 @@ async def main():
             after = time.monotonic()
             await wait_receipt("/input/teleop", lambda item: item["linear"] == 0., after)
             await wait_receipt("/patrolbot/web_teleop_active", lambda item: item["active"] is False, after)
-            await finish(command_id, expect_stop=True)
+            await finish(socket, client, robot, command_id, expect_stop=True)
             results.append("producer_loss_zero_received")
 
             command_id = await start()
@@ -130,7 +178,7 @@ async def main():
             await client.post("/lab/fault", json={"fault": "f710"})
             await wait_receipt("/patrolbot/web_teleop_active", lambda item: item["active"] is False, begin)
             await wait_receipt("/cmd_vel_out", lambda item: item["linear"] == -.12, begin)
-            await finish(command_id, expect_stop=False)
+            await finish(socket, client, robot, command_id, expect_stop=False)
             results.append("physical_joystick_priority_and_web_session_revocation")
             await client.post("/lab/fault", json={"fault": "healthy"})
             await asyncio.sleep(.7)
