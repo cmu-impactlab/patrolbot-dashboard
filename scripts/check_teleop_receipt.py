@@ -124,20 +124,26 @@ async def main():
 
     assert os.environ.get("PATROLBOT_ISOLATED_TEST") == "1"
     assert {path.name for path in Path("/sys/class/net").iterdir()} == {"lo"}
-    root = "http://127.0.0.1:8027"
+    port = int(os.environ.get("TELEOP_LAB_PORT", "8027"))
+    root = f"http://127.0.0.1:{port}"
     robot = "isolated-web-teleop"
     from app.protocol.envelope import encode
     results = []
     async with httpx.AsyncClient(base_url=root) as client:
-        async def wait_ready():
+        async def wait_ready(fault="healthy"):
+            # Require new bridge-received sensor/idle/lifecycle events for every
+            # intent. Publication counters cannot attest runtime freshness.
+            after = time.monotonic()
             deadline = time.monotonic() + 20
+            result = None
             while time.monotonic() < deadline:
-                result = (await client.get("/lab/ready")).json()
+                result = (await client.get(f"/lab/ready?after={after}&fault={fault}")).json()
                 if result.get("ready"):
                     assert result["has_amcl_pose"] is False
+                    print(json.dumps({"intent_readiness": result}), flush=True)
                     return
                 await asyncio.sleep(.1)
-            raise AssertionError("Isolated ROS bridge did not provide fresh manual capability/data")
+            raise AssertionError(f"Isolated ROS bridge readiness deadline: {result}")
 
         async def wait_receipt(topic, predicate, newer_than):
             deadline = time.monotonic() + 3
@@ -151,7 +157,7 @@ async def main():
             raise AssertionError("No actual ROS subscriber receipt on " + topic)
 
         await wait_ready()
-        async with websockets.connect("ws://127.0.0.1:8027/ws/ui") as socket:
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws/ui") as socket:
             # Ignore snapshots/telemetry when matching exact command lifecycle.
             async def reply(command_id, accepted=True):
                 deadline = time.monotonic() + 5
@@ -167,6 +173,7 @@ async def main():
             seq = 0
 
             async def start():
+                await wait_ready()
                 command_id = str(uuid4())
                 await socket.send(encode("command.request", robot, 1,
                     {"command_id": command_id, "command": "teleop_start"}))
@@ -228,10 +235,10 @@ async def main():
             await finish(socket, client, robot, command_id, expect_stop=False)
             results.append("physical_joystick_priority_and_web_session_revocation")
             await client.post("/lab/fault", json={"fault": "healthy"})
-            await asyncio.sleep(.7)
+            await wait_ready()
 
             await client.post("/lab/fault", json={"fault": "sbc_down"})
-            await asyncio.sleep(.15)
+            await wait_ready("sbc_down")
             command_id = str(uuid4())
             await socket.send(encode("command.request", robot, 1,
                 {"command_id": command_id, "command": "teleop_start"}))
