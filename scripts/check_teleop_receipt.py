@@ -50,25 +50,72 @@ async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
         assert budget > 0, "Manual session did not close with expected terminals"
         return budget
 
-    expected = {command_id: {"succeeded", "canceled"} if expect_stop else {"canceled"}}
-    if expect_stop:
-        while True:
-            budget = remaining()
+    # None permits robot-watchdog cancellation, but still requires any audited stop.
+    expected = {command_id: {"canceled"} if expect_stop is False else {"succeeded", "canceled"}}
+    done = set()
+    buffered = []
+    stop_id = None
+    settled_after = None
+    final_check_at = deadline - min(.02, timeout / 10)
+    while True:
+        remaining()
+        audit_started = time.monotonic()
+        if expect_stop is not False:
             response = await asyncio.wait_for(
-                client.get("/api/commands?limit=500"), timeout=budget)
+                client.get("/api/commands?limit=500"), timeout=remaining())
+            remaining()
             response.raise_for_status()
-            stop_id = session_stop_id(response.json(), robot, command_id)
+            audit = response.json()
+            resolved = session_stop_id(audit, robot, command_id)
+            assert stop_id is None or resolved == stop_id, "Expected stop disappeared from audit"
+            stop_id = resolved
             if stop_id is not None:
                 expected[stop_id] = {"succeeded"}
-                break
-            await asyncio.sleep(min(.02, remaining()))
-    done = set()
-    while done != expected.keys():
+
+        for frame in buffered:
+            matched = terminal_id(frame, robot, expected)
+            if matched is not None:
+                done.add(matched)
+        # Retain early stop results (including failures) until its audit identifies it.
+        if stop_id is not None or expect_stop is False:
+            buffered.clear()
+
+        if done == expected.keys():
+            if expect_stop is False or stop_id is not None:
+                remaining()
+                return
+            if expect_stop is None:
+                start = next(row for row in audit if row["command_id"] == command_id)
+                if start.get("completed_at"):
+                    assert start.get("outcome") in expected[command_id], start
+                    # command.result precedes terminal()/_finish(). A completed audit
+                    # plus settlement lets an already-running revoke finish auditing.
+                    # Settle for at least .5 s (send is bounded at .3 s), then
+                    # use the overall budget, reserving one poll for final audit.
+                    if settled_after is None:
+                        settled_after = time.monotonic() + .5
+                    if audit_started >= max(settled_after, final_check_at):
+                        assert start["outcome"] == "canceled", start
+                        assert all(frame["data"].get("outcome") == "canceled"
+                                   for frame in buffered
+                                   if frame["data"].get("command_id") == command_id)
+                        remaining()
+                        return
+
         budget = remaining()
-        frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=budget))
-        matched = terminal_id(frame, robot, expected)
-        if matched is not None:
-            done.add(matched)
+        # Poll the audit during settlement and while an issued stop is still unknown.
+        polling = expect_stop is not False and stop_id is None
+        if polling and time.monotonic() < final_check_at:
+            budget = min(budget, final_check_at - time.monotonic())
+        try:
+            frame = json.loads(await asyncio.wait_for(
+                socket.recv(), timeout=min(.02, budget) if polling else budget))
+            remaining()
+            if frame.get("type") == "command.result" and frame.get("robot_id") == robot:
+                buffered.append(frame)
+        except asyncio.TimeoutError:
+            if not polling:
+                raise
 
 
 async def main():
@@ -169,7 +216,7 @@ async def main():
             after = time.monotonic()
             await wait_receipt("/input/teleop", lambda item: item["linear"] == 0., after)
             await wait_receipt("/patrolbot/web_teleop_active", lambda item: item["active"] is False, after)
-            await finish(socket, client, robot, command_id, expect_stop=True)
+            await finish(socket, client, robot, command_id, expect_stop=None)
             results.append("producer_loss_zero_received")
 
             command_id = await start()
