@@ -8,10 +8,10 @@ Safety posture:
   command: the robot has no automatic dock-in path.
 - navigate_to_pose and the charging/motor/undock steps are additionally gated
   on live hardware telemetry by commands.gates before they are forwarded.
-- Fail-closed: any request this broker refuses gets a synthesized command.ack,
-  and an accepted one is never left open — missing acks and results are closed
-  out by server-side timeouts. A frame malformed enough to fail payload
-  validation never reaches here and is dropped by the gateway without a reply.
+- Fail-closed: any request this broker refuses gets a synthesized command.ack.
+  Missing motion replies request cancellation and retain unknown ownership;
+  a local timeout is never proof of a physical stop. A frame malformed enough to
+  fail payload validation never reaches here and is dropped by the gateway.
 - Every request is written to the command_audit table before it reaches
   the robot.
 """
@@ -56,6 +56,9 @@ COMMAND_LABELS = {
     "teleop_stop": "End manual input",
 }
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
+MOTION_COMMANDS = {"navigate_to_pose", "undock"}
+SAFE_END_COMMANDS = {"stop", "motor_disable", "teleop_stop"}
+BOUND_COMMANDS = MOTION_COMMANDS | GOAL_REQUIRED | {"teleop_start", "teleop_stop"}
 
 
 @dataclass
@@ -68,11 +71,13 @@ class ActiveCommand:
     uncertain: bool = False
     robot_session: Any = None
     robot_websocket: Any = None
+    cancel_requested: bool = False
     timers: list[asyncio.Task] = field(default_factory=list)
 
     def cancel_timers(self) -> None:
         for timer in self.timers:
-            timer.cancel()
+            if timer is not asyncio.current_task():
+                timer.cancel()
 
 
 class CommandBroker:
@@ -101,6 +106,40 @@ class CommandBroker:
 
     # -- browser side ---------------------------------------------------------
 
+    def current_user(self, client: Any) -> Any:
+        """Never use a socket's cached role as fresh OIDC authority.
+
+        The original principal is retained only for audit and safe end-input
+        cleanup. Cookies are bound to this connection; renewal needs a reconnect.
+        """
+        if not getattr(client, "connected", True):
+            return None
+        original = getattr(client, "user", None)
+        if getattr(self.hub.settings, "auth_mode", "local") != "oidc":
+            return original
+        from ..tuning.authz import fresh_user
+
+        cookies = getattr(getattr(client, "websocket", None), "cookies", {})
+        current = fresh_user(self.hub.settings, cookies)
+        if (current is None or original is None or current.id != original.id
+                or current.username != original.username):
+            return None
+        if getattr(current, "can_command", False):
+            # A connected observer can be promoted by current policy. Remember
+            # that verified authority solely so later expiry cannot block stop.
+            client.end_input_authorized = True
+        return current
+
+    def can_command(self, client: Any) -> bool:
+        return bool(getattr(self.current_user(client), "can_command", False))
+
+    def can_end(self, client: Any, command: str) -> bool:
+        # A socket verified as an operator may still stop/disable/release after
+        # expiry or demotion, never enable motors, reset or move.
+        return (command in SAFE_END_COMMANDS
+                and bool(getattr(client, "end_input_authorized",
+                                 getattr(getattr(client, "user", None), "can_command", False))))
+
     async def handle_browser_request(self, client: Any, envelope: Envelope,
                                      payload: CommandRequestData) -> None:
         revision = self.teleop.revisions.get(envelope.robot_id, 0)
@@ -114,13 +153,35 @@ class CommandBroker:
     async def _handle_browser_request(self, client, envelope, payload, revision):
         command_id = payload.command_id
         robot_id = envelope.robot_id
-        user = getattr(client, "user", None)
+        user = self.current_user(client)
 
         command = payload.command
 
-        if user is None or not getattr(user, "can_command", False):
+        if not getattr(user, "can_command", False) and not self.can_end(client, command):
+            for owned_robot, owner in list(self.teleop.owners.items()):
+                if owner.client is client:
+                    await self.teleop.revoke(owned_robot, "Manual authority expired or was revoked.")
+            self.lease.release_client(client)
             await self._reject_audited(client, robot_id, command_id, command,
-                "Your account has read-only access — you cannot send robot commands.")
+                "Your session has expired or your account has read-only access — you cannot send robot commands.")
+            return
+
+        # Check before revocation/takeover side effects, including IDs evicted
+        # from the bounded replay cache while their operation remains unresolved.
+        recorded = self.hub.db is not None and await self.hub.db.command_recorded(command_id)
+        # Recheck memory after the database await: emergency requests bypass the
+        # per-robot lock and must not race an ordinary admission with this ID.
+        if recorded or command_id in self.active or command_id in self._seen:
+            await self._reject_audited(client, robot_id, command_id, command,
+                                       "Duplicate command — already received.")
+            return
+        self._remember(command_id)
+
+        if command not in SAFE_END_COMMANDS | {"software_reset"} and any(
+                old.robot_id == robot_id and old.command in MOTION_COMMANDS and old.uncertain
+                for old in self.active.values()):
+            await self._reject_audited(client, robot_id, command_id, command,
+                "A motion operation has an unknown outcome. Wait for its terminal result or explicitly reset; it must not be retried.")
             return
 
         if command == "teleop_start" and robot_id in self.teleop.owners:
@@ -180,15 +241,6 @@ class CommandBroker:
                          robot_id, holder.username if holder else "-")
             self.lease.acquire(robot_id, user.id, user.username, client)
 
-        # 4. Duplicate protection — in-memory fast path plus a DB lookup so a
-        #    replayed command_id is caught even after a server restart.
-        if command_id in self._seen or (
-                self.hub.db is not None and await self.hub.db.command_recorded(command_id)):
-            await self._reject_audited(client, robot_id, command_id, command,
-                                       "Duplicate command — already received.")
-            return
-        self._remember(command_id)
-
         if command in GOAL_REQUIRED:
             if payload.goal is None:
                 await self._reject_audited(client, robot_id, command_id, command,
@@ -211,6 +263,7 @@ class CommandBroker:
                                        "The robot is not connected right now — "
                                        "try again once it is online.")
             return
+        robot_websocket = session.websocket
 
         if command in GOAL_REQUIRED:
             if "map_context_v1" not in session.state.capabilities:
@@ -253,6 +306,19 @@ class CommandBroker:
                 **self._identity(client, robot_id),
             )
 
+        # Auditing/admission can yield past expiry or role revocation. Nothing
+        # with fresh physical authority may be published using the old check.
+        if not self.can_command(client) and not self.can_end(client, command):
+            if command == "teleop_start":
+                owner = self.teleop.owners.get(robot_id)
+                if owner is not None and owner.command_id == command_id:
+                    self.teleop.terminal(ActiveCommand(command_id, command, robot_id))
+            self.lease.release_client(client)
+            self._reject(robot_id, command_id, "Command authority expired during admission.")
+            if self.hub.db is not None:
+                await self.hub.db.complete_command_audit(command_id, "rejected", "Command authority expired during admission.")
+            return
+
         if command == "software_reset":
             self.teleop.owners.pop(robot_id, None)
             # Retire old intents; the fixed host restart stops their publishers.
@@ -266,8 +332,16 @@ class CommandBroker:
 
         entry = ActiveCommand(command_id=command_id, command=payload.command,
                               robot_id=envelope.robot_id, initiator=client,
-                              robot_session=session, robot_websocket=session.websocket)
+                              robot_session=session, robot_websocket=robot_websocket)
         self.active[command_id] = entry
+        if command in BOUND_COMMANDS and (
+                self.hub.robots.get(robot_id) is not session
+                or session.websocket is not robot_websocket):
+            if command == "teleop_start":
+                self.teleop.terminal(entry)
+            self._reject(robot_id, command_id, "Robot connection changed during admission; command was not sent.")
+            await self._finish(entry, "rejected", "Robot connection changed during admission; command was not sent.")
+            return
         if command == "teleop_start":
             owner = self.teleop.owners.get(robot_id)
             if (owner is None or owner.command_id != command_id or owner.phase != "pending"
@@ -285,25 +359,67 @@ class CommandBroker:
             self.reset_pending[robot_id] = command_id
         if command == "set_lidar_power":
             self.lidar_pending[robot_id] = command_id
+        if not self.can_command(client) and not self.can_end(client, command):
+            if command == "software_reset":
+                # The explicit recovery already replaced older intents. Keep
+                # its barrier, but do not publish using authority lost during
+                # the audit completions above.
+                await self._mark_uncertain(entry, "Reset was not sent: command authority expired during recovery. Confirm a new authorized reset.")
+            else:
+                if command in {"teleop_start", "teleop_stop"}:
+                    self.teleop.terminal(entry)
+                await self._close_out(entry, "rejected", "Command authority expired before publication.")
+            return
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
 
-        # Stamp authorization from the verified session, overwriting whatever
-        # the browser sent. The robot's guarded operations trust this flag, so
-        # it must never be attacker-controlled.
+        # This flag authorizes only this validated command. An expired former
+        # operator can get it solely for SAFE_END_COMMANDS, never fresh motion.
         forwarded = payload.model_copy(update={"operator_authorized": True})
         frame = encode("command.request", envelope.robot_id, self.hub._next_seq(), forwarded)
+
+        async def send_bound():
+            # wait_for schedules this on another task: recheck after that
+            # scheduling boundary, not only before constructing the coroutine.
+            if ((not self.can_command(client) and not self.can_end(client, command))
+                    or self.hub.robots.get(robot_id) is not session
+                    or session.websocket is not entry.robot_websocket):
+                return False
+            await entry.robot_websocket.send_text(frame)
+            return True
+
         try:
-            if command in {"teleop_start", "teleop_stop"}:
-                await asyncio.wait_for(entry.robot_websocket.send_text(frame),
-                    timeout=max(.001, min(.3, self.hub.settings.teleop_send_timeout_s)))
+            if command in {"teleop_start", "teleop_stop"} | MOTION_COMMANDS:
+                sent = await asyncio.wait_for(send_bound(),
+                    timeout=(max(.001, self.ack_timeout_s) if command in MOTION_COMMANDS
+                             else max(.001, min(.3, self.hub.settings.teleop_send_timeout_s))))
+                if not sent:
+                    if command in {"teleop_start", "teleop_stop"}:
+                        self.teleop.terminal(entry)
+                    self.lease.release_client(client)
+                    detail = "Command authority or robot connection changed before publication; command was not sent."
+                    self._reject(robot_id, command_id, detail)
+                    await self._finish(entry, "rejected", detail)
+                    return
                 if session.websocket is not entry.robot_websocket or self.hub.robots.get(robot_id) is not session:
                     raise ConnectionError("robot session changed during publication")
             else:
                 await session.websocket.send_text(frame)
+        except asyncio.CancelledError:
+            # Cancellation of this Python task says nothing about whether the
+            # remote action received its request. Do not leave a sent goal
+            # running without cancellation or release its retained ownership.
+            if command in MOTION_COMMANDS:
+                await self._motion_uncertain(entry, "Motion publication was interrupted; its outcome is unknown.")
+            elif command in {"teleop_start", "teleop_stop"}:
+                await self.teleop.revoke(robot_id, "Manual publication was interrupted.")
+                await self._mark_uncertain(entry, "Manual publication was interrupted; no physical stop is confirmed.")
+            raise
         except Exception as exc:  # socket died between the check and the send
             log.warning("failed to forward %s to robot: %s", command_id, exc)
-            if command in {"teleop_start", "teleop_stop"}:
+            if command in MOTION_COMMANDS:
+                await self._motion_uncertain(entry, "Motion publication outcome unknown after a send failure.")
+            elif command in {"teleop_start", "teleop_stop"}:
                 await self.teleop.revoke(robot_id, "Manual publication outcome unknown.", issue_stop=False)
                 await self._mark_uncertain(entry, "Manual publication outcome unknown; no physical stop is confirmed. Wait for the robot result or explicitly reset.")
             elif command == "set_lidar_power":
@@ -329,7 +445,7 @@ class CommandBroker:
         if entry is None or entry.robot_id != session.robot_id:
             log.warning("dropping %s for unknown/closed command", envelope.type)
             return
-        if entry.command in {"teleop_start", "teleop_stop"} and (
+        if entry.command in BOUND_COMMANDS and (
                 entry.robot_session is not session or entry.robot_websocket is not session.websocket
                 or self.hub.robots.get(session.robot_id) is not session):
             return
@@ -341,6 +457,7 @@ class CommandBroker:
             if entry.command == "teleop_start" and payload.accepted:
                 if (owner and owner.command_id == entry.command_id and owner.phase in {"pending", "active"}
                         and self.teleop.bound(owner) and self.teleop.owns_lease(owner)
+                        and self.can_command(owner.client)
                         and gates.teleop_reason(session.state) is None):
                     if owner.phase == "pending":
                         owner.last_frame = time.monotonic()
@@ -358,6 +475,9 @@ class CommandBroker:
         elif isinstance(payload, CommandProgressData):
             self.hub.publish("command.progress", session.robot_id, payload)
         elif isinstance(payload, CommandResultData):
+            if entry.command in MOTION_COMMANDS and payload.outcome == "timeout":
+                await self._motion_uncertain(entry, payload.detail or "Robot motion outcome unknown.")
+                return
             self.hub.publish("command.result", session.robot_id, payload)
             if entry.command in {"teleop_start", "teleop_stop"}:
                 if payload.outcome == "timeout":
@@ -487,7 +607,12 @@ class CommandBroker:
 
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)
+        if self.active.get(entry.command_id) is not entry:
+            return
         if not entry.acked:
+            if entry.command in MOTION_COMMANDS:
+                await self._motion_uncertain(entry, "Motion acceptance was not confirmed in time.")
+                return
             if entry.command in {"teleop_start", "teleop_stop"}:
                 await self.teleop.revoke(entry.robot_id, "Manual acceptance unknown.")
                 await self._mark_uncertain(entry, "Manual acceptance unknown; no physical stop confirmed. Wait for a terminal result or explicitly reset.")
@@ -504,6 +629,11 @@ class CommandBroker:
 
     async def _result_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.result_timeout_s)
+        if self.active.get(entry.command_id) is not entry:
+            return
+        if entry.command in MOTION_COMMANDS:
+            await self._motion_uncertain(entry, "Motion did not report a terminal result in time.")
+            return
         if entry.command in {"teleop_start", "teleop_stop"}:
             await self.teleop.revoke(entry.robot_id, "Manual outcome unknown.")
             await self._mark_uncertain(entry, "Manual outcome unknown; no physical stop confirmed. Wait for a terminal result or explicitly reset.")
@@ -519,7 +649,7 @@ class CommandBroker:
 
     async def _mark_uncertain(self, entry: ActiveCommand, detail: str) -> None:
         """Hold ordinary commands; an explicit reset may supersede an unknown result."""
-        if entry.command_id not in self.active:
+        if self.active.get(entry.command_id) is not entry:
             return
         entry.uncertain = True
         if entry.command in {"teleop_start", "teleop_stop"}:
@@ -533,19 +663,23 @@ class CommandBroker:
 
     async def _close_out(self, entry: ActiveCommand, outcome: str, detail: str) -> None:
         """Synthesize a result for a command the robot never resolved."""
-        if entry.command_id not in self.active:
+        if self.active.get(entry.command_id) is not entry:
+            return
+        if entry.command in MOTION_COMMANDS:
+            await self._motion_uncertain(entry, detail)
             return
         if entry.command == "set_lidar_power":
             await self._mark_uncertain(entry, "LiDAR power outcome is unknown. Wait for the robot result; do not retry.")
             return
-        await self._cancel_map(entry)
+        await self._request_cancel(entry)
         self.hub.publish("command.result", entry.robot_id, CommandResultData(
             command_id=entry.command_id, outcome=outcome, detail=detail))
         await self._finish(entry, outcome, detail)
 
     async def _finish(self, entry: ActiveCommand, outcome: str, detail: str) -> None:
-        if self.active.pop(entry.command_id, None) is None:
+        if self.active.get(entry.command_id) is not entry:
             return
+        self.active.pop(entry.command_id)
         if entry.command == "software_reset":
             self.reset_pending.pop(entry.robot_id, None)
         if entry.command == "set_lidar_power":
@@ -562,27 +696,56 @@ class CommandBroker:
             )
         log.info("command %s closed: %s", entry.command_id, outcome)
 
-    async def _cancel_map(self, entry: ActiveCommand) -> None:
-        if entry.command != "set_initial_pose":
+    async def _request_cancel(self, entry: ActiveCommand) -> None:
+        if entry.command not in MOTION_COMMANDS | {"set_initial_pose"} or entry.cancel_requested:
             return
+        entry.cancel_requested = True
         session = self.hub.robots.get(entry.robot_id)
-        if session is not None and session.websocket is not None:
+        if session is None or session.websocket is None:
+            return
+        # Motion always needs its exact publication connection. Legacy map
+        # transactions may lack a stored binding; admitted browser commands do
+        # store one and must never cancel across a replacement connection.
+        if entry.command in MOTION_COMMANDS and entry.robot_session is None:
+            return
+        if ((entry.robot_session is None or session is entry.robot_session)
+                and (entry.robot_websocket is None or session.websocket is entry.robot_websocket)):
             with contextlib.suppress(Exception):
-                await session.websocket.send_text(encode("command.cancel", entry.robot_id,
-                    self.hub._next_seq(), {"command_id": entry.command_id}))
+                await asyncio.wait_for(session.websocket.send_text(encode(
+                    "command.cancel", entry.robot_id, self.hub._next_seq(),
+                    {"command_id": entry.command_id})), timeout=max(.001,
+                    min(.3, getattr(self.hub.settings, "teleop_send_timeout_s", .3))))
+
+    async def _motion_uncertain(self, entry: ActiveCommand, detail: str) -> None:
+        if self.active.get(entry.command_id) is not entry:
+            return
+        first = not entry.uncertain
+        entry.uncertain = True  # establish the barrier before cancellation yields
+        entry.cancel_timers()
+        await self._request_cancel(entry)
+        if first:
+            await self._mark_uncertain(entry, detail +
+                " Cancellation requested; no physical stop is confirmed. Wait for a terminal result or explicitly reset.")
+
+    async def robot_disconnected(self, session: "RobotSession") -> None:
+        for entry in list(self.active.values()):
+            if entry.robot_session is session and entry.command in MOTION_COMMANDS:
+                await self._motion_uncertain(entry, "Robot connection lost; motion outcome unknown.")
 
     async def cancel_for_client(self, client: Any) -> None:
         for robot_id, owner in list(self.teleop.owners.items()):
             if owner.client is client:
                 await self.teleop.revoke(robot_id, "Manual input producer disconnected.")
         for entry in list(self.active.values()):
-            if entry.initiator is client:
-                await self._cancel_map(entry)
+            # Autonomous goals outlive their browser; keep both their ownership
+            # and timeout supervision. Map localization is a browser transaction.
+            if entry.initiator is client and entry.command == "set_initial_pose":
+                await self._request_cancel(entry)
 
     async def shutdown(self) -> None:
         await self.teleop.shutdown()
         for entry in list(self.active.values()):
-            await self._cancel_map(entry)
+            await self._request_cancel(entry)
             entry.cancel_timers()
             for timer in entry.timers:
                 with contextlib.suppress(asyncio.CancelledError):

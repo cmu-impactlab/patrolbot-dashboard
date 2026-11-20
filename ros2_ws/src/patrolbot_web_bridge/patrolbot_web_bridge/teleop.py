@@ -128,29 +128,6 @@ def parse_runtime_policy(raw, *, now: float, hard_linear: float,
     return RuntimePolicy(linear, angular, generation, True), None
 
 
-
-def policy_source(node, policy: Callable | None = None,
-                  policy_required: bool | None = None) -> tuple[Callable | None, bool]:
-    """Resolve the trusted policy callable and whether one is required.
-
-    An explicit argument always wins. Otherwise the trusted robot adapter is
-    read from ``node._tuning`` (``teleop_policy()`` plus its ``policy_required``
-    property), which the parent wires to the real adapter. Nothing here is ever
-    read from a browser frame, a query string or a filename.
-    """
-    if policy is None or policy_required is None:
-        tuning = getattr(node, "_tuning", None)
-        if tuning is not None:
-            if policy is None:
-                candidate = getattr(tuning, "teleop_policy", None)
-                policy = candidate if callable(candidate) else None
-            if policy_required is None:
-                policy_required = bool(getattr(tuning, "policy_required", False))
-    if policy_required is None:
-        policy_required = False
-    return policy, bool(policy_required)
-
-
 def read_contract() -> dict:
     """Load the reviewed, packaged robot/dashboard wire contract."""
     path = Path(__file__).resolve().parent.parent / "config/web_teleop.json"

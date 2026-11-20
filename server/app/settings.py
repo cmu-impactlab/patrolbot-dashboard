@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,8 +29,9 @@ class Settings(BaseSettings):
     battery_critical_percent: float = 10.0
     battery_cutoff_voltage: float = 22.0
 
-    event_limit: int = 5000
-    battery_history_days: int = 7
+    # Global persisted history bounds, pruned when the next event/sample arrives.
+    event_limit: int = Field(default=5000, ge=1)
+    battery_history_days: int = Field(default=7, ge=1)
 
     # Seconds a robot may sit still while it has an active destination before
     # the dashboard flags it as stuck.

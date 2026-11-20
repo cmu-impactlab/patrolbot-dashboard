@@ -123,6 +123,9 @@ class BrowserClient:
                  source_ip: str | None = None) -> None:
         self.websocket = websocket
         self.user = user  # authentication.local.User (identity + role)
+        # A server-only receipt of verified command authority, never a source
+        # of fresh motion permission. This permits only safe end-input cleanup.
+        self.end_input_authorized = bool(getattr(user, "can_command", False))
         self.source_ip = source_ip
         self.connected = True
         self._queue: deque[tuple[str, bool]] = deque()
@@ -273,6 +276,7 @@ class TelemetryHub:
     async def robot_connected(self, robot_id: str, websocket: WebSocket) -> RobotSession:
         previous = self.get_or_create_state(robot_id)
         self._tuning_disconnected(previous)
+        await self.commands.robot_disconnected(previous)
         previous.state.motion.data = None
         previous.state.motion.received_mono = None
         await self.commands.teleop.revoke(robot_id, "Robot connection replaced.")
@@ -292,6 +296,7 @@ class TelemetryHub:
 
     async def robot_disconnected(self, session: RobotSession, websocket: WebSocket) -> None:
         if self.robots.get(session.robot_id) is session and session.websocket is websocket:
+            await self.commands.robot_disconnected(session)
             await self.commands.teleop.revoke(session.robot_id, "Robot disconnected; manual outcome unknown.")
             session.websocket = None
             session.state.last_heartbeat_mono = None

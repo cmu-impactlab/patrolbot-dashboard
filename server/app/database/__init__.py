@@ -16,7 +16,9 @@ def create_database(settings: Settings):
     if settings.database_url.startswith(("postgres://", "postgresql://")):
         from .pg import PostgresDatabase
 
-        return PostgresDatabase(settings.database_url)
+        return PostgresDatabase(settings.database_url, event_limit=settings.event_limit,
+                                battery_history_days=settings.battery_history_days)
     from .repo import Database
 
-    return Database(settings.database_path)
+    return Database(settings.database_path, event_limit=settings.event_limit,
+                    battery_history_days=settings.battery_history_days)

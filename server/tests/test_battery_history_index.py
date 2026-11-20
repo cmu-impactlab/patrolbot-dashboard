@@ -4,17 +4,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.database.repo import Database
+from app.database.repo import (
+    BATTERY_HISTORY_SQL, BATTERY_RETENTION_SQL, Database, _DAY_US, _timestamp_us,
+)
 
 
-@pytest.mark.parametrize("query", [
-    "DELETE FROM battery_samples WHERE ts < datetime('now', '-7 days')",
-    "SELECT ts, voltage, percentage, current, charging FROM battery_samples "
-    "WHERE ts >= datetime('now', '-120 minutes') ORDER BY ts DESC LIMIT 2000",
+@pytest.mark.parametrize("query,params", [
+    (BATTERY_RETENTION_SQL, (_timestamp_us("2026-11-19T23:00:00Z") - 7 * _DAY_US,)),
+    (BATTERY_HISTORY_SQL, (_timestamp_us("2026-11-19T21:00:00Z"), 2000)),
 ])
-async def test_existing_history_uses_time_ranges_without_losing_rows(tmp_path, query):
+async def test_existing_history_uses_time_ranges_without_losing_rows(tmp_path, monkeypatch, query, params):
     path = tmp_path / "legacy.db"
-    now = datetime.now(timezone.utc)
+    now = datetime(2026, 11, 19, 23, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.database.repo._now_us", lambda: _timestamp_us(now.isoformat()))
     recent = [("r1", (now - timedelta(minutes=10)).isoformat(), 24.0),
               ("r2", (now - timedelta(minutes=20)).isoformat(), 25.0)]
     rows = [("r1", (now - timedelta(days=8)).isoformat(), 23.0), *recent]
@@ -36,8 +38,11 @@ async def test_existing_history_uses_time_ranges_without_losing_rows(tmp_path, q
             with sqlite3.connect(path) as connection:
                 assert connection.execute(
                     "SELECT robot_id, ts, voltage FROM battery_samples ORDER BY id").fetchall() == rows
-                plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + query)]
-            assert any("SEARCH battery_samples" in step and "ts" in step for step in plan), plan
+                normalized = connection.execute(
+                    "SELECT ts_utc FROM battery_samples ORDER BY id").fetchall()
+                assert normalized == [(_timestamp_us(row[1]),) for row in rows]
+                plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + query, params)]
+            assert any("SEARCH battery_samples" in step and "idx_battery_time_utc" in step for step in plan), plan
             assert not any("TEMP B-TREE" in step for step in plan), plan
             history = await database.get_battery_history()
             assert {row["voltage"] for row in history} == {24.0, 25.0}

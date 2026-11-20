@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 import aiosqlite
@@ -23,6 +24,37 @@ log = logging.getLogger("database")
 # overhead is negligible, small enough that one page is never a memory problem
 # even when every row is a lidar scan (~3 KB).
 SAMPLE_PAGE = 2000
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MINUTE_US = 60 * 1_000_000
+_DAY_US = 24 * 60 * _MINUTE_US
+
+
+def _timestamp_us(value: str) -> int:
+    """Exact UTC microseconds; legacy timezone-less SQLite dates mean UTC.
+
+    Keep the original text for the API, but never compare it as a time. Integer
+    arithmetic avoids float rounding at window/retention boundaries.
+    """
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    delta = parsed.astimezone(timezone.utc) - _EPOCH
+    return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _now_us() -> int:
+    return _timestamp_us(datetime.now(timezone.utc).isoformat())
+
+
+def _validate_retention(event_limit: int, battery_history_days: int) -> None:
+    if event_limit < 1 or battery_history_days < 1:
+        raise ValueError("event_limit and battery_history_days must be positive")
+
+
+BATTERY_HISTORY_SQL = (
+    "SELECT ts, voltage, percentage, current, charging FROM battery_samples "
+    "WHERE ts_utc >= ? ORDER BY ts_utc DESC, id DESC LIMIT ?")
+BATTERY_RETENTION_SQL = "DELETE FROM battery_samples WHERE ts_utc < ?"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -58,6 +90,7 @@ CREATE TABLE IF NOT EXISTS battery_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     robot_id TEXT NOT NULL,
     ts TEXT NOT NULL,
+    ts_utc INTEGER,
     voltage REAL NOT NULL,
     percentage REAL,
     current REAL,
@@ -109,8 +142,12 @@ CREATE INDEX IF NOT EXISTS idx_samples_rec ON recording_samples(recording_id, id
 
 
 class Database:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, event_limit: int = 5000,
+                 battery_history_days: int = 7) -> None:
+        _validate_retention(event_limit, battery_history_days)
         self.path = path
+        self.event_limit = event_limit
+        self.battery_history_days = battery_history_days
         self._db: aiosqlite.Connection | None = None
 
     async def init(self) -> None:
@@ -145,6 +182,7 @@ class Database:
             if column not in audit_columns:
                 await self._db.execute(
                     f"ALTER TABLE command_audit ADD COLUMN {column} {decl}")
+        await self._migrate_battery_timestamps()
         await self._db.execute(
             "INSERT OR IGNORE INTO users (id, username, display_name) VALUES (1, 'local', 'Local Operator')"
         )
@@ -158,6 +196,52 @@ class Database:
                 (name, json.dumps(layout)),
             )
         await self._db.commit()
+
+    async def _migrate_battery_timestamps(self) -> None:
+        """Add/backfill an indexed UTC key without rewriting or deleting data.
+
+        A savepoint makes schema, backfill and index changes atomic even when
+        another startup migration has already opened a transaction. Unknown
+        legacy formats remain NULL: neither history nor retention may guess
+        their age. Retrying startup is safe, including after a rollback.
+        """
+        await self.db.execute("SAVEPOINT battery_timestamp_migration")
+        try:
+            async with self.db.execute("PRAGMA table_info(battery_samples)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+            if "ts_utc" not in columns:
+                await self.db.execute("ALTER TABLE battery_samples ADD COLUMN ts_utc INTEGER")
+            after_id = None
+            invalid = 0
+            while True:
+                async with self.db.execute(
+                    "SELECT id, ts FROM battery_samples WHERE ts_utc IS NULL "
+                    + ("AND id > ? " if after_id is not None else "")
+                    + "ORDER BY id LIMIT ?",
+                    (after_id, SAMPLE_PAGE) if after_id is not None else (SAMPLE_PAGE,)
+                ) as cur:
+                    rows = await cur.fetchall()
+                if not rows:
+                    break
+                updates = []
+                for row in rows:
+                    try:
+                        updates.append((_timestamp_us(row["ts"]), row["id"]))
+                    except (TypeError, ValueError, OverflowError):
+                        invalid += 1
+                await self.db.executemany(
+                    "UPDATE battery_samples SET ts_utc = ? WHERE id = ?", updates)
+                after_id = rows[-1]["id"]
+            await self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_battery_time_utc ON battery_samples(ts_utc, id)")
+            await self.db.execute("RELEASE SAVEPOINT battery_timestamp_migration")
+        except BaseException:
+            await self.db.execute("ROLLBACK TO SAVEPOINT battery_timestamp_migration")
+            await self.db.execute("RELEASE SAVEPOINT battery_timestamp_migration")
+            raise
+        if invalid:
+            log.warning("preserved %d battery sample(s) with unparseable timestamps; "
+                        "excluded from time queries and retention", invalid)
 
     async def _migrate_events_primary_key(self) -> None:
         """Rebuild events with PRIMARY KEY (robot_id, id) if it predates it.
@@ -275,11 +359,12 @@ class Database:
             (event.id, robot_id, event.ts, event.severity, event.title, event.message),
         )
         # Retention by rowid, not by id: with more than one robot, "id not in
-        # the newest 5000 ids" would delete a second robot's rows whenever
+        # the newest ids" would delete a second robot's rows whenever
         # their ids happened to fall outside the window.
         await self.db.execute(
             "DELETE FROM events WHERE rowid NOT IN "
-            "(SELECT rowid FROM events ORDER BY id DESC LIMIT 5000)"
+            "(SELECT rowid FROM events ORDER BY id DESC, robot_id DESC LIMIT ?)",
+            (self.event_limit,),
         )
         await self.db.commit()
 
@@ -293,20 +378,22 @@ class Database:
 
     async def add_battery_sample(self, robot_id: str, ts: str, voltage: float,
                                  percentage: float | None, current: float | None, charging: bool) -> None:
+        ts_utc = _timestamp_us(ts)
         await self.db.execute(
-            "INSERT INTO battery_samples (robot_id, ts, voltage, percentage, current, charging) VALUES (?,?,?,?,?,?)",
-            (robot_id, ts, voltage, percentage, current, int(charging)),
+            "INSERT INTO battery_samples (robot_id, ts, ts_utc, voltage, percentage, current, charging) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (robot_id, ts, ts_utc, voltage, percentage, current, int(charging)),
         )
         await self.db.execute(
-            "DELETE FROM battery_samples WHERE ts < datetime('now', '-7 days')"
+            BATTERY_RETENTION_SQL,
+            (_now_us() - self.battery_history_days * _DAY_US,),
         )
         await self.db.commit()
 
     async def get_battery_history(self, minutes: int = 120, limit: int = 2000) -> list[dict[str, Any]]:
         async with self.db.execute(
-            "SELECT ts, voltage, percentage, current, charging FROM battery_samples "
-            "WHERE ts >= datetime('now', ?) ORDER BY ts DESC LIMIT ?",
-            (f"-{minutes} minutes", limit),
+            BATTERY_HISTORY_SQL,
+            (_now_us() - minutes * _MINUTE_US, limit),
         ) as cur:
             rows = [dict(row) for row in await cur.fetchall()]
         rows.reverse()

@@ -2,8 +2,12 @@
 
 ROS callbacks hand envelopes over via a thread-safe enqueue; a sender task
 drains the queue. Reconnects with jittered exponential backoff and re-runs
-the hello handshake on every new session. Drop-oldest under back-pressure,
-except hello/map frames which must always land.
+the hello handshake on every new session. Telemetry yields to command lifecycle,
+hello, map and tuning replies. Protected-only saturation invalidates the socket
+and latches a fault until supervised bridge recovery; delivery is then unknown,
+never silently assumed successful. Only command lifecycle replies may survive
+an ordinary reconnect for reconciliation; measurements, capability updates and
+tuning RPCs never replay as fresh observations on another socket.
 """
 from __future__ import annotations
 
@@ -23,12 +27,16 @@ import websockets
 
 log = logging.getLogger("web_bridge.ws")
 
-PROTECTED_TYPES = {"robot.hello", "telemetry.map", "tuning.response"}
+COMMAND_REPLY_TYPES = {"command.ack", "command.progress", "command.result"}
+PROTECTED_TYPES = {"robot.hello", "telemetry.map", "tuning.response"} | COMMAND_REPLY_TYPES
 QUEUE_LIMIT = 256
 
-# JSON markers used by send() to spare protected frames from back-pressure
-# eviction. Kept in one place so a protected type is never half-protected.
-_PROTECTED_MARKERS = tuple(f'"{type_}"' for type_ in PROTECTED_TYPES)
+# send() owns the compact envelope prefix. Match only its top-level type, never
+# a type-looking string or nested object in an otherwise disposable payload.
+_PROTECTED_PREFIXES = tuple(
+    f'{{"version":1,"type":"{type_}",' for type_ in PROTECTED_TYPES)
+_COMMAND_REPLY_PREFIXES = tuple(
+    f'{{"version":1,"type":"{type_}",' for type_ in COMMAND_REPLY_TYPES)
 
 
 def utc_now() -> str:
@@ -89,8 +97,11 @@ class WsClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wake: asyncio.Event | None = None
         self._stop = threading.Event()
+        self._failed = threading.Event()
+        self._runner: asyncio.Task | None = None
         self._thread = threading.Thread(target=self._run_thread, name="ws-client", daemon=True)
-        self.stats = {"sent": 0, "dropped": 0, "reconnects": 0, "last_connect_mono": 0.0}
+        self.stats = {"sent": 0, "dropped": 0, "reconnects": 0, "last_connect_mono": 0.0,
+                      "overflow_failures": 0}
 
     # -- public API (called from ROS executor threads) ------------------------
 
@@ -99,12 +110,20 @@ class WsClient:
 
     def stop(self) -> None:
         self._stop.set()
-        if self._loop is not None:
-            # The loop may already be closed if the thread exited on its own;
-            # raising here would bury whatever actually killed it.
+        self._cancel_worker()
+        if self._thread.ident is not None and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=5)
+
+    def _cancel_worker(self) -> None:
+        """Interrupt reads, sends and reconnect backoff, not just an idle sender."""
+        loop = self._loop
+        if loop is not None:
             with contextlib.suppress(RuntimeError):
-                self._loop.call_soon_threadsafe(lambda: None)
-        self._thread.join(timeout=5)
+                loop.call_soon_threadsafe(self._cancel_running_task)
+
+    def _cancel_running_task(self) -> None:
+        if self._runner is not None:
+            self._runner.cancel()
 
     def capabilities(self) -> list[str]:
         return BASE_CAPABILITIES + list(self._dock_capabilities)
@@ -132,27 +151,53 @@ class WsClient:
         })
         self._capabilities_dirty = False
 
-    def send(self, type_: str, data: dict) -> None:
-        if type_ in {"tuning.response", "telemetry.motion"} and not self.connected.is_set():
-            return  # A measurement/RPC result must never replay on a new socket.
+    def send(self, type_: str, data: dict) -> bool:
+        """Queue delivery, or return False on discard/fault (not a delivery ack)."""
+        overflow = False
         with self._lock:
+            if self._stop.is_set() or self._failed.is_set():
+                self.stats["dropped"] += 1
+                return False
+            if type_ not in COMMAND_REPLY_TYPES and not self.connected.is_set():
+                # A measurement/RPC result must never replay on a new socket.
+                # Fresh hello/map state is built by the reconnect handshake.
+                self.stats["dropped"] += 1
+                return False
             self.sequence += 1
             frame = json.dumps({
                 "version": 1, "type": type_, "robot_id": self.robot_id,
                 "sequence": self.sequence, "timestamp": utc_now(), "data": data,
             }, separators=(",", ":"), default=_json_default)
             if len(self._queue) >= QUEUE_LIMIT:
-                # Drop the oldest unprotected frame; give up only if the queue
-                # is somehow all-protected.
+                # Telemetry must never displace an ack/progress/terminal result.
                 for index, queued in enumerate(self._queue):
-                    if not any(marker in queued for marker in _PROTECTED_MARKERS):
+                    if not queued.startswith(_PROTECTED_PREFIXES):
                         del self._queue[index]
                         self.stats["dropped"] += 1
                         break
                 else:
                     self.stats["dropped"] += 1
-                    return  # Bounded even if every queued frame is protected.
-            self._queue.append(frame)
+                    if type_ not in PROTECTED_TYPES:
+                        return False
+                    # No bounded queue can guarantee delivery indefinitely. Make
+                    # loss explicit by retiring the entire transport, not one
+                    # terminal reply. No automatic reconnect/replay can hide it.
+                    self._failed.set()
+                    self.connected.clear()
+                    self.connection_generation += 1
+                    self.stats["overflow_failures"] += 1
+                    self.stats["dropped"] += len(self._queue)
+                    self._queue.clear()
+                    overflow = True
+            if not overflow:
+                self._queue.append(frame)
+        if overflow:
+            log.critical("protected outbound queue saturated; command delivery is unknown. "
+                         "Transport disabled; supervised bridge recovery is required.")
+            # Disconnect callbacks run on the worker, not here: send() can be
+            # called while the tuning adapter holds its non-reentrant input lock.
+            self._cancel_worker()
+            return False
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None:
             # A send racing a shutdown must not propagate into the ROS
@@ -160,27 +205,35 @@ class WsClient:
             # queued, and there is nothing left to wake.
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(wake.set)
+        return True
 
     # -- internals -------------------------------------------------------------
 
     def _run_thread(self) -> None:
-        asyncio.run(self._run())
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(self._run())
 
     async def _run(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._runner = asyncio.current_task()
         self._wake = asyncio.Event()
         retry = 0
-        while not self._stop.is_set():
-            try:
-                await self._session()
-                retry = 0
-            except (OSError, websockets.WebSocketException, RuntimeError) as exc:
-                self.connected.clear()
-                delay = min(8.0, 0.5 * (2 ** retry)) * (1.0 + random.random() * 0.3)
-                retry += 1
-                self.stats["reconnects"] += 1
-                log.warning("connection lost (%s); retrying in %.1f s", exc, delay)
-                await asyncio.sleep(delay)
+        try:
+            while not self._stop.is_set() and not self._failed.is_set():
+                try:
+                    await self._session()
+                    retry = 0
+                except (OSError, websockets.WebSocketException, RuntimeError) as exc:
+                    if self._stop.is_set() or self._failed.is_set():
+                        break
+                    delay = min(8.0, 0.5 * (2 ** retry)) * (1.0 + random.random() * 0.3)
+                    retry += 1
+                    self.stats["reconnects"] += 1
+                    log.warning("connection lost (%s); retrying in %.1f s", exc, delay)
+                    await asyncio.sleep(delay)
+        finally:
+            self.connected.clear()
+            self._runner = self._wake = self._loop = None
 
     def _connect(self):
         """Open the socket with the token in the Authorization header.
@@ -212,7 +265,8 @@ class WsClient:
         return "additional_headers"
 
     async def _session(self) -> None:
-        self.connection_generation += 1
+        with self._lock:
+            self.connection_generation += 1
         async with self._connect() as ws:
             hello = json.dumps({
                 "version": 1, "type": "robot.hello", "robot_id": self.robot_id,
@@ -231,7 +285,10 @@ class WsClient:
             # The hello just sent carries the current capability list, so any
             # pending announce is now satisfied.
             self._capabilities_dirty = False
-            self.connected.set()
+            with self._lock:
+                if self._stop.is_set() or self._failed.is_set():
+                    return
+                self.connected.set()
             self.stats["last_connect_mono"] = time.monotonic()
             log.info("connected to %s", self.server_url)
             if ack.get("data", {}).get("want_map", True):
@@ -239,37 +296,48 @@ class WsClient:
 
             reader = asyncio.create_task(self._drain_incoming(ws))
             try:
-                while not self._stop.is_set():
+                while not self._stop.is_set() and not self._failed.is_set():
                     if reader.done():
                         await reader
                         raise ConnectionError("robot socket reader ended")
                     frame = None
+                    self._wake.clear()
                     with self._lock:
                         if self._queue:
-                            frame = self._queue.popleft()
+                            frame = self._queue[0]
                     if frame is None:
-                        self._wake.clear()
                         try:
                             await asyncio.wait_for(self._wake.wait(), timeout=1.0)
                         except asyncio.TimeoutError:
                             pass
                         continue
                     await ws.send(frame)
+                    with self._lock:
+                        # Retain protected replies until send succeeds, including
+                        # across an ambiguous socket failure. A producer may have
+                        # evicted an in-flight telemetry head, never a reply.
+                        if self._queue and self._queue[0] == frame:
+                            self._queue.popleft()
                     self.stats["sent"] += 1
             finally:
-                self.connected.clear()
                 with self._lock:
+                    self.connected.clear()
+                    self.connection_generation += 1
+                    previous_size = len(self._queue)
                     self._queue = deque(frame for frame in self._queue
-                        if '"tuning.response"' not in frame and '"telemetry.motion"' not in frame)
-                self.connection_generation += 1
-                if self.on_disconnect is not None:
-                    self.on_disconnect()
+                                        if frame.startswith(_COMMAND_REPLY_PREFIXES))
+                    self.stats["dropped"] += previous_size - len(self._queue)
                 reader.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await reader
+                try:
+                    if self.on_disconnect is not None:
+                        self.on_disconnect()
+                finally:
+                    await asyncio.gather(reader, return_exceptions=True)
 
     async def _drain_incoming(self, ws) -> None:
         async for message in ws:
+            if self._stop.is_set() or self._failed.is_set():
+                return
             try:
                 frame = json.loads(message)
             except json.JSONDecodeError:

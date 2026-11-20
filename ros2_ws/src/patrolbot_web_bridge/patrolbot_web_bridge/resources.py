@@ -1,8 +1,6 @@
 """Raspberry Pi resource sampling (psutil + sysfs)."""
 from __future__ import annotations
 
-import os
-
 
 def sample() -> dict:
     try:
@@ -50,11 +48,3 @@ def _wifi_dbm() -> int | None:
     except (OSError, ValueError):
         pass
     return None
-
-
-def is_raspberry_pi() -> bool:
-    try:
-        with open("/proc/device-tree/model") as f:
-            return "raspberry" in f.read().lower()
-    except OSError:
-        return os.uname().machine.startswith("aarch64")
