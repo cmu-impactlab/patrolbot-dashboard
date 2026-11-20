@@ -132,7 +132,8 @@ class TeleopController:
         async def bounded_send():
             async with owner.send_lock:
                 if (not self.bound(owner) or
-                        (payload.deadman and (owner.phase != "active" or not self.owns_lease(owner)))):
+                        (payload.deadman and (owner.phase != "active" or not self.owns_lease(owner)
+                                             or not self.broker.can_command(owner.client)))):
                     return False
                 await owner.websocket.send_text(encode(
                     "teleop.velocity", owner.session.robot_id, self.hub._next_seq(),
@@ -148,9 +149,12 @@ class TeleopController:
         owner = self.owners.get(envelope.robot_id)
         # Invalid spam is deliberately neither broadcast nor written per frame.
         if (owner is None or owner.client is not client
-                or not getattr(getattr(client, "user", None), "can_command", False)
                 or owner.command_id != payload.command_id or payload.seq <= owner.seq
                 or not self.bound(owner) or not self.owns_lease(owner)):
+            return False
+        if payload.deadman and not self.broker.can_command(client):
+            await self.revoke(envelope.robot_id, "Manual authority expired or was revoked.")
+            self.broker.lease.release_client(client)
             return False
         try:
             stamp = datetime.fromisoformat(envelope.timestamp.replace("Z", "+00:00"))
@@ -187,7 +191,8 @@ class TeleopController:
                     max(1, self.hub.settings.teleop_frames_per_s)):
                 return False
             owner.frame_times.append(now)
-        # Releases bypass rate/hardware/ack/closing barriers, not identity,
+        # Releases bypass credential expiry and rate/hardware/ack/closing
+        # barriers, not the exact previously-authorized producer identity,
         # freshness, sequence or lease checks. Never turn a zero into motion —
         # and a release must always reach the robot even when the runtime policy
         # itself has gone missing or stale.
@@ -205,6 +210,11 @@ class TeleopController:
         owner = self.owners.get(robot_id)
         if owner is None:
             return
+        if not self.broker.can_command(owner.client):
+            # Zero publication itself does not require a live lease. Release
+            # expired authority on every cleanup path, including late ACKs and
+            # explicit deadman releases, not just the periodic watchdog.
+            self.broker.lease.release_client(owner.client)
         first = owner.phase in {"pending", "active"}
         if owner.phase != "unknown":
             owner.phase = "closing"
@@ -244,6 +254,10 @@ class TeleopController:
     async def changed(self, session):
         owner = self.owners.get(session.robot_id)
         if owner and owner.phase in {"active", "pending"}:
+            if not self.broker.can_command(owner.client):
+                await self.revoke(session.robot_id, "Manual authority expired or was revoked.")
+                self.broker.lease.release_client(owner.client)
+                return
             reason = teleop_reason(session.state)
             if not self.bound(owner) or not self.owns_lease(owner) or reason:
                 await self.revoke(session.robot_id, reason or "Manual session connection or lease changed.")

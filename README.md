@@ -248,12 +248,12 @@ with `npm ci`.
 Two features are named here because someone will look for them. Neither is a
 half-finished control you can press:
 
-- **Camera and gimbal.** No camera stream, no gimbal control, and no video
+- **Camera.** No camera stream and no video
   recording. `"video"` is reserved as a recording channel name so the
   Recordings widget can advertise it as coming later
-  (`server/app/recordings/recorder.py`), and the checkbox stays disabled. A
-  server-side gimbal control-authority prototype was removed in the meantime;
-  it will be reintroduced with the camera work rather than kept unwired.
+  (`server/app/recordings/recorder.py`), and the checkbox stays disabled.
+  This robot has no gimbal hardware; unsupported robot-side code and deployment
+  wiring are removed rather than reserved as a future control.
 - **Automatic docking.** There is no `dock` command. The robot has no dock-in
   path — its ROS graph offers `/patrolbot/undock` and
   `/patrolbot/hardware_undock` and nothing to drive back onto the charger

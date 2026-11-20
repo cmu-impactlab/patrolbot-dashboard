@@ -126,9 +126,6 @@ class RobotState:
 
     # -- event helpers -------------------------------------------------------
 
-    def seed_event_id(self, next_id: int) -> None:
-        self.event_ids.seed(next_id)
-
     def add_event(self, severity: str, title: str, message: str) -> EventData:
         event = EventData(id=self.event_ids.allocate(), ts=utc_now(),
                           severity=severity, title=title, message=message)

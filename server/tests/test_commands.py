@@ -178,7 +178,7 @@ def test_ack_timeout_synthesizes_result(client):
     assert audit[0]["outcome"] == "timeout"
 
 
-def test_late_reply_after_close_is_dropped(client):
+def test_late_terminal_reply_resolves_timed_out_motion(client):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
         robot.send_text(hello_frame())
         robot.receive_text()
@@ -188,18 +188,17 @@ def test_late_reply_after_close_is_dropped(client):
             client.app.state.hub.commands.ack_timeout_s = 0.2
             command_id, frame = request_frame()
             ui.send_text(frame)
-            recv_until(ui, "command.result")  # timeout closed it
-            # Late robot result must not reach browsers or reopen the command.
+            recv_until(ui, "command.result")  # local timeout retains ownership
+            assert command_id in client.app.state.hub.commands.active
             robot.send_text(encode("command.result", "patrolbot-01", 9,
                                    {"command_id": command_id, "outcome": "succeeded"}))
-            robot.send_text(encode("telemetry.pose", "patrolbot-01", 10, {
-                "x": 0.0, "y": 0.0, "yaw": 0.0, "linear_velocity": 0.0, "angular_velocity": 0.0,
-            }))
-            for _ in range(50):
-                frame_in = json.loads(ui.receive_text())
-                assert frame_in["type"] != "command.result"
-                if frame_in["type"] == "telemetry.pose":
-                    break
+            result = recv_until(ui, "command.result")
+            assert result["data"]["outcome"] == "succeeded"
+            assert command_id not in client.app.state.hub.commands.active
+
+    audit = client.get("/api/commands").json()
+    assert audit[0]["command_id"] == command_id
+    assert audit[0]["outcome"] == "succeeded"
 
 
 # -- Roles & single-operator lease -----------------------------------------
@@ -207,7 +206,8 @@ def test_late_reply_after_close_is_dropped(client):
 def _oidc_client(tmp_path) -> TestClient:
     """OIDC-mode app so /ws/ui resolves a real signed session (role-bearing)."""
     settings = Settings(robot_token="test-token", database_path=str(tmp_path / "t.db"),
-                        auth_mode="oidc", session_secret="s3cret")
+                        auth_mode="oidc", session_secret="s3cret",
+                        operator_usernames="driver,alice,bob")
     return TestClient(create_app(settings))
 
 
@@ -320,9 +320,12 @@ def test_lease_released_on_disconnect(tmp_path):
         try:
             with client.websocket_connect("/ws/ui", headers=_cookie("operator", 2, "alice")) as ui1:
                 ui1.receive_text()
-                _, f1 = _cmd_frame()
+                first_id, f1 = _cmd_frame()
                 ui1.send_text(f1)
                 robot.receive_text()  # alice holds lease
+                robot.send_text(encode("command.result", "patrolbot-01", 3,
+                    {"command_id": first_id, "outcome": "succeeded"}))
+                recv_until(ui1, "command.result")
             # alice disconnected -> lease freed
 
             with client.websocket_connect("/ws/ui", headers=_cookie("operator", 3, "bob")) as ui2:
@@ -510,7 +513,8 @@ def test_robot_reconnect_does_not_replay_command(client):
             robot.send_text(encode("command.ack", "patrolbot-01", 3,
                                    {"command_id": old_id, "accepted": True}))
             recv_until(ui, "command.ack")
-    # Robot socket dropped. Reconnect: the server must NOT resend the old goal.
+    # Robot socket dropped. Reconnect must neither resend the old goal nor
+    # permit a new one to overwrite its unknown ownership.
     with client.websocket_connect("/ws/robot?token=test-token") as robot2:
         robot2.send_text(hello_frame())
         robot2.receive_text()  # hello_ack only
@@ -519,10 +523,10 @@ def test_robot_reconnect_does_not_replay_command(client):
             ui2.receive_text()
             new_id, frame2 = request_frame(goal={"map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": None})
             ui2.send_text(frame2)
-            forwarded = json.loads(robot2.receive_text())
-            # The first frame the reconnected robot receives is the NEW command,
-            # proving the prior goal was not auto-replayed on reconnect.
-            assert forwarded["data"]["command_id"] == new_id
+            ack = recv_until(ui2, "command.ack")
+            assert not ack["data"]["accepted"]
+            assert "unknown outcome" in ack["data"]["reason"]
+            assert client.app.state.hub.commands.active[old_id].uncertain
 
 
 def _base_state_frame(seq: int, generation: int) -> str:

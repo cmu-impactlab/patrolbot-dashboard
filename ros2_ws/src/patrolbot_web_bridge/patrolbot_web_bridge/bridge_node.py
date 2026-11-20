@@ -516,25 +516,34 @@ class WebBridgeNode(Node):
             self._teleop_release_frame = None
         if invalidate and self._teleop is not None:
             self._teleop.session.end("Dashboard connection changed; manual input ended.", "failed")
+        if (self._system_reset is not None and self._system_reset.commands_blocked
+                and self._teleop is not None and self._teleop.session.active):
+            self._teleop.session.end("Software reset owns input; manual input ended.", "failed")
         while self._command_queue:
             data = self._command_queue.popleft()
+            received = data.pop('_input_received_at', None)
+            if self._reset_reject_command(data, received):
+                continue
             command = data.get("command")
+            stopping = command in {"stop", "motor_disable", "cancel", "cancel_map", "teleop_stop"}
+            generation = data.pop("_ws_generation", None)
+            if not stopping and (generation != self.ws.connection_generation
+                                 or not self.ws.connected.is_set()):
+                self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
+                    "accepted": False, "reason": "Connection changed; submit a new command explicitly."})
+                continue
             if command in {"teleop_start", "teleop_stop"}:
-                generation = data.pop("_ws_generation", None)
                 received_at = data.pop("_received_at", None)
                 if self._teleop is None:
                     self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
                         "accepted": False, "reason": "Web manual input is not enabled on this bridge."})
-                elif generation != self.ws.connection_generation or not self.ws.connected.is_set():
-                    self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
-                        "accepted": False, "reason": "Connection changed; start manual input again explicitly."})
                 else:
                     self._teleop.handle(data, received_at=received_at)
                 continue
             if self._teleop is not None and self._teleop.session.active:
                 if command in {"stop", "motor_disable", "software_reset"}:
                     self._teleop.session.end("Manual input ended by Stop, motor disable or software reset.")
-                else:
+                elif command not in {"cancel", "cancel_map"}:
                     self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
                         "accepted": False, "reason": "End manual drive before sending another robot command."})
                     continue
@@ -549,11 +558,11 @@ class WebBridgeNode(Node):
                     self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
                         "accepted": False, "reason": "Software reset is not commissioned."})
                 else:
+                    # No intent queued before this reset request can become an
+                    # automatic retry/resume, even if the supervisor answers
+                    # before the next command is drained.
+                    self._reset_input_after = time.monotonic()
                     self._system_reset.request(data)
-                continue
-            if self._system_reset is not None and self._system_reset.commands_blocked and data.get("command") != "stop":
-                self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
-                    "accepted": False, "reason": "Software reset is pending or its outcome is unknown."})
                 continue
             current_yaw = None
             if self._latest_amcl is not None:
@@ -572,11 +581,11 @@ class WebBridgeNode(Node):
                                    odom_age)
         if release is not None and self._teleop is not None:
             data, received_at, generation = release
-            if generation == self.ws.connection_generation:
+            if generation == self.ws.connection_generation and self.ws.connected.is_set():
                 self._teleop.session.frame(data, self._teleop_context(), received_at=received_at)
         if sample is not None and self._teleop is not None:
             data, received_at, generation = sample
-            if generation == self.ws.connection_generation:
+            if generation == self.ws.connection_generation and self.ws.connected.is_set():
                 self._teleop.session.frame(data, self._teleop_context(), received_at=received_at)
 
     def _teleop_context(self):
@@ -605,10 +614,27 @@ class WebBridgeNode(Node):
     def _enqueue_command(self, data):
         if not isinstance(data, dict):
             return
+        received = time.monotonic()
+        if self._reset_reject_command(data, received):
+            return
+        data = dict(data, _input_received_at=received,
+                    _ws_generation=self.ws.connection_generation)
         if data.get("command") in {"teleop_start", "teleop_stop"}:
-            data = dict(data, _ws_generation=self.ws.connection_generation,
-                        _received_at=time.monotonic())
+            data = dict(data, _received_at=received)
         self._command_queue.append(data)
+
+    def _reset_reject_command(self, data, received):
+        if data.get("command") in {"stop", "motor_disable", "cancel", "cancel_map", "teleop_stop"}:
+            return False
+        reset = getattr(self, "_system_reset", None)
+        after = getattr(self, "_reset_input_after", 0.)
+        if ((reset is not None and reset.commands_blocked and data.get("command") != "software_reset")
+                or after > 0 and (type(received) not in (int, float) or received <= after)):
+            self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
+                "accepted": False,
+                "reason": "Software reset is pending, unknown, or ended this queued input. Submit a new command explicitly."})
+            return True
+        return False
 
     def _enqueue_teleop(self, frame):
         # Called by the WS thread: no ROS calls and no velocity backlog.

@@ -82,6 +82,31 @@ describe("manual drive isolated software input", () => {
     hold(2000);
     expect(velocity().at(-1)!.linear).toBeCloseTo(.3, 5);
   });
+  it("starts and continues manual drive while recording and receiving passive telemetry", () => {
+    useTelemetryStore.setState({ status: { status: "recording", detail: "Capturing telemetry" } });
+    render(<ManualDrive />); keyboardStart(); ack(); tick();
+    expect(requests("teleop_start")).toHaveLength(1);
+    expect(velocity().at(-1)?.deadman).toBe(true);
+    act(() => useTelemetryStore.setState({ status: { status: "ready", detail: "" } }));
+    hold(160);
+    act(() => useTelemetryStore.setState({ status: { status: "recording", detail: "Recording started during drive" },
+      resources: { cpu_percent: 5, memory_percent: 10, disk_percent: 20 },
+      path: { points: [[0, 0], [1, 1]], goal: { x: 1, y: 1 } } }));
+    hold(160);
+    expect(velocity().at(-1)?.deadman).toBe(true);
+    expect(requests("teleop_stop")).toHaveLength(0);
+  });
+  it.each(["navigation", "undock", "command", "other-tab"])("recording never masks %s motion ownership", owner => {
+    useTelemetryStore.setState({ status: { status: "recording", detail: "" } });
+    if (owner === "navigation") useTelemetryStore.setState({ status: { status: "navigating", detail: "" } });
+    if (owner === "undock") useTelemetryStore.setState({ baseState: { ...base, undock_active: true } });
+    if (owner === "command") useCommandStore.setState({ active: { commandId: "nav", command: "navigate_to_pose",
+      phase: "running", stage: null, distanceRemaining: null } });
+    if (owner === "other-tab") useTeleopStore.setState({ externalBusy: true });
+    render(<ManualDrive />); keyboardStart(); tick();
+    expect(requests("teleop_start")).toHaveLength(0);
+    expect(velocity()).toHaveLength(0);
+  });
   it("waits through a one-second robot quiescence handshake without positive output", () => {
     render(<ManualDrive />); keyboardStart();
     for (let i = 0; i < 10; i++) { act(() => healthy()); tick(100); }

@@ -58,7 +58,6 @@ def _origin_allowed(settings, websocket: WebSocket) -> bool:
 async def ui_ws(websocket: WebSocket) -> None:
     hub = websocket.app.state.hub
     settings = websocket.app.state.settings
-    from ..authentication.local import resolve_ws_user
 
     if not _origin_allowed(settings, websocket):
         log.warning("rejecting /ws/ui from disallowed origin: %s",
@@ -66,7 +65,7 @@ async def ui_ws(websocket: WebSocket) -> None:
         await websocket.close(code=4403, reason="origin not allowed")
         return
 
-    user = resolve_ws_user(settings, websocket)
+    user = fresh_user(settings, websocket.cookies)
     if user is None:  # OIDC mode with no valid session
         await websocket.close(code=4401, reason="not signed in")
         return

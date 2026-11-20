@@ -44,8 +44,8 @@ jobs:
 
   bridge:
     # Pure-Python tests only (normalizers, throttling, command pre-checks,
-    # teleop delivery); no ROS graph is needed. websockets is the one runtime
-    # dependency the delivery tests import.
+    # teleop delivery); no ROS graph is needed. Cross-layer tests also import
+    # the server; its dev extra owns the runtime and async pytest dependencies.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -56,9 +56,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install pytest pytest-timeout websockets
+      - run: pip install "./server[dev]"
       - run: python -m pytest test -q
         working-directory: ros2_ws/src/patrolbot_web_bridge
+        env:
+          PYTHONPATH: ${{ github.workspace }}/server:${{ github.workspace }}/ros2_ws/src/patrolbot_web_bridge
 
   frontend:
     runs-on: ubuntu-latest

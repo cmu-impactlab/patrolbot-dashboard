@@ -619,6 +619,7 @@ class CommandExecutor:
                 self._ack(command_id, False, "Fault recovery requires operator authorization.")
                 return
             if (self._active or self._undock_active or self._map_active
+                    or getattr(self, "_nav_pending", None) is not None
                     or base.get("undock_active") or base.get("operation_outcome_unknown")):
                 self._ack(command_id, False, "Wait for a confirmed terminal operation before recovery.")
                 return
@@ -698,6 +699,14 @@ class CommandExecutor:
                       "The robot is moving off its dock. Wait for that to finish "
                       "before sending it somewhere.")
             return
+        if self._active is not None or getattr(self, "_nav_pending", None) is not None:
+            # Nav2 preemption is not evidence that the previous goal stopped.
+            # Keep a single owner, including while acceptance/cancellation is
+            # unknown, instead of overwriting it with a replacement request.
+            self._ack(command_id, False,
+                      "Previous navigation has not finished. Stop it and wait "
+                      "for its result before sending another destination.")
+            return
         if not self._nav_client.server_is_ready():
             self._ack(command_id, False,
                       "The robot's navigation system is not running.")
@@ -724,11 +733,25 @@ class CommandExecutor:
         context = self._navigation_context
         self._navigation_generation = getattr(self, "_navigation_generation", 0) + 1
         navigation_generation = self._navigation_generation
-        self._nav_pending = {"command_id": command_id, "cancel": False}
-        future = self._nav_client.send_goal_async(
-            nav_goal, feedback_callback=lambda fb: self._on_feedback(command_id, fb))
-        future.add_done_callback(lambda f: self._on_goal_response(
-            command_id, f, generation, context, navigation_generation))
+        pending = self._nav_pending = {"command_id": command_id, "cancel": False,
+                                       "goal_handle": None}
+        try:
+            future = self._nav_client.send_goal_async(
+                nav_goal, feedback_callback=lambda fb: self._on_feedback(command_id, fb))
+            future.add_done_callback(lambda f: self._on_goal_response(
+                command_id, f, generation, context, navigation_generation))
+        except Exception as exc:
+            # A transport exception is not a definitive action rejection.
+            self._navigation_unknown(pending,
+                                     f"Navigation acceptance is unknown: {exc}.")
+
+    def _navigation_unknown(self, active: dict, detail: str) -> None:
+        active["uncertain"] = active["cancel"] = active["path_blocked"] = True
+        if active is self._active:
+            self._clear_navigation_path()
+        self._ws.send("command.progress", {"command_id": active["command_id"],
+            "stage": "unknown", "path_valid": False, "distance_remaining": None,
+            "detail": detail + " It may still be moving; use motor disable or the emergency stop."})
 
     def _on_goal_response(self, command_id: str, future, generation: int | None = None,
                           context: tuple | None = None,
@@ -738,50 +761,47 @@ class CommandExecutor:
             pending = None
         try:
             goal_handle = future.result()
+            if goal_handle is None:
+                raise RuntimeError("the action returned no acceptance reply")
         except Exception as exc:  # noqa: BLE001 — surfaced to the operator
-            self._ack(command_id, False, f"Navigation refused the request: {exc}")
+            if pending is not None:
+                self._navigation_unknown(pending, f"Navigation acceptance is unknown: {exc}.")
             return
         if not goal_handle.accepted:
             if pending is not None and self._nav_pending is pending:
                 self._nav_pending = None
             self._ack(command_id, False, "Navigation declined the destination.")
+            for stop_id in self._claim_all_stops(pending):
+                self._result(stop_id, "succeeded",
+                             "Navigation did not accept the destination.")
             return
-        if generation is not None and generation != getattr(self, "_motor_disable_generation", 0):
+        invalidated = (
+            (generation is not None and generation != getattr(self, "_motor_disable_generation", 0))
+            or (navigation_generation is not None and navigation_generation !=
+                getattr(self, "_navigation_generation", 0))
+            or (context is not None and context != self._navigation_context))
+        if pending is None:
+            # An obsolete callback cannot replace the current owner. Normal
+            # admission never supersedes an unresolved acceptance request.
             goal_handle.cancel_goal_async()
-            self._ack(command_id, False, "Destination canceled by motor disable.")
+            self._ack(command_id, False, "This destination request is no longer current.")
             return
-        if (navigation_generation is not None and navigation_generation !=
-                getattr(self, "_navigation_generation", 0)):
-            goal_handle.cancel_goal_async()
-            self._ack(command_id, False, "A newer destination replaced this request.")
-            return
-        if context is not None and context != self._navigation_context:
-            goal_handle.cancel_goal_async()
-            self._ack(command_id, False, "Destination canceled because the robot context changed.")
-            return
-        # Nav2 preempts a prior goal itself; close ours out for the UI.
-        if self._active is not None:
-            self._result(self._active["command_id"], "canceled",
-                         "A newer destination replaced this one.")
-            # Any stop still waiting on that goal has lost its subject, and the
-            # robot is now driving to a new one rather than standing still.
-            for stop_command_id in self._claim_all_stops(self._active):
-                self._result(stop_command_id, "failed",
-                             "A new destination replaced the goal being stopped. "
-                             "The robot is moving again — use the emergency stop "
-                             "on the robot.")
-        self._active = {"command_id": command_id, "goal_handle": goal_handle,
-                        "goal_id": bytes(goal_handle.goal_id.uuid),
-                        "navigation_context": self._navigation_context,
-                        "path_valid": False, "path_blocked": False}
-        if pending is not None and self._nav_pending is pending:
-            self._nav_pending = None
+        # Transfer the owner itself, not just its id: Stop waiters and pending
+        # command.cancel intent must survive delayed acceptance.
+        pending.update(goal_handle=goal_handle, goal_id=bytes(goal_handle.goal_id.uuid),
+                       navigation_context=self._navigation_context,
+                       path_valid=False, path_blocked=False)
+        self._active = pending
+        self._nav_pending = None
         self._last_progress_mono = 0.0
         self._ack(command_id, True)
         self._clear_navigation_path()
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(lambda f: self._on_result(command_id, f))
-        if pending is not None and pending["cancel"]:
+        try:
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(lambda f: self._on_result(command_id, f))
+        except Exception as exc:
+            self._navigation_unknown(pending, f"Navigation result is unknown: {exc}.")
+        if invalidated or pending["cancel"]:
             self._cancel_navigation(command_id)
 
     def _cancel_navigation(self, command_id: str) -> None:
@@ -802,7 +822,7 @@ class CommandExecutor:
             pending["cancel"] = True
         active = self._active
         if (active is None or active["command_id"] != command_id
-                or active.get("cancel_requested", False)):
+                or active.get("cancel_pending", False)):
             return
         active["cancel_requested"] = active["cancel_pending"] = active["path_blocked"] = True
         self._clear_navigation_path()
@@ -811,10 +831,9 @@ class CommandExecutor:
             "detail": "Waiting for navigation to stop."})
         try:
             future = active["goal_handle"].cancel_goal_async()
+            future.add_done_callback(lambda f: self._on_navigation_cancel_response(active, f))
         except Exception as exc:
             self._on_navigation_cancel_response(active, None, str(exc))
-            return
-        future.add_done_callback(lambda f: self._on_navigation_cancel_response(active, f))
 
     def _on_navigation_cancel_response(self, active: dict, future, error: str = "") -> None:
         if self._active is not active:
@@ -829,6 +848,9 @@ class CommandExecutor:
             "stage": "stopping", "path_valid": False, "distance_remaining": None,
             "detail": "Navigation did not confirm cancellation. It may still be moving; use Stop or the emergency stop."
                       + (f" {error}" if error else "")})
+        for stop_id in list(active.get("stop_command_ids", [])):
+            self._fail_stop(stop_id, "Navigation did not confirm cancellation."
+                            + (f" {error}" if error else ""))
 
     def update_navigation_context(self, base_state: dict) -> None:
         context = tuple(base_state.get(k) for k in (
@@ -941,30 +963,32 @@ class CommandExecutor:
 
     def _on_result(self, command_id: str, future) -> None:
         if self._active is None or self._active["command_id"] != command_id:
-            return  # already superseded/canceled and reported
-        stops = self._claim_all_stops(self._active)
-        self._clear_navigation_path()
-        self._active = None
+            return  # Not the current navigation owner.
         try:
             response = future.result()
             status = response.status
+            if status not in (_STATUS_SUCCEEDED, _STATUS_CANCELED, _STATUS_ABORTED):
+                raise RuntimeError("the action returned no terminal result")
         except Exception as exc:  # noqa: BLE001
-            self._result(command_id, "failed", f"Navigation ended abnormally: {exc}")
-            outcome = "failed"
-        else:
-            outcome = map_goal_status(status)
-            result = getattr(response, "result", None)
-            code = getattr(result, "error_code", None)
-            message = getattr(result, "error_msg", "") or ""
-            detail = {"succeeded": "Arrived at the destination.",
-                      "canceled": "Navigation was canceled.",
-                      "failed": "The robot could not reach the destination."}[outcome]
-            if outcome == "failed" and code:
-                detail += f" Navigation error {int(code)}."
-            if outcome == "failed" and message.strip():
-                detail += f" {message.strip()}"
-            self._result(command_id, outcome, detail, error_code=code,
-                         error_message=message.strip() or None)
+            self._navigation_unknown(self._active, f"Navigation result is unknown: {exc}.")
+            self._cancel_navigation(command_id)
+            return
+        outcome = map_goal_status(status)
+        result = getattr(response, "result", None)
+        code = getattr(result, "error_code", None)
+        message = getattr(result, "error_msg", "") or ""
+        detail = {"succeeded": "Arrived at the destination.",
+                  "canceled": "Navigation was canceled.",
+                  "failed": "The robot could not reach the destination."}[outcome]
+        if outcome == "failed" and code:
+            detail += f" Navigation error {int(code)}."
+        if outcome == "failed" and message.strip():
+            detail += f" {message.strip()}"
+        stops = self._claim_all_stops(self._active)
+        self._clear_navigation_path()
+        self._active = None
+        self._result(command_id, outcome, detail, error_code=code,
+                     error_message=message.strip() or None)
         # The goal is terminal, so Nav2 is no longer driving the robot — only
         # now can anything true be said about the robot having stopped.
         for stop_command_id in stops:
@@ -982,6 +1006,19 @@ class CommandExecutor:
         away, and then ignored its result — while the robot kept driving.
         """
         self._ack(command_id, True)
+        pending = getattr(self, "_nav_pending", None)
+        if pending is not None:
+            pending["cancel"] = True
+            stops = pending.setdefault("stop_command_ids", [])
+            if command_id not in stops:
+                stops.append(command_id)
+            return  # Acceptance is unresolved; cancel the eventual handle.
+        if self._active is not None and self._undock_active is None:
+            stops = self._active.setdefault("stop_command_ids", [])
+            if command_id not in stops:
+                stops.append(command_id)
+            self._cancel_navigation(self._active["command_id"])
+            return
         # An undock in progress is the thing to stop; otherwise the goal. The
         # two are mutually exclusive — _navigate refuses to start while an
         # undock is running, and _undock while one is.
@@ -1047,7 +1084,7 @@ class CommandExecutor:
         terminal result, whichever arrives first — so both paths claim before
         reporting and the loser stays quiet.
         """
-        for active in (self._active, self._undock_active):
+        for active in (self._active, self._undock_active, getattr(self, "_nav_pending", None)):
             if active is not None and command_id in active.get("stop_command_ids", ()):
                 active["stop_command_ids"].remove(command_id)
                 return True
@@ -1098,11 +1135,9 @@ class CommandExecutor:
         try:
             future = self._undock_client.send_goal_async(
                 goal, feedback_callback=lambda fb: self._on_undock_feedback(command_id, fb))
+            future.add_done_callback(lambda f: self._on_undock_response(command_id, f, generation))
         except Exception as exc:
-            self._undock_active = None
-            self._ack(command_id, False, f"The undock request could not be sent: {exc}")
-            return
-        future.add_done_callback(lambda f: self._on_undock_response(command_id, f, generation))
+            self._fail_undock(f"Undock acceptance is unknown: {exc}.")
 
     def _on_undock_response(self, command_id: str, future, generation: int | None = None) -> None:
         active = self._undock_active
@@ -1142,9 +1177,16 @@ class CommandExecutor:
         active["goal_handle"] = goal_handle
         self._undock_server_misses = 0
         self._ack(command_id, True)
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(lambda f: self._on_undock_result(command_id, f))
-        if active.get("cancel_requested", False):
+        deferred_cancel = active.get("cancel_requested", False)
+        try:
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(lambda f: self._on_undock_result(command_id, f))
+        except Exception as exc:
+            self._fail_undock(f"Undock result is unknown: {exc}.")
+            # _fail_undock sends a new cancel, but skips an earlier deferred one.
+            if not deferred_cancel:
+                return
+        if deferred_cancel and self._undock_active is active:
             try:
                 cancel_future = goal_handle.cancel_goal_async()
             except Exception as exc:
@@ -1154,7 +1196,13 @@ class CommandExecutor:
             stops = active.get("stop_command_ids", [])
             if stops:
                 stop_id = stops[0]
-                cancel_future.add_done_callback(lambda f: self._on_cancel_response(stop_id, f))
+                try:
+                    cancel_future.add_done_callback(lambda f: self._on_cancel_response(stop_id, f))
+                except Exception as exc:
+                    # The request was issued, but its cancellation response is
+                    # unknown. Keep the owner and the actual result subscription
+                    # instead of letting callback setup tear down the executor.
+                    self._fail_undock(f"Undock cancellation response is unknown: {exc}.")
 
     def _on_undock_feedback(self, command_id: str, feedback_msg) -> None:
         active = self._undock_active
@@ -1230,7 +1278,8 @@ class CommandExecutor:
                     self._node.get_logger().warning(f"Motor disable action cancellation failed: {exc}")
 
     def _motor_enable(self, command_id: str) -> None:
-        if self._active is not None or self._undock_active is not None:
+        if (self._active is not None or self._undock_active is not None
+                or getattr(self, "_nav_pending", None) is not None):
             self._ack(command_id, False, "Previous movement has not finished canceling. Stop it before enabling motors.")
             return
         self._call_dock_service(command_id, self._motor_client, self._MotorEnable,
@@ -1291,7 +1340,8 @@ class CommandExecutor:
                 or base.get("lidar_state") not in {"OFF", "READY", "FAULT"}):
             self._ack(command_id, False, "LiDAR power control is unavailable, uncommissioned or stale.")
             return
-        if self._active or self._undock_active or base.get("undock_active"):
+        if (self._active or self._undock_active or getattr(self, "_nav_pending", None)
+                or base.get("undock_active")):
             self._ack(command_id, False, "Stop the active operation before changing LiDAR power.")
             return
         client = getattr(self, "_lidar_client", None)
@@ -1351,7 +1401,9 @@ class CommandExecutor:
         msg.pose.covariance[0] = 0.0009 if measured else 0.25
         msg.pose.covariance[7] = 0.0009 if measured else 0.25
         msg.pose.covariance[35] = 0.00030461742 if measured else 0.0685
-        if not operator_authorized or self._active is not None or not self._map_client.server_is_ready():
+        if (not operator_authorized or self._active is not None
+                or getattr(self, "_nav_pending", None) is not None
+                or not self._map_client.server_is_ready()):
             self._ack(command_id, False, "Map localization requires authorization, an idle robot and its action server.")
             return
         request = self._LocalizeOnMap.Goal()

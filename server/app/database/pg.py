@@ -14,6 +14,7 @@ import asyncpg
 
 from ..protocol.messages import EventData
 from .presets import PRESET_LAYOUTS
+from .repo import SAMPLE_PAGE, _DAY_US, _MINUTE_US, _now_us, _timestamp_us, _validate_retention
 
 log = logging.getLogger("database.pg")
 
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS battery_samples (
     id BIGSERIAL PRIMARY KEY,
     robot_id TEXT NOT NULL,
     ts TEXT NOT NULL,
+    ts_utc BIGINT,
     voltage DOUBLE PRECISION NOT NULL,
     percentage DOUBLE PRECISION,
     current DOUBLE PRECISION,
@@ -106,8 +108,12 @@ def _iso(value: Any) -> Any:
 
 
 class PostgresDatabase:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, event_limit: int = 5000,
+                 battery_history_days: int = 7) -> None:
+        _validate_retention(event_limit, battery_history_days)
         self.dsn = dsn
+        self.event_limit = event_limit
+        self.battery_history_days = battery_history_days
         self._pool: asyncpg.Pool | None = None
 
     async def init(self) -> None:
@@ -121,6 +127,7 @@ class PostgresDatabase:
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
                 "help_guide_version_seen INTEGER NOT NULL DEFAULT 0")
             await self._migrate_events_primary_key(conn)
+            await self._migrate_battery_timestamps(conn)
             # Migration for command_audit identity columns (added during hardening).
             for column, decl in (("user_id", "BIGINT"), ("username", "TEXT"),
                                  ("source_ip", "TEXT"), ("session_generation", "BIGINT"),
@@ -146,6 +153,37 @@ class PostgresDatabase:
                     "ON CONFLICT (user_id, name) DO UPDATE SET layout_json = excluded.layout_json",
                     name, json.dumps(layout))
         log.info("connected to PostgreSQL")
+
+    @staticmethod
+    async def _migrate_battery_timestamps(conn: "asyncpg.Connection") -> None:
+        """Same lossless UTC-key backfill as SQLite; no session timezone casts."""
+        invalid = 0
+        async with conn.transaction():
+            await conn.execute(
+                "ALTER TABLE battery_samples ADD COLUMN IF NOT EXISTS ts_utc BIGINT")
+            after_id = None
+            while True:
+                rows = await conn.fetch(
+                    "SELECT id, ts FROM battery_samples WHERE ts_utc IS NULL "
+                    + ("AND id > $1 " if after_id is not None else "")
+                    + ("ORDER BY id LIMIT $2" if after_id is not None else "ORDER BY id LIMIT $1"),
+                    *((after_id, SAMPLE_PAGE) if after_id is not None else (SAMPLE_PAGE,)))
+                if not rows:
+                    break
+                updates = []
+                for row in rows:
+                    try:
+                        updates.append((_timestamp_us(row["ts"]), row["id"]))
+                    except (TypeError, ValueError, OverflowError):
+                        invalid += 1
+                await conn.executemany(
+                    "UPDATE battery_samples SET ts_utc = $1 WHERE id = $2", updates)
+                after_id = rows[-1]["id"]
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_battery_time_utc ON battery_samples(ts_utc, id)")
+        if invalid:
+            log.warning("preserved %d battery sample(s) with unparseable timestamps; "
+                        "excluded from time queries and retention", invalid)
 
     @staticmethod
     async def _migrate_events_primary_key(conn: "asyncpg.Connection") -> None:
@@ -223,12 +261,13 @@ class PostgresDatabase:
                 "ts=excluded.ts, severity=excluded.severity, "
                 "title=excluded.title, message=excluded.message",
                 event.id, robot_id, event.ts, event.severity, event.title, event.message)
-            # Retention on the full key: "id not among the newest 5000 ids"
+            # Retention on the full key: "id not among the newest ids"
             # deleted a second robot's rows whenever their ids fell outside
             # the window.
             await conn.execute(
                 "DELETE FROM events WHERE (robot_id, id) NOT IN "
-                "(SELECT robot_id, id FROM events ORDER BY id DESC LIMIT 5000)")
+                "(SELECT robot_id, id FROM events ORDER BY id DESC, robot_id DESC LIMIT $1)",
+                self.event_limit)
 
     async def get_events(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -240,20 +279,21 @@ class PostgresDatabase:
 
     async def add_battery_sample(self, robot_id: str, ts: str, voltage: float,
                                  percentage: float | None, current: float | None, charging: bool) -> None:
+        ts_utc = _timestamp_us(ts)
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO battery_samples (robot_id, ts, voltage, percentage, current, charging) "
-                "VALUES ($1,$2,$3,$4,$5,$6)",
-                robot_id, ts, voltage, percentage, current, int(charging))
+                "INSERT INTO battery_samples (robot_id, ts, ts_utc, voltage, percentage, current, charging) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                robot_id, ts, ts_utc, voltage, percentage, current, int(charging))
             await conn.execute(
-                "DELETE FROM battery_samples WHERE ts < to_char(now() - interval '7 days', 'YYYY-MM-DD\"T\"HH24:MI:SS')")
+                "DELETE FROM battery_samples WHERE ts_utc < $1",
+                _now_us() - self.battery_history_days * _DAY_US)
 
     async def get_battery_history(self, minutes: int = 120, limit: int = 2000) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
             "SELECT ts, voltage, percentage, current, charging FROM battery_samples "
-            "WHERE ts >= to_char(now() - make_interval(mins => $1), 'YYYY-MM-DD\"T\"HH24:MI:SS') "
-            "ORDER BY ts DESC LIMIT $2",
-            minutes, limit)
+            "WHERE ts_utc >= $1 ORDER BY ts_utc DESC, id DESC LIMIT $2",
+            _now_us() - minutes * _MINUTE_US, limit)
         return [dict(row) for row in reversed(rows)]
 
     # -- recordings --------------------------------------------------------------

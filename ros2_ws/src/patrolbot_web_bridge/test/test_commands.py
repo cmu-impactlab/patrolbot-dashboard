@@ -290,11 +290,16 @@ def test_refused_cancellation_is_not_a_stop():
     assert len(executor._ws.results("stop-1")) == 1
 
 
-def test_stop_on_an_already_finished_goal_succeeds():
+def test_cancel_reply_saying_finished_still_waits_for_terminal_goal_result():
     executor = _executor(SimpleNamespace(goals_canceling=[], return_code=3))
     executor._stop("stop-1")
+    # Nav2 can return this for a goal still CANCELING; it is not a terminal
+    # action result and cannot establish the original command's outcome.
+    assert executor._ws.results("stop-1") == []
+    assert executor._active is not None
+    executor._on_result("goal-1", _Future(SimpleNamespace(status=5)))
     stop = executor._ws.results("stop-1")[0]
-    assert stop["outcome"] == "succeeded" and "already stopped" in stop["detail"]
+    assert stop["outcome"] == "succeeded" and stop["detail"] == "The robot has stopped."
 
 
 def test_unanswered_cancellation_is_reported_as_a_failed_stop():
