@@ -1,5 +1,7 @@
 """Portable harness checks: no ROS imports, network, Docker or hardware."""
 import io
+import ast
+import asyncio
 import gc
 import hashlib
 import inspect
@@ -25,6 +27,133 @@ import teleop_lab as lab
 def executor_fixture(**kwargs):
     return NS(_tasks_lock=threading.Lock(), _pending_tasks={}, _ready_tasks=deque(),
               wake=Mock(), shutdown=Mock(return_value=True), **kwargs)
+
+
+def lab_run_statements():
+    return next(item for item in ast.parse(inspect.getsource(lab)).body
+                if isinstance(item, ast.FunctionDef) and item.name == 'run_lab').body
+
+
+def test_init_preserves_main_stop_handler_until_explicit_cleanup(monkeypatch):
+    statements = lab_run_statements()
+    signals_import = next(item for item in statements
+                          if isinstance(item, ast.ImportFrom) and item.module == 'rclpy.signals')
+    init = next(item for item in statements if isinstance(item, ast.Expr)
+                and isinstance(item.value, ast.Call)
+                and ast.unparse(item.value.func) == 'rclpy.init')
+    no_signals = object()
+    monkeypatch.setitem(sys.modules, 'rclpy.signals', NS(SignalHandlerOptions=NS(NO=no_signals)))
+    context = {'valid': False}
+    def run(resources):
+        handler = signal.getsignal(signal.SIGTERM)
+        def initialize(**kwargs):
+            assert kwargs['signal_handler_options'] is no_signals
+            context['valid'] = True
+        namespace = dict(rclpy=NS(init=initialize), ROBOT_ID=lab.ROBOT_ID)
+        exec(compile(ast.Module(body=[signals_import, init], type_ignores=[]),
+                     lab.__file__, 'exec'), namespace)
+        assert signal.getsignal(signal.SIGTERM) is handler
+        handler(signal.SIGTERM, None)
+        assert resources.stopped.is_set() and context['valid']
+        def destroy():
+            assert context['valid'] and resources.dispatch_stopped.is_set()
+        resources.nodes.append(('receiver', NS(destroy_node=destroy)))
+        resources.context_shutdown = lambda: context.update(valid=False)
+    monkeypatch.setattr(lab, 'run_lab', run)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        lab.main()
+        assert not context['valid']
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@pytest.mark.parametrize('queue_source', ['portable', 'cached-jazzy'])
+def test_readiness_timeout_keeps_one_uncanceled_observation(queue_source):
+    executor = executor_fixture()
+    def create_task(callback):
+        task = Mock(callback=callback)
+        task.done.return_value = task.cancelled.return_value = False
+        task.cancel.side_effect = lambda: task.cancelled.configure_mock(return_value=True)
+        executor._pending_tasks[task] = NS(source_node=None, source_entity=None)
+        executor._ready_tasks.append(task)
+        return task
+    executor.create_task = create_task
+    def dispatch(self):
+        # Cached Jazzy 7.1.11 _wait_for_ready_callbacks queue semantics (657-667).
+        with self._tasks_lock:
+            for task in list(self._pending_tasks.keys()):
+                if task.done() or task.cancelled():
+                    del self._pending_tasks[task]
+            ready_tasks_count = len(self._ready_tasks)
+        for _ in range(ready_tasks_count):
+            task = self._ready_tasks.popleft()
+            task_data = self._pending_tasks[task]
+            yield task, task_data.source_entity, task_data.source_node
+    if queue_source == 'cached-jazzy':
+        cached = Path('/tmp/opencode/native-ci/jazzy-executors.py')
+        if not cached.is_file():
+            pytest.skip('cached Jazzy source unavailable; portable queue semantics covered')
+        method = next(item for item in ast.walk(ast.parse(cached.read_text()))
+                      if isinstance(item, ast.FunctionDef) and item.name == '_wait_for_ready_callbacks')
+        loop = next(item for item in method.body if isinstance(item, ast.While))
+        index = next(i for i, item in enumerate(loop.body) if isinstance(item, ast.With))
+        function = ast.parse('def dispatch(self):\n    nodes_to_use = []\n').body[0]
+        function.body.extend(loop.body[index:index + 2])
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
+                     str(cached), 'exec'), namespace)
+        dispatch = namespace['dispatch']
+    # Control: the cached queue really does fail if its queued task is canceled.
+    canceled = create_task(lambda: None)
+    canceled.cancel()
+    with pytest.raises(KeyError):
+        list(dispatch(executor))
+    executor._pending_tasks.clear()
+    route = next(item for item in lab_run_statements()
+                 if isinstance(item, ast.AsyncFunctionDef) and item.name == 'lab_ready')
+    route.decorator_list = []
+    holder = dict(bridge=object(), executor=executor, observation=None)
+    snapshot = Mock(return_value={'ready': False, 'detail': 'observed'})
+    async def short_wait(answer, timeout):
+        return await asyncio.wait_for(answer, timeout=.01)
+    namespace = dict(holder=holder, app=NS(state=NS()), ROBOT_ID=lab.ROBOT_ID,
+                     asyncio=NS(get_running_loop=asyncio.get_running_loop, wait_for=short_wait,
+                                TimeoutError=asyncio.TimeoutError),
+                     readiness_snapshot=snapshot, node=None, state={}, lifecycle={}, metrics={})
+    exec(compile(ast.Module(body=[route], type_ignores=[]), lab.__file__, 'exec'), namespace)
+    async def check():
+        ready = namespace['lab_ready']
+        assert 'timed out' in (await ready(after=1.))['detail']
+        answer = holder['observation']
+        assert answer.cancelled()
+        for _ in range(20):
+            assert not (await ready(after=2.))['ready']
+            assert holder['observation'] is answer
+        assert len(executor._ready_tasks) == len(executor._pending_tasks) == 1
+        task, _, _ = next(dispatch(executor))
+        task.cancel.assert_not_called()
+        task.callback()
+        task.done.return_value = True
+        await asyncio.sleep(0)
+        assert holder['observation'] is None and answer.cancelled()
+        assert 'timed out' in (await ready(after=3.))['detail']
+        task, _, _ = next(dispatch(executor))
+        task.callback()
+        task.done.return_value = True
+        await asyncio.sleep(0)
+        assert snapshot.call_args.args[-2] == 3.
+        assert not list(dispatch(executor))
+        assert not executor._pending_tasks and holder['observation'] is None
+        request = asyncio.create_task(ready(after=4.))
+        await asyncio.sleep(0)
+        task, _, _ = next(dispatch(executor))
+        task.callback()
+        task.done.return_value = True
+        assert await request == {'ready': False, 'detail': 'observed'}
+        assert holder['observation'] is None
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize('origin', ['installed', 'source-fixture', 'explicit'])
@@ -378,6 +507,46 @@ def test_cleanup_one_budget_even_when_stop_blocks():
         for worker in threading.enumerate():
             if worker.name == "cleanup-probe-shutdown":
                 worker.join(1)
+
+
+@pytest.mark.parametrize('failure', ['blocks', 'false', 'raises'])
+def test_node_destroy_failure_retains_remaining_handles_and_context(tmp_path, failure):
+    resources = lab.LabResources()
+    resources.directory = tmp_path
+    release, entered = threading.Event(), threading.Event()
+    untouched, shutdown = Mock(), Mock()
+    def destroy():
+        entered.set()
+        if failure == 'blocks':
+            release.wait(2)
+        elif failure == 'raises':
+            raise RuntimeError('destroy failed')
+        else:
+            return False
+    resources.nodes.extend([('receiver', NS(destroy_node=untouched)),
+                            ('bridge', NS(destroy_node=destroy))])
+    resources.context_shutdown = shutdown
+    server = NS(should_exit=False)
+    resources.server = (server, NS(join=Mock(), is_alive=lambda: False))
+    started = time.monotonic()
+    try:
+        assert not resources.close(timeout=.04)
+        assert entered.is_set() and time.monotonic() - started < .5
+        untouched.assert_not_called()
+        shutdown.assert_not_called()
+        assert server.should_exit
+        report = json.loads((tmp_path / 'teardown.json').read_text())['teardown']
+        assert any(error['step'] == 'bridge-destroy' for error in report['errors'])
+        assert 'context-shutdown' not in report['steps']
+        if failure == 'blocks':
+            assert any(error['step'] == 'worker' and error['name'] == 'cleanup-bridge-destroy'
+                       for error in report['errors'])
+    finally:
+        release.set()
+        for worker in threading.enumerate():
+            if worker.name == 'cleanup-bridge-destroy':
+                worker.join(1)
+    shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("early,forced", [(True, False), (False, True), (False, False)])

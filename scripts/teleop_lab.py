@@ -262,9 +262,11 @@ class LabResources:
             quiesced = attempt("session-end", self.bridge._teleop.shutdown)
         if quiesced:
             for name, node in reversed(self.nodes):
-                attempt(name + "-destroy", node.destroy_node)
-        else:
-            errors.append({"step": "nodes", "error": "handles retained because callbacks did not quiesce"})
+                quiesced = attempt(name + "-destroy", node.destroy_node)
+                if not quiesced:
+                    break
+        if not quiesced:
+            errors.append({"step": "nodes", "error": "handles retained because cleanup did not quiesce"})
         for process in self.processes:
             try:
                 code = process.poll()
@@ -353,6 +355,7 @@ def run_lab(resources):
     from patrolbot_web_bridge.teleop import read_contract
     from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     from rclpy.node import Node
+    from rclpy.signals import SignalHandlerOptions
     from std_msgs.msg import Bool
     from std_srvs.srv import Trigger
     import uvicorn
@@ -398,7 +401,7 @@ def run_lab(resources):
         state["fault"] = fault
         return {"accepted": True, "physical_acceptance": False}
 
-    holder = {"bridge": None, "executor": None}
+    holder = {"bridge": None, "executor": None, "observation": None}
     lifecycle = {"state": None, "at": None}
     metrics = {"ticks": 0, "buffers": 0, "probe_issued": 0, "probe_done": 0, "probe_at": None,
                "tick_at": None, "tick_max_gap_s": 0.0, "buffer_at": None, "buffer_max_gap_s": 0.0}
@@ -409,6 +412,8 @@ def run_lab(resources):
         bridge = holder["bridge"]
         if bridge is None or holder["executor"] is None:
             return {"ready": False, "detail": "bridge not started"}
+        if holder["observation"] is not None:
+            return {"ready": False, "detail": "bridge executor observation pending"}
         loop = asyncio.get_running_loop()
         answer = loop.create_future()
         hub = getattr(app.state, "hub", None)
@@ -425,6 +430,8 @@ def run_lab(resources):
             except Exception as error:
                 data = {"ready": False, "detail": repr(error)}
             def deliver():
+                if holder["observation"] is answer:
+                    holder["observation"] = None
                 if not answer.done():
                     # The server store belongs to this event loop; recheck its
                     # gate after any bridge scheduling delay before admitting.
@@ -434,11 +441,12 @@ def run_lab(resources):
                         data["ready"] = current_reason is None
                     answer.set_result(data)
             loop.call_soon_threadsafe(deliver)
-        task = holder["executor"].create_task(observe)
+        holder["executor"].create_task(observe)
+        holder["observation"] = answer
         try:
             return await asyncio.wait_for(answer, timeout=1)
         except asyncio.TimeoutError:
-            task.cancel()
+            # Jazzy retains canceled queued tasks; only the answer may time out.
             return {"ready": False, "detail": "bridge executor observation timed out"}
 
     app.router.routes.extend(static_mounts)
@@ -452,7 +460,8 @@ def run_lab(resources):
         time.sleep(.05)
     assert server.started, "Isolated HTTP/WebSocket server did not start"
 
-    rclpy.init(args=["--ros-args", "-p", f"robot_id:={ROBOT_ID}"])
+    rclpy.init(args=["--ros-args", "-p", f"robot_id:={ROBOT_ID}"],
+               signal_handler_options=SignalHandlerOptions.NO)
     resources.context_shutdown = lambda: rclpy.shutdown() if rclpy.ok() else None
     node = Node("teleop_software_receiver")
     resources.nodes.append(("receiver", node))

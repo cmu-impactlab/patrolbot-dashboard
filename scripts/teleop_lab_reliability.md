@@ -201,3 +201,29 @@ is a separate fault-acceptance case: the exact failed/refused terminal and zero/
 inactive ROS receipts are evidence, not a healthy-run pass. This patch does not
 add a stress mode, retry failed sessions, widen freshness limits, or guarantee
 stopping independently of scheduler/load behavior. No physical stop is claimed.
+
+## Review blocker fixes after d62b6b1 (2026-11-21)
+
+The lab initializes rclpy with `rclpy.signals.SignalHandlerOptions.NO` so its
+custom SIGTERM/SIGINT stop handlers remain installed. Context shutdown stays
+explicit, after dispatch, tasks and node handles retire; background exceptions
+remain failures. Readiness keeps one observation identity until delivery, even
+when its answer times out. It never cancels a queued ROS observation, and polls
+while one is outstanding return not ready. A failed or blocked node destruction
+stops further node destruction and retains the context for supervisor containment.
+
+Focused portable validation: **209 passed**, including the regression executing
+the queue-dispatch block extracted from the supplied cached Jazzy executor,
+custom-handler/init-option coverage, and blocked/false/raising node destruction.
+The blocked-destruction check uses a shared 40 ms cleanup budget and verifies
+remaining node handles and context are retained, with the surviving worker
+reported as a failure.
+
+Command: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=scripts:server /tmp/opencode/ci-audit/bridge-minimal-venv/bin/python -W 'error:coroutine .* was never awaited:RuntimeWarning' -m pytest -q -p no:cacheprovider -W error::pytest.PytestUnraisableExceptionWarning -W error::pytest.PytestUnhandledThreadExceptionWarning scripts/tests/test_teleop_lab.py scripts/tests/test_check_teleop_receipt.py`
+
+This source revision has no native acceptance result yet. The parent's immutable
+`d62b6b1` matrix and failed teardown evidence remain untouched. Parent validation
+of the new source must separately check all seven exact receipts and teardown;
+healthy failed outcomes remain rejected and deliberate stale odometry still
+requires its exact failed outcome and detail. No retries or acceptance/freshness
+changes were introduced.
