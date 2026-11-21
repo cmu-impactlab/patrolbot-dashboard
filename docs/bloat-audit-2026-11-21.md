@@ -298,6 +298,36 @@ No sandbox rejection occurred during these focused runs. The parent owns final
 validation of a new committed head, native results, CI and independent re-review.
 Changes remain local and uncommitted.
 
+## Producer-loss completion correction on cb9bcfe (2026-11-21)
+
+The immutable native matrix remains **4 passed, 2 failed**, all teardowns clean.
+`lab-matrix-cb9bcfe/{serial-3,bounded-load-2}/full.log` under
+`/tmp/opencode/bloat-cycle/` fails producer-loss `finish(None)` after a logged
+canceled start without a logged automatic stop. The checker waited until the
+last 20 ms for final HTTP audit; the logs do not establish a watchdog winner.
+
+The local checker now requires existing lab completion facts (no owner, active
+IDs, admission lock or pending revokes), then reads completed start/stop audits,
+retains every exact WebSocket terminal and the .5-second settlement for the
+.3-second zero-send bound. No-stop still requires exact cancellation; known
+stops require exact successful terminals and completed successful audit.
+The original six-second budget and single-command workflow remain unchanged.
+Production code and stale-odometry evidence/barrier/readiness/refusal are untouched.
+
+Separate logs in `/tmp/opencode/bloat-cycle/receipt-cb9-local/`: baseline
+**117 passed** (`before.log`); new regressions against the original checker
+**15 failed, 3 passed, 119 deselected** (`regression-before.log`); final focused
+**320 passed** (`focused-final.log`); all scripts **370 passed**
+(`all-scripts-final.log`). Final runs use the supplied venv, no bytecode/cache,
+and coroutine/unraisable/thread warnings as errors; no warnings/skips/deselections.
+AST parsing and diff whitespace checks pass. See
+[`scripts/teleop_lab_reliability.md`](../scripts/teleop_lab_reliability.md)
+for the full mechanism, latency/concurrency cases, prior parent evidence and limits.
+Prior reported 19 green CI checks, 14 parent stages and four clean review rounds
+at cb9 remain historical; they do not validate this local patch. New committed-head
+native/CI validation and independent parent re-review remain required. No remote
+state was checked; no commits, pushes or merges were performed.
+
 ## Deferred and protected
 
 Save/Apply feature work remains separate. No changes were made to command
