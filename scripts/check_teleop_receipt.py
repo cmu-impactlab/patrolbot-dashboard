@@ -1,6 +1,7 @@
 """Drive only the isolated software lab; prove real ROS subscription receipts."""
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -42,16 +43,54 @@ def terminal_id(frame, robot, expected):
     return command_id
 
 
-async def expected_stale_odom_fault(socket, robot, command_id, timeout=6):
+def stale_odom_detail(evidence, robot, command_id, after):
+    """Validate fault-time evidence, including the two production expiry paths."""
+    assert isinstance(evidence, dict), evidence
+    assert evidence.get('robot_id') == robot and evidence.get('command_id') == command_id, evidence
+    assert evidence.get('fault') == 'odom_stale', evidence
+    for key in ('injected_mono', 'safety_started_mono', 'observed_mono', 'terminal_mono',
+                'base_at', 'odom_at'):
+        value = evidence.get(key)
+        assert type(value) in (int, float) and math.isfinite(value), (key, evidence)
+    start, end = evidence['safety_started_mono'], evidence['observed_mono']
+    assert after <= evidence['injected_mono'] <= start <= end <= evidence['terminal_mono'] <= time.monotonic(), evidence
+    assert evidence['injected_mono'] < evidence['base_at'] <= start, evidence
+    assert end - evidence['base_at'] <= .5, evidence
+    assert evidence['odom_at'] <= start, evidence
+    values = evidence.get('odom_values')
+    assert isinstance(values, list) and len(values) == 8, evidence
+    assert all(type(value) in (int, float) and math.isfinite(value) for value in values), evidence
+    for key in ('source_before_ns', 'source_after_ns', 'stamp_sec', 'stamp_nanosec'):
+        assert type(evidence.get(key)) is int and evidence[key] >= 0, (key, evidence)
+    assert evidence['stamp_nanosec'] < 10**9, evidence
+    stamp = evidence['stamp_sec'] * 10**9 + evidence['stamp_nanosec']
+    assert stamp <= evidence['source_before_ns'] <= evidence['source_after_ns'], evidence
+    source_age = (evidence['source_after_ns'] - stamp) / 1e9
+    receipt_before, receipt_after = start - evidence['odom_at'], end - evidence['odom_at']
+    assert all(math.isfinite(age) for age in (source_age, receipt_before, receipt_after)), evidence
+    reason = evidence.get('reason')
+    # Bracket the delegated safety call: either clock can cross .5 s inside it.
+    if reason == 'Raw odometry is invalid or stale.':
+        assert source_age > .5 and 0 <= receipt_before <= .5, evidence
+    else:
+        assert reason == 'Raw odometry is missing or stale.' and receipt_after > .5, evidence
+    terminal = evidence.get('terminal')
+    assert isinstance(terminal, dict) and terminal.get('command_id') == command_id, evidence
+    assert terminal.get('outcome') == 'failed' and terminal.get('detail') == reason, evidence
+    return reason
+
+
+async def expected_stale_odom_fault(socket, robot, command_id, evidence, after, timeout=6):
     """Only the deliberately injected odometry fault may expect a failed result."""
     deadline = time.monotonic() + timeout
+    detail = stale_odom_detail(evidence, robot, command_id, after)
     while True:
         budget = deadline - time.monotonic()
         assert budget > 0, "Missing exact stale-odometry terminal"
         frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=budget))
         assert time.monotonic() < deadline, "Late stale-odometry terminal"
         if terminal_id(frame, robot, {command_id: {"failed"}}) is not None:
-            assert frame["data"].get("detail") == "Raw odometry is missing or stale.", frame
+            assert frame["data"].get("detail") == detail, frame
             return
 
 
@@ -283,7 +322,8 @@ async def main():
                 await wait_receipt('/input/teleop',
                     lambda item: item['linear'] == 0. and item['angular'] == 0., begin)
                 await wait_receipt('/patrolbot/web_teleop_active', lambda item: item['active'] is False, begin)
-                await expected_stale_odom_fault(socket, robot, command_id)
+                await expected_stale_odom_fault(socket, robot, command_id,
+                                                observed.get('fault_evidence'), begin)
             finally:
                 producer.cancel()
                 try:

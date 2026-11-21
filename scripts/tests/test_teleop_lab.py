@@ -391,20 +391,21 @@ def test_fault_readiness_requires_both_runtime_and_server_observation(monkeypatc
     assert lab.readiness_snapshot(*args)["ready"]
 
 
-@pytest.mark.parametrize('failure', [None, 'healthy', 'reason', 'fresh', 'missing', 'base', 'tick'])
-def test_stale_fault_requires_bridge_receipt_reason_and_continuing_events(monkeypatch, failure):
+@pytest.mark.parametrize('failure', [None, 'healthy', 'missing-evidence', 'base', 'tick'])
+def test_stale_fault_requires_retained_decision_and_continuing_events(monkeypatch, failure):
     args = setup_readiness(monkeypatch)
     args[3]['fault'] = args[7] = 'odom_stale'
     teleop = args[0]._teleop
     teleop.state.return_value = ({'link_connected': True}, 9.9, object(), 9.2)
     teleop.safety.return_value = 'Raw odometry is missing or stale.'
+    args[3]['odom_fault_evidence'] = {'retained': 'source-expiry decision'}
     if failure == 'healthy':
         args[3]['fault'] = 'healthy'
-    elif failure == 'reason':
-        teleop.safety.return_value = 'Robot hardware data is invalid or stale.'
-    elif failure in {'fresh', 'missing', 'base'}:
+    elif failure == 'missing-evidence':
+        args[3]['odom_fault_evidence'] = None
+    elif failure == 'base':
         values = list(teleop.state.return_value)
-        values[1 if failure == 'base' else 3] = {'fresh': 9.9, 'missing': None, 'base': 8.}[failure]
+        values[1] = 8.
         teleop.state.return_value = values
     elif failure == 'tick':
         args[5]['tick_at'] = 8.

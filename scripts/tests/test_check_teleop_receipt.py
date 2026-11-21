@@ -361,13 +361,27 @@ def stale_result():
     return frame
 
 
+def fault_evidence(command_id=SESSION, after=0.):
+    return dict(robot_id=ROBOT, command_id=command_id, fault='odom_stale',
+                injected_mono=after, safety_started_mono=after + .6,
+                observed_mono=after + .6, terminal_mono=after + .6,
+                base_at=after + .59, odom_at=after + .01,
+                source_before_ns=10**9, source_after_ns=10**9,
+                stamp_sec=0, stamp_nanosec=400000000, odom_values=[0.] * 7 + [1.],
+                reason='Raw odometry is missing or stale.',
+                terminal=dict(command_id=command_id, outcome='failed', detail='Raw odometry is missing or stale.'))
+
+
 def test_deliberate_stale_fault_requires_exact_terminal():
-    asyncio.run(checker.expected_stale_odom_fault(Socket([stale_result()]), ROBOT, SESSION, timeout=.03))
+    asyncio.run(checker.expected_stale_odom_fault(Socket([stale_result()]), ROBOT, SESSION, fault_evidence(), 0., timeout=.03))
 
 
-def test_healthy_finish_still_rejects_exact_stale_fault():
+@pytest.mark.parametrize('detail', ['Raw odometry is missing or stale.', 'Raw odometry is invalid or stale.'])
+def test_healthy_finish_still_rejects_exact_stale_fault(detail):
+    frame = stale_result()
+    frame['data']['detail'] = detail
     with pytest.raises(AssertionError):
-        finish([stale_result(), result(STOP, 'succeeded')])
+        finish([frame, result(STOP, 'succeeded')])
 
 
 @pytest.mark.parametrize('field,value', [
@@ -387,7 +401,7 @@ def test_deliberate_stale_fault_rejects_wrong_identity_outcome_or_reason(field, 
         if field == 'reason':
             del frame['data']['detail']
     with pytest.raises((AssertionError, asyncio.TimeoutError)):
-        asyncio.run(checker.expected_stale_odom_fault(Socket([frame]), ROBOT, SESSION, timeout=.03))
+        asyncio.run(checker.expected_stale_odom_fault(Socket([frame]), ROBOT, SESSION, fault_evidence(), 0., timeout=.03))
 
 
 def test_deliberate_stale_fault_noise_cannot_extend_deadline(monkeypatch):
@@ -400,7 +414,9 @@ def test_deliberate_stale_fault_noise_cannot_extend_deadline(monkeypatch):
             return json.dumps(result(OLD_STOP, 'failed'))
 
     with pytest.raises(AssertionError, match='Late stale-odometry terminal'):
-        asyncio.run(checker.expected_stale_odom_fault(NoisySocket(), ROBOT, SESSION, timeout=3))
+        evidence = fault_evidence()
+        evidence.update(injected_mono=-1., safety_started_mono=0., observed_mono=0., terminal_mono=0., base_at=-.01, odom_at=-.6)
+        asyncio.run(checker.expected_stale_odom_fault(NoisySocket(), ROBOT, SESSION, evidence, -1., timeout=3))
     assert clock.now == 3.
 
 
@@ -429,12 +445,16 @@ def test_acceptance_keeps_producer_alive_until_stale_fault_and_refuses_restart(m
                 assert state['refused']
                 state['restored'] = True
             state['fault'] = json['fault']
+            state['injected'] = clock.now
             return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'accepted': True})
         async def get(self, path):
             if path.startswith('/lab/ready'):
                 await real_sleep(0)
                 data = dict(ready=state['fault'] != 'odom_stale', has_amcl_pose=False,
                             fault_observed=failure != 'unobserved' and state['fault'] == 'odom_stale')
+                if state['fault'] == 'odom_stale':
+                    data['fault_evidence'] = fault_evidence(state['command_id'], state['injected'])
+                    clock.now = max(clock.now, state['injected'] + .7)
             else:
                 assert path == '/lab/status'
                 data = dict(physical_acceptance=False, received={

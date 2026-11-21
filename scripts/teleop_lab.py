@@ -103,6 +103,47 @@ def require_isolation():
     assert {path.name for path in Path("/sys/class/net").iterdir()} == {"lo"}
 
 
+def observe_odom_fault(teleop, state):
+    """LAB ONLY: retain the safety decision that actually closes the session."""
+    safety, send = teleop.session.safety, teleop.session.send
+    decision = None
+
+    def observe_safety():
+        nonlocal decision
+        decision = None
+        if state['fault'] != 'odom_stale' or not teleop.session.active:
+            return safety()
+        started = time.monotonic()
+        source_before = teleop.node.get_clock().now().nanoseconds
+        _, base_at, odom, odom_at = teleop.state()
+        reason = safety()
+        source_after = teleop.node.get_clock().now().nanoseconds
+        ended = time.monotonic()
+        if state['fault'] == 'odom_stale' and teleop.session.active:
+            evidence = dict(robot_id=ROBOT_ID, command_id=teleop.session.command_id,
+                fault='odom_stale', injected_mono=state['fault_injected_mono'],
+                safety_started_mono=started, observed_mono=ended, reason=reason,
+                base_at=base_at, odom_at=odom_at,
+                source_before_ns=source_before, source_after_ns=source_after)
+            try:
+                p, q, v = odom.pose.pose.position, odom.pose.pose.orientation, odom.twist.twist
+                evidence['odom_values'] = [p.x, p.y, q.x, q.y, q.z, q.w, v.linear.x, v.angular.z]
+                evidence['stamp_sec'] = odom.header.stamp.sec
+                evidence['stamp_nanosec'] = odom.header.stamp.nanosec
+            except (AttributeError, TypeError):
+                pass  # Missing/malformed evidence must fail the checker.
+            decision = evidence
+        return reason
+
+    def observe_send(kind, data):
+        if kind == 'command.result' and decision is not None:
+            state['odom_fault_evidence'] = dict(decision, terminal=dict(data),
+                                               terminal_mono=time.monotonic())
+        return send(kind, data)
+
+    teleop.session.safety, teleop.session.send = observe_safety, observe_send
+
+
 def readiness_snapshot(bridge, node, server, state, lifecycle, metrics, after, fault):
     teleop = bridge._teleop
     now = time.monotonic()
@@ -126,10 +167,10 @@ def readiness_snapshot(bridge, node, server, state, lifecycle, metrics, after, f
                 and lifecycle["state"] == 3 and teleop._path_identity() is not None
                 and all(at is not None and after < at <= now for at in observed.values())),
             "fault_observed": bool(fault == 'odom_stale' and state['fault'] == fault
-                and reason == 'Raw odometry is missing or stale.'
-                and odom_at is not None and now - odom_at > .5
+                and state.get('odom_fault_evidence') is not None
                 and all(at is not None and after < at <= now
                         for at in (base_at, metrics['tick_at']))),
+            "fault_evidence": state.get('odom_fault_evidence'),
             "physical_acceptance": False, "observed_mono": now,
             "has_amcl_pose": bridge._latest_amcl is not None,
             "detail": {"runtime_safety_reason": reason, "subscribers": subscribers,
@@ -398,6 +439,8 @@ def run_lab(resources):
         fault = payload.get("fault")
         if fault not in {"healthy", "sbc_down", "estop", "odom_stale", "scan_stale", "f710"}:
             return {"accepted": False}
+        state['fault_injected_mono'] = time.monotonic()
+        state['odom_fault_evidence'] = None
         state["fault"] = fault
         return {"accepted": True, "physical_acceptance": False}
 
@@ -593,6 +636,7 @@ def run_lab(resources):
         assert future.done() and future.result().success, "Native smoother activation failed"
     bridge = WebBridgeNode()
     resources.bridge = bridge
+    observe_odom_fault(bridge._teleop, state)
     resources.nodes.append(("bridge", bridge))
     holder["bridge"] = bridge
     bridge_executor.add_node(bridge)

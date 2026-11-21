@@ -1,5 +1,51 @@
 # Isolated teleop harness investigation (2026-11-20)
 
+## Full-review P2 correction (2026-11-21)
+
+Base HEAD: `1c103f554b18d11d114c57eda776de09c19fcd1c`. Production
+`RosTeleop.safety()` distinguishes source-stamp expiry from missing/expired
+receipt: finite odometry at source age **505 ms**, receipt age **495 ms** ends
+`TeleopSession` with `failed` / `Raw odometry is invalid or stale.` Receipt
+expiry instead yields `Raw odometry is missing or stale.` The previous lab
+checker accepted only the latter; later readiness cannot change an emitted
+terminal. This was a lab acceptance defect, not a production safety defect.
+
+The lab delegates the existing session safety/send callbacks and retains the
+closing decision's robot/start identity, injection/safety/terminal timestamps,
+raw finite odometry fields, source stamp and receipt time. Clock readings
+bracket the delegated safety call to handle expiry during that call. The checker
+requires the corresponding exact failed detail and matching retained terminal,
+well-formed finite sensor evidence, non-future stamps/receipts, fresh
+post-injection base evidence and post-injection safety/terminal times. It uses
+this retained decision even when later readiness reports both clocks expired.
+Missing/malformed odometry, unrelated reasons/identities, canceled/succeeded
+outcomes and zero-publication-failure suffixes cannot pass. Stale sensors never
+become ready. Production reasons, timing bounds, guards and outcomes are
+unchanged; the six healthy checks, actual zero/inactive receipts, continued
+producer and exact next-start refusal remain required.
+
+Offline regressions execute the actual production safety/session code for both
+expiry branches through `tick()` and `frame()`, including malformed/nonfinite/
+future-stamped inputs, another safety failure, context mismatch and real zero
+publication exceptions. Both legitimate fault terminals still fail the healthy
+terminal policy. Additional checks cover malformed/cross-command evidence and
+expiry inside the observation interval.
+
+Validation used `/home/yousef/Projects/repos/patrolbot-repo/.venv/bin/python -B`,
+`PYTHONDONTWRITEBYTECODE=1`, `PYTHONPATH=scripts:server`, pytest
+`-q -rs -p no:cacheprovider`, with coroutine, unraisable and thread warnings
+treated as errors. Focused lab/checker/new evidence tests: **280 passed,
+1 skipped**. Complete `scripts/tests`: **327 passed, 1 skipped**. The skip is
+explicit: `/tmp/opencode/native-ci/jazzy-executors.py` is absent; the portable
+queue-semantic check still runs. Python parsing, runner shell syntax and
+`git diff --check` pass. No installs/network/ROS/Docker/hardware/production edits
+or native acceptance runs were performed. Git worktree metadata is outside the
+writable sandbox; the parent must commit, independently review, run native/CI
+validation, and manage the PR/merge. `RTK.md` remains absent.
+
+All following native evidence and earlier test counts are historical and do not
+validate this correction.
+
 ## Final parent validation (2026-11-21)
 
 The executable candidate `a21479d` passed **six fixed-count native cases**:
