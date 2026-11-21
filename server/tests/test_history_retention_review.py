@@ -1,14 +1,13 @@
 """R11: UTC windows, lossless migrations and configured persistence retention."""
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from app.database import create_database
 from app.database import repo
-from app.database.repo import Database, _DAY_US, _timestamp_us
+from app.database.repo import Database, _timestamp_us
 from app.protocol.messages import EventData
 from app.settings import Settings
 
@@ -240,71 +239,3 @@ async def test_invalid_new_timestamp_is_rejected_without_mutation(database):
         await database.add_battery_sample("r", "invalid", 24, None, None, False)
     async with database.db.execute("SELECT COUNT(*) FROM battery_samples") as cur:
         assert (await cur.fetchone())[0] == 0
-
-
-def _pg():
-    pytest.importorskip("asyncpg")
-    from app.database import pg
-    return pg
-
-
-def _pg_pool(conn):
-    pool = MagicMock()
-    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
-    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-    return pool
-
-
-async def test_postgres_retention_and_timestamp_queries_without_external_db(monkeypatch):
-    pg = _pg()
-    monkeypatch.setattr(pg, "_now_us", lambda: _timestamp_us(NOW))
-    db = create_database(Settings(database_url="postgresql://unused/offline",
-                                  event_limit=3, battery_history_days=2))
-    assert isinstance(db, pg.PostgresDatabase)
-    assert pg.PostgresDatabase("unused").battery_history_days == 7
-    conn = MagicMock(execute=AsyncMock())
-    db._pool = _pg_pool(conn)
-    ts = "2026-11-20T01:00:00.123456+02:00"
-    await db.add_battery_sample("r", ts, 24, 50, -1, False)
-    insert, delete = conn.execute.await_args_list
-    assert insert.args[1:] == ("r", ts, _timestamp_us(NOW), 24, 50, -1, 0)
-    assert delete.args == ("DELETE FROM battery_samples WHERE ts_utc < $1",
-                           _timestamp_us(NOW) - 2 * _DAY_US)
-    db._pool.fetch = AsyncMock(return_value=[{"ts": NOW, "voltage": 25}, {"ts": ts, "voltage": 24}])
-    assert [r["voltage"] for r in await db.get_battery_history(minutes=1, limit=2)] == [24, 25]
-    query = db._pool.fetch.await_args.args
-    assert "WHERE ts_utc >= $1 ORDER BY ts_utc DESC, id DESC LIMIT $2" in query[0]
-    assert query[1:] == (_timestamp_us(NOW) - 60_000_000, 2)
-    await db.add_event("r", EventData(id=1, ts=NOW, severity="info", title="t", message="m"))
-    assert conn.execute.await_args.args[1:] == (3,)
-    assert "LIMIT $1" in conn.execute.await_args.args[0]
-
-
-async def test_postgres_lossless_migration_without_external_db(monkeypatch):
-    pg = _pg()
-    monkeypatch.setattr(pg, "SAMPLE_PAGE", 2)
-    conn = MagicMock(execute=AsyncMock(), executemany=AsyncMock())
-    conn.transaction.return_value.__aenter__ = AsyncMock()
-    conn.transaction.return_value.__aexit__ = AsyncMock(return_value=False)
-    conn.fetch = AsyncMock(side_effect=[
-        [{"id": -1, "ts": NOW}, {"id": 0, "ts": "unknown"}],
-        [{"id": 1, "ts": "2026-11-20 01:00:00.123456+02:00"}], [],
-    ])
-    await pg.PostgresDatabase._migrate_battery_timestamps(conn)
-    assert conn.executemany.await_args_list[0].args[1] == [(_timestamp_us(NOW), -1)]
-    assert conn.executemany.await_args_list[1].args[1] == [(_timestamp_us(NOW), 1)]
-    assert conn.fetch.await_args_list[0].args[1:] == (2,)
-    assert conn.fetch.await_args_list[1].args[1:] == (0, 2)
-    assert "idx_battery_time_utc" in conn.execute.await_args.args[0]
-    assert conn.transaction.return_value.__aexit__.await_args.args == (None, None, None)
-
-
-async def test_postgres_migration_error_exits_transaction_without_external_db():
-    pg = _pg()
-    conn = MagicMock(execute=AsyncMock(), executemany=AsyncMock(side_effect=RuntimeError("injected")))
-    conn.transaction.return_value.__aenter__ = AsyncMock()
-    conn.transaction.return_value.__aexit__ = AsyncMock(return_value=False)
-    conn.fetch = AsyncMock(return_value=[{"id": 1, "ts": NOW}])
-    with pytest.raises(RuntimeError, match="injected"):
-        await pg.PostgresDatabase._migrate_battery_timestamps(conn)
-    assert conn.transaction.return_value.__aexit__.await_args.args[0] is RuntimeError

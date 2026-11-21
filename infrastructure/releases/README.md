@@ -6,14 +6,24 @@ is an observed baseline with known regressions, not an approved replacement for
 main or proof of physical acceptance.
 
 ```bash
-python3 -B scripts/verify_release.py infrastructure/releases/observed-20261015.json --live
+python3 -B scripts/verify_release.py infrastructure/releases/observed-20261015.json --source-ref deployed/dashboard-20261015 --live
 ```
 
 The checker only reads source, container image IDs/files and public assets; it
-does not restart or command anything. Without `--live`, it checks local files.
+does not restart or command anything. Without `--live`, it checks only source.
+`--source-ref` reads the named Git revision; omit it to check the current working
+tree. Historical manifests describe their original packaging, so checking them
+against current source can correctly report mismatches after cleanup.
 Historical image labels lack Git provenance, so the manifest supplements rather
 than fabricates their identity. Keep its SHA/file evidence when preparing a
 future reviewed build.
+
+Current images package both floors only under `/maps/catalog`; the default static
+map is `/maps/catalog/second_map.yaml`. The former `/maps/cmuq-floor1/first_map.yaml`
+and `/maps/cmuq-floor2/second_map.yaml` paths are no longer packaged. Update external
+scripts or `PATROLBOT_STATIC_MAP_YAML` overrides that use those paths before
+rebuilding. Custom mounted YAML paths and the static fallback remain supported.
+Historical manifests and remote file expectations remain unchanged.
 
 Original unmerged work is preserved on `review/*` branches. The dashboard host
 source is separately recorded as `review/dashboard-device-checkout-20261015`;

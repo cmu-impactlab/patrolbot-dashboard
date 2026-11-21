@@ -12,18 +12,30 @@ import sys
 import urllib.request
 
 
+def repository_mismatches(root, entries, source_ref=None):
+    failures = []
+    for entry in entries:
+        path = entry['repository_path']
+        try:
+            data = (subprocess.check_output(['git', 'show', f'{source_ref}:{path}'], cwd=root)
+                    if source_ref else (root / path).read_bytes())
+        except (OSError, subprocess.CalledProcessError):
+            failures.append('repository mismatch: ' + path)
+            continue
+        if hashlib.sha256(data).hexdigest() != entry['sha256']:
+            failures.append('repository mismatch: ' + path)
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--source-ref', help='Compare Git files at this release ref instead of the current working tree')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads(args.manifest.read_text())
-    failures = []
-    for entry in manifest['files']:
-        path = root / entry['repository_path']
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
-            failures.append('repository mismatch: ' + entry['repository_path'])
+    failures = repository_mismatches(root, manifest['files'], args.source_ref)
     if args.live:
         # Remote values are read only. Arguments come from a reviewed manifest,
         # not from robot messages or browser requests.
@@ -73,7 +85,7 @@ print(json.dumps(failures))
     for failure in failures:
         print(failure, file=sys.stderr)
     print(json.dumps({'passed': not failures, 'files': len(manifest['files']),
-                      'live': args.live, 'physical_acceptance': False}))
+                      'source_ref': args.source_ref, 'live': args.live, 'physical_acceptance': False}))
     return bool(failures)
 
 

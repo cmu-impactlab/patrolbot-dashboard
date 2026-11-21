@@ -13,7 +13,7 @@ from typing import Any
 from ..authentication.local import User
 from ..authentication.sessions import COOKIE_NAME
 from ..authentication.sessions import verify as verify_session
-from .errors import TuningForbidden, TuningInvalid
+from .errors import TuningForbidden
 from .validation import MAX_USERNAME
 
 ROLES = ("administrator", "operator", "observer")
@@ -75,8 +75,3 @@ def require_administrator(user: User, operation: Any) -> None:
     if is_mutation(operation) and not getattr(user, "is_administrator", False):
         raise TuningForbidden(
             "Changing robot tuning needs an administrator account.")
-
-
-def validate_actor_shape(actor: dict[str, Any]) -> None:
-    if not isinstance(actor, dict) or set(actor) != {"id", "username", "role"}:
-        raise TuningInvalid("The derived actor block is malformed.")

@@ -16,7 +16,6 @@ import {
   REGISTRY_GROUPS,
   REGISTRY_PROVENANCE,
   sliderRange,
-  valuesEqual,
 } from "../lib/tuning";
 import type { NormalizedSnapshot, TuningCatalogEntry, TuningValue } from "../lib/tuning";
 import { pendingRedeploy, useTuningStore } from "../stores/tuningStore";
@@ -423,6 +422,3 @@ export function TuningPanel() {
     </ObservedValues.Provider>
   );
 }
-
-/** Exposed for tests: whether a saved value equals the runtime read-back. */
-export const tuningValuesEqual = valuesEqual;

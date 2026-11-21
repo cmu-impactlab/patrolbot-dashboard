@@ -1,24 +1,8 @@
 from ..settings import Settings
+from .repo import Database
 
 
-def create_database(settings: Settings):
-    """Pick the persistence backend from configuration.
-
-    SQLite is *the* supported backend — the dashboard is a single-host
-    deployment and SQLite covers it comfortably (the live database is ~30 MB,
-    dominated by battery samples).
-
-    The PostgreSQL path below is retained but unsupported: not deployed, not
-    in CI, and not advertised anywhere in the deployment configuration. It is
-    selected only by explicitly setting PATROLBOT_DATABASE_URL. See
-    settings.database_url.
-    """
-    if settings.database_url.startswith(("postgres://", "postgresql://")):
-        from .pg import PostgresDatabase
-
-        return PostgresDatabase(settings.database_url, event_limit=settings.event_limit,
-                                battery_history_days=settings.battery_history_days)
-    from .repo import Database
-
+def create_database(settings: Settings) -> Database:
+    """Open SQLite at the configured path with the configured history bounds."""
     return Database(settings.database_path, event_limit=settings.event_limit,
                     battery_history_days=settings.battery_history_days)

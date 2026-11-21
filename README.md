@@ -152,11 +152,21 @@ the SQLite database across container recreation.
 
 SQLite is the supported database in every environment. This is a single-host,
 single-robot deployment and the live database is around 30 MB, almost all of it
-battery samples — there is nothing here that needs a database server. An
-unsupported PostgreSQL backend remains in the tree at
-`server/app/database/pg.py` for anyone who later needs one; it is not deployed,
-not covered by CI, and selected only by setting `PATROLBOT_DATABASE_URL`
-explicitly.
+battery samples — there is nothing here that needs a database server.
+Use `PATROLBOT_DATABASE_PATH` to select the SQLite file. Nonempty values of the
+obsolete `PATROLBOT_DATABASE_URL` or `DATABASE_URL` environment/dotenv names
+(case insensitive) prevent startup in every environment. Constructor spellings
+`database_url`, `DATABASE_URL`, and `PATROLBOT_DATABASE_URL` are also rejected
+(case insensitive), before source precedence can hide any nonempty value;
+migrate data explicitly before switching to a SQLite file. Empty values remain
+accepted for compatibility. No database conversion is performed automatically.
+
+Dotenv inputs must be regular files; FIFO/pipe inputs (including
+`/proc/self/fd` pipe paths) are unsupported and refused before reading, even
+when empty. This applies to effective `model_config["env_file"]` defaults and
+constructor `_env_file` overrides, including multiple files and `~` paths.
+`_env_file=None` disables dotenv loading; an explicit regular-file override
+replaces the configured default. Missing dotenv files remain optional.
 
 Configure the robot Pi to use the public WebSocket endpoint:
 

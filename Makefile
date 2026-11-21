@@ -6,7 +6,7 @@ PIP := server/.venv/bin/pip
 #   make test-tuning-contract TUNING_PY=/tmp/opencode/tuning-contract-venv/bin/python
 TUNING_PY ?= $(PY)
 
-.PHONY: setup server mock frontend test test-server test-server-external test-mock test-bridge test-frontend test-tuning-contract test-tuning-contract-parity smoke lint
+.PHONY: setup server mock frontend test test-server test-mock test-bridge test-frontend test-tuning-contract test-tuning-contract-parity smoke lint
 
 setup:
 	python3 -m venv server/.venv
@@ -27,11 +27,7 @@ frontend:
 test: test-server test-mock test-bridge test-frontend
 
 test-server:
-	cd server && .venv/bin/python -m pytest tests -m "not external"
-
-# Opt-in external-service tests (PostgreSQL). Requires PATROLBOT_TEST_PG_URL.
-test-server-external:
-	cd server && .venv/bin/python -m pytest tests -m external
+	cd server && .venv/bin/python -m pytest tests
 
 test-mock:
 	cd mock-robot && ../server/.venv/bin/python -m pytest tests -q

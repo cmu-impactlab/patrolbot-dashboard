@@ -156,10 +156,16 @@ async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
     buffered = []
     stop_id = None
     settled_after = None
-    final_check_at = deadline - min(.02, timeout / 10)
     while True:
         remaining()
-        audit_started = time.monotonic()
+        if expect_stop is None:
+            response = await asyncio.wait_for(client.get('/lab/status'), remaining())
+            remaining()
+            response.raise_for_status()
+            status = response.json()
+            assert status['robot_id'] == robot and status['physical_acceptance'] is False, status
+            facts = status['completion']
+            # Read audit after facts to include a just-finished detached revoke's stop.
         if expect_stop is not False:
             response = await asyncio.wait_for(
                 client.get("/api/commands?limit=500"), timeout=remaining())
@@ -180,33 +186,37 @@ async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
         if stop_id is not None or expect_stop is False:
             buffered.clear()
 
-        if done == expected.keys():
-            if expect_stop is False or stop_id is not None:
+        if expect_stop is None:
+            start = next(row for row in audit if row["command_id"] == command_id)
+            complete = bool(start.get('completed_at'))
+            if complete:
+                assert start.get('outcome') in expected[command_id], start
+                if settled_after is None:
+                    # Keep .5 s settlement for the bounded .3 s zero send.
+                    settled_after = time.monotonic() + .5
+            if stop_id is not None:
+                stop = next(row for row in audit if row['command_id'] == stop_id)
+                if stop.get('completed_at'):
+                    assert stop.get('outcome') == 'succeeded', stop
+                else:
+                    complete = False
+            if (done == expected.keys() and complete
+                    and time.monotonic() >= settled_after
+                    and facts['active_ids'] == [] and facts['owner_present'] is False
+                    and facts['admission_locked'] is False and facts['revokes_pending'] == 0):
+                if stop_id is None:
+                    assert start['outcome'] == 'canceled', start
+                    assert all(frame['data'].get('outcome') == 'canceled'
+                               for frame in buffered
+                               if frame['data'].get('command_id') == command_id)
                 remaining()
                 return
-            if expect_stop is None:
-                start = next(row for row in audit if row["command_id"] == command_id)
-                if start.get("completed_at"):
-                    assert start.get("outcome") in expected[command_id], start
-                    # command.result precedes terminal()/_finish(). A completed audit
-                    # plus settlement lets an already-running revoke finish auditing.
-                    # Settle for at least .5 s (send is bounded at .3 s), then
-                    # use the overall budget, reserving one poll for final audit.
-                    if settled_after is None:
-                        settled_after = time.monotonic() + .5
-                    if audit_started >= max(settled_after, final_check_at):
-                        assert start["outcome"] == "canceled", start
-                        assert all(frame["data"].get("outcome") == "canceled"
-                                   for frame in buffered
-                                   if frame["data"].get("command_id") == command_id)
-                        remaining()
-                        return
+        elif done == expected.keys() and (expect_stop is False or stop_id is not None):
+            remaining()
+            return
 
         budget = remaining()
-        # Poll the audit during settlement and while an issued stop is still unknown.
-        polling = expect_stop is not False and stop_id is None
-        if polling and time.monotonic() < final_check_at:
-            budget = min(budget, final_check_at - time.monotonic())
+        polling = expect_stop is None or (expect_stop is True and stop_id is None)
         try:
             frame = json.loads(await asyncio.wait_for(
                 socket.recv(), timeout=min(.02, budget) if polling else budget))
@@ -216,6 +226,9 @@ async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
         except asyncio.TimeoutError:
             if not polling:
                 raise
+        if polling:
+            # Queued telemetry must not turn passive completion polling into a busy loop.
+            await asyncio.sleep(min(.02, remaining()))
 
 
 async def main():

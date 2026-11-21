@@ -207,14 +207,26 @@ def test_silent_socket_is_bounded_by_remaining_budget(monkeypatch):
 
 
 class WatchdogLab:
-    """Advance virtual time on receives; audit and results can settle independently."""
-    def __init__(self, monkeypatch, frames=(), stop_at=None, completed_at=0.):
+    """Model HTTP/WS scheduling, detached revoke work and independent DB writes."""
+    def __init__(self, monkeypatch, frames=(), stop_at=None, completed_at=0.,
+                 stop_completed_at=0., http_latency=.025):
         self.now = 0.
         self.frames = list(frames)
         self.stop_at = stop_at
         self.completed_at = completed_at
         self.audits = []
+        self.observations = []
+        self.sleeps = []
+        self.stop_completed_at = stop_completed_at
+        self.http_latency = http_latency
+        self.blocked = {}
         monkeypatch.setattr(checker, "time", SimpleNamespace(monotonic=lambda: self.now))
+
+        async def sleep(delay):
+            assert 0 < delay <= .02
+            self.sleeps.append(delay)
+            self.now = round(self.now + delay, 8)
+        monkeypatch.setattr(checker.asyncio, 'sleep', sleep)
 
     async def recv(self):
         self.now = round(self.now + .01, 8)
@@ -223,21 +235,35 @@ class WatchdogLab:
         raise asyncio.TimeoutError
 
     async def get(self, path):
+        self.now = round(self.now + self.http_latency, 8)
+        self.observations.append((path, self.now))
+        if path == '/lab/status':
+            facts = dict(active_ids=[], owner_present=False, admission_locked=False,
+                         revokes_pending=int(self.stop_at is not None and self.now < self.stop_at))
+            facts.update(self.blocked)
+            data = dict(robot_id=ROBOT, physical_acceptance=False, completion=facts)
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: data)
         assert path == "/api/commands?limit=500"
         self.audits.append(self.now)
         records = audit() if self.stop_at is not None and self.now >= self.stop_at else audit()[1:]
         if self.completed_at is not None and self.now >= self.completed_at:
             records[-2].update(outcome="canceled", completed_at="2026-11-20T00:00:00Z")
+        if records[0]['command_id'] == STOP:
+            if self.stop_completed_at is not None and self.now >= self.stop_completed_at:
+                records[0].update(outcome='succeeded', completed_at='done')
         return SimpleNamespace(raise_for_status=lambda: None, json=lambda: records)
 
     def finish(self, timeout=2.):
         asyncio.run(checker.finish(self, self, ROBOT, SESSION, None, timeout=timeout))
 
 
-def test_robot_watchdog_first_requires_completed_audit_and_final_confirmation(monkeypatch):
+def test_robot_watchdog_first_requires_completed_audit_settlement_and_idle_facts(monkeypatch):
     lab = WatchdogLab(monkeypatch, [result()], completed_at=.7)
     lab.finish()
-    assert lab.audits[-1] >= 1.98
+    assert 1.2 <= lab.audits[-1] < 1.4
+    assert lab.sleeps
+    assert [path for path, _ in lab.observations] == [
+        "/lab/status", "/api/commands?limit=500"] * len(lab.audits)
     assert lab.audits[-1] == lab.now < 2.
 
 
@@ -247,7 +273,7 @@ def test_server_watchdog_first_requires_exact_stop_success(monkeypatch, reverse,
     frames = [result(outcome=outcome), result(STOP, "succeeded")]
     lab = WatchdogLab(monkeypatch, frames[::-1] if reverse else frames, stop_at=0.)
     lab.finish()
-    assert lab.now < .5
+    assert .5 <= lab.now < .8
 
 
 def test_stop_audited_after_start_terminal_during_settlement(monkeypatch):
@@ -320,14 +346,16 @@ def test_producer_loss_deadline_noise_does_not_extend_settlement(monkeypatch):
     with pytest.raises(AssertionError, match="expected terminals"):
         lab.finish()
     assert lab.now <= 2.1
+    assert lab.sleeps and len(lab.audits) < 30
 
 
 def test_slow_final_audit_cannot_succeed_after_deadline(monkeypatch):
     lab = WatchdogLab(monkeypatch, [result()])
+    lab.blocked = dict(revokes_pending=1)
     get = lab.get
 
     async def late_get(path):
-        if lab.now >= 1.98:
+        if path == "/api/commands?limit=500" and lab.now >= 1.85:
             lab.now = 2.1
         return await get(path)
 
@@ -353,6 +381,92 @@ def test_cancellation_too_late_for_settlement_cannot_pass(monkeypatch):
     lab = WatchdogLab(monkeypatch, [result()], completed_at=1.8)
     with pytest.raises(AssertionError, match="expected terminals"):
         lab.finish()
+
+
+@pytest.mark.parametrize('http_latency', [.025, .04, .075, .12])
+def test_watchdog_completion_with_http_and_ws_scheduling_latency(monkeypatch, http_latency):
+    lab = WatchdogLab(monkeypatch, [result()], http_latency=http_latency)
+    lab.finish()
+    assert .5 <= lab.now < 1.3
+    assert lab.sleeps and len(lab.audits) < 20
+
+
+@pytest.mark.parametrize('blocked', [
+    dict(active_ids=[OLD_STOP]), dict(owner_present=True),
+    dict(admission_locked=True), dict(revokes_pending=1),
+])
+def test_completed_cancellation_alone_cannot_bypass_server_work(monkeypatch, blocked):
+    lab = WatchdogLab(monkeypatch, [result()])
+    lab.blocked = blocked
+    with pytest.raises(AssertionError, match='expected terminals'):
+        lab.finish()
+    assert 2 <= lab.now < 2.1
+    assert lab.sleeps and len(lab.audits) < 30
+
+
+def test_stop_audited_between_status_and_audit_still_needs_terminal(monkeypatch):
+    # Status sees a detached revoke at .025; its stop enters audit at .05.
+    lab = WatchdogLab(monkeypatch, [result()], stop_at=.04)
+    with pytest.raises((AssertionError, asyncio.TimeoutError)):
+        lab.finish()
+    assert lab.audits[0] == .05
+
+
+def test_detached_revoke_and_late_db_completion_require_exact_stop(monkeypatch):
+    lab = WatchdogLab(monkeypatch, [result(), result(STOP, 'succeeded')],
+                      stop_at=.9, stop_completed_at=1.3)
+    lab.finish()
+    assert 1.3 <= lab.now < 1.5
+
+
+@pytest.mark.parametrize('failure', ['start_failed', 'start_succeeded', 'stop_failed',
+                                      'stop_missing_completion', 'wrong_identity',
+                                      'stop_disappeared', 'wrong_robot', 'physical'])
+def test_passive_watchdog_completion_rejects_bad_audit_or_status(monkeypatch, failure):
+    lab = WatchdogLab(monkeypatch, [result(), result(STOP, 'succeeded')],
+                      stop_at=None if failure.startswith('start_') else .4)
+    get = lab.get
+
+    async def bad_get(path):
+        response = await get(path)
+        data = response.json()
+        if path == '/lab/status':
+            if failure == 'wrong_robot':
+                data['robot_id'] = 'other'
+            elif failure == 'physical':
+                data['physical_acceptance'] = True
+        elif failure.startswith('start_'):
+            data[-2]['outcome'] = failure.removeprefix('start_')
+        elif data[0]['command_id'] == STOP:
+            if failure == 'stop_failed':
+                data[0]['outcome'] = 'failed'
+            elif failure == 'stop_missing_completion':
+                data[0]['completed_at'] = None
+            elif failure == 'wrong_identity':
+                data[0]['session_generation'] += 1
+            elif failure == 'stop_disappeared' and lab.now >= .6:
+                data.pop(0)
+        return response
+
+    lab.get = bad_get
+    with pytest.raises(AssertionError):
+        lab.finish()
+
+
+@pytest.mark.parametrize('endpoint', ['/lab/status', '/api/commands?limit=500'])
+def test_watchdog_http_response_after_total_budget_fails(monkeypatch, endpoint):
+    lab = WatchdogLab(monkeypatch, [result()])
+    get = lab.get
+
+    async def late_get(path):
+        response = await get(path)
+        if path == endpoint:
+            lab.now = 6.01
+        return response
+
+    lab.get = late_get
+    with pytest.raises(AssertionError, match='expected terminals'):
+        lab.finish(timeout=6)
 
 
 def stale_result():

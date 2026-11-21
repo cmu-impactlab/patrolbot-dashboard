@@ -78,7 +78,7 @@ check_server_tests_against_constraints() {
             -c /tmp/repo/server/constraints.txt "/tmp/repo/server[dev]" >/dev/null
         cd /tmp/repo/server
         PYTHONPATH=/tmp/repo/server:/tmp/repo/ros2_ws/src/patrolbot_web_bridge \
-            python -m pytest tests -m "not external" -q
+            python -m pytest tests -q
     ' >/tmp/constrained-tests.log 2>&1; then
         echo "OK   server suite passes on the constrained set"
     else

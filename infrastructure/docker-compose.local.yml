@@ -21,7 +21,7 @@ services:
     environment:
       PATROLBOT_ROBOT_TOKEN: ${PATROLBOT_ROBOT_TOKEN:-dev-token}
       PATROLBOT_DATABASE_PATH: /data/patrolbot.db
-      PATROLBOT_STATIC_MAP_YAML: /maps/cmuq-floor2/second_map.yaml
+      PATROLBOT_STATIC_MAP_YAML: /maps/catalog/second_map.yaml
       # Auth passthrough (defaults keep the single-user local mode). For CMU
       # sign-in set PATROLBOT_AUTH_MODE=oidc plus the OIDC client settings;
       # scripts/dev_idp.py is a stand-in issuer until CMU credentials exist.

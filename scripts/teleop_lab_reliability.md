@@ -1,5 +1,69 @@
 # Isolated teleop harness investigation (2026-11-20)
 
+## Producer-loss completion correction on cb9bcfe (2026-11-21)
+
+The immutable parent native matrix at `cb9bcfe` is **4 passed, 2 failed**,
+with all six teardowns clean. Failures remain at
+`/tmp/opencode/bloat-cycle/lab-matrix-cb9bcfe/serial-3/full.log` and
+`/tmp/opencode/bloat-cycle/lab-matrix-cb9bcfe/bounded-load-2/full.log` (and their
+complete child evidence). Both fail producer-loss `finish(expect_stop=None)`
+at `remaining()`, after the exact start logs `canceled` with no logged automatic
+stop. This does not establish which watchdog won or validate the failed cases.
+The checker deliberately postponed final audit until `deadline - .02`; HTTP
+latency and scheduling could consume that reserve or start the final poll late.
+The previous fake advanced only on WebSocket receives, with zero HTTP latency.
+
+The local checker now reads existing LAB ONLY `/lab/status` completion facts
+before each audit read. Return requires no active IDs (including unrelated
+commands on the lab robot), no owner, unlocked admission and zero pending
+revokes; completed start audit; any correlated stop's completed `succeeded`
+audit; and every exact expected WebSocket terminal. A no-stop return additionally
+requires the exact `canceled` terminal and completed `canceled` start audit.
+It retains the half-second settlement for the bounded .3-second zero send, and
+can return before the artificial last-20-ms poll only with these stronger facts.
+An owner removed during an in-flight revoke cannot alone prove completion.
+Reading audit after facts catches a stop audited as that revoke finishes.
+Known stops still require their exact successful WebSocket terminal, even with
+successful completed audit. A short bounded sleep prevents queued telemetry
+from driving a busy polling loop. All operations share the original six-second
+budget. There are no command, release or restart retries and no new outcomes.
+
+Scope is `check_teleop_receipt.py`, its portable tests and these audit documents.
+Production broker/teleop/receiver/safety files, existing stale-odometry barrier,
+fault evidence/readiness/exact refusal, command counts, zero/inactive receipts
+and physical-acceptance-false checks are unchanged. `RTK.md` was not found in
+the checkout or checked ancestors. No network/install/Docker/ROS/robot,
+subagents, commits, pushes or merges were used.
+
+Evidence is separately retained in `/tmp/opencode/bloat-cycle/receipt-cb9-local/`:
+
+| Check | Actual result / log |
+| --- | --- |
+| Original receipt tests before edits | 117 passed; `before.log` |
+| New regression selection against original HEAD checker | 15 failed, 3 passed, 119 deselected; `regression-before.log` |
+| Intermediate receipt runs | 117 passed in `first-after.log`; 137 passed in `focused-after.log` |
+| Final lab/checker/stale-evidence tests | 320 passed, 2.40 s; `focused-final.log` |
+| Final complete `scripts/tests` | 370 passed, 3.50 s; `all-scripts-final.log` |
+
+Final runs used `/tmp/opencode/bloat-cycle/venv/bin/python -B`,
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=scripts:server`, pytest `-q -rs
+-p no:cacheprovider`, with never-awaited coroutine, unraisable and thread
+warnings treated as errors. They reported no warnings, skips or deselections.
+Tests model 25–120 ms HTTP scheduling latency, WebSocket scheduling, bounded
+poll sleeps, detached revokes beyond settlement, late stop audit/DB completion,
+near-deadline stop discovery, failed/missing/mismatched stops, retained owner/
+admission/unrelated active work, expired HTTP/WS budgets and noise. Python AST
+parsing and `git diff --check` pass. Initial/intermediate logs remain separate.
+
+The parent's prior evidence is retained as reported: full Codex review 4 clean,
+all 19 CI checks green and 14 stages at `cb9bcfe` passing (1527 server,
+575 frontend, 350 scripts, 342 adapter plus 1 ROS skip, 26 mock, 136 contracts,
+3 browser). Those results do not validate this uncommitted patch. Core PR 86
+was reported merged and dashboard PR 43 open; no remote state was inspected.
+Parent-owned new committed-head native matrix, full validation/CI and independent
+re-review remain mandatory before the authorized cleanup merge.
+
+
 ## Fault completion ordering correction (2026-11-21)
 
 Base HEAD: `538b96f61dd8b2e28e796a63aac9536f9df3455f`. The parent's fixed-count

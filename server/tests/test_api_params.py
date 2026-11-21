@@ -1,13 +1,10 @@
 """Boundary validation for the history/snapshot query parameters.
 
-The upper bounds were always clamped; the lower bounds were not, and the two
-backends disagree about what a negative LIMIT means. SQLite treats any negative
-LIMIT as "no limit" — so `?limit=-1` quietly returned the entire events table
-instead of 100 rows — while PostgreSQL raises `LIMIT must not be negative`, a
-500 rather than a client error. A negative `minutes` window is nonsense on both.
+The upper bounds were always clamped; the lower bounds were not. SQLite treats
+any negative LIMIT as "no limit" — so `?limit=-1` quietly returned the entire
+events table instead of 100 rows. A negative `minutes` window inverts the time range.
 
-These are rejected at the parameter, so the answer is the same 422 regardless of
-which database is configured.
+These are rejected at the parameter with 422 before reaching the database.
 """
 import pytest
 from fastapi.testclient import TestClient

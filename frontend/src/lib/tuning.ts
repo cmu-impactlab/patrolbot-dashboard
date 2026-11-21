@@ -472,11 +472,6 @@ export function gaugeReading(value: number | null, cap: number | null, kind: "li
   return { band: overLimit ? "danger" : speedBand(Number.isFinite(ratio) ? ratio : null), ratio, percent: Number.isFinite(ratio) ? ratio * 100 : null, overLimit, direction, cap, value };
 }
 
-/** Group used to collect dependent drafts into a single validated batch. */
-export function entriesForGroup(entries: TuningCatalogEntry[], group: string): TuningCatalogEntry[] {
-  return entries.filter((entry) => entry.group === group);
-}
-
 /* ------------------------------------------------------------------ */
 /* Validation                                                           */
 /* ------------------------------------------------------------------ */
@@ -699,11 +694,6 @@ export function newRequestId(): string {
 
 export function generationFor(sessionId: string) {
   return { capability: TUNING_CAPABILITY, session_id: sessionId };
-}
-
-export function readRequest(sessionId: string, requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "read",
-    request_id: requestId, generation: generationFor(sessionId) };
 }
 
 export function saveRequest(sessionId: string, baseRevision: number, changes: BatchChange[], requestId = newRequestId()): CanonicalRequest {
