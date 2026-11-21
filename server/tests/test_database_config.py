@@ -1,5 +1,6 @@
 """SQLite-only configuration must never silently abandon a configured database."""
 import builtins
+import traceback
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from app.settings import Settings
 
 
 @pytest.mark.parametrize("environment", ["development", "production"])
-@pytest.mark.parametrize("source", ["argument", "environment", "dotenv"])
+@pytest.mark.parametrize("source", ["argument", "environment", "dotenv", "secrets"])
 @pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL",
                                   "PaTrOlBoT_DaTaBaSe_Url", "DaTaBaSe_Url"])
 @pytest.mark.parametrize("url", [
@@ -26,6 +27,9 @@ def test_nonempty_database_url_refused(tmp_path, monkeypatch, environment, sourc
         options[name] = url
     elif source == "environment":
         monkeypatch.setenv(name, url)
+    elif source == "secrets":
+        (tmp_path / name).write_text(url)
+        options["_secrets_dir"] = tmp_path
     else:
         dotenv = tmp_path / ".env"
         dotenv.write_text(f'{name}="{url}"\n')
@@ -37,18 +41,22 @@ def test_nonempty_database_url_refused(tmp_path, monkeypatch, environment, sourc
         "PATROLBOT_DATABASE_PATH; migrate data explicitly."
     )
     assert "secret" not in repr(error.value)
+    assert "user:secret" not in "".join(traceback.format_exception(error.value))
     assert not path.exists()
 
 
-@pytest.mark.parametrize("value", [123, ["secret"], {"password": "secret"}])
-@pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL"])
+@pytest.mark.parametrize("value", [123, 0, False, [], {}, ["credential-marker"],
+                                  {"password": "credential-marker"}])
+@pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL",
+                                  "DaTaBaSe_Url", "PaTrOlBoT_DaTaBaSe_Url"])
 def test_invalid_constructor_url_is_redacted(name, value):
     with pytest.raises(RuntimeError) as error:
         Settings(**{name: value})
-    assert "secret" not in repr(error.value)
+    assert "credential-marker" not in repr(error.value)
+    assert "credential-marker" not in "".join(traceback.format_exception(error.value))
 
 
-@pytest.mark.parametrize("source", ["argument", "environment", "dotenv"])
+@pytest.mark.parametrize("source", ["argument", "environment", "dotenv", "secrets"])
 def test_empty_canonical_cannot_hide_alias(tmp_path, monkeypatch, source):
     options = {"database_url": ""}
     if source == "argument":
@@ -56,6 +64,10 @@ def test_empty_canonical_cannot_hide_alias(tmp_path, monkeypatch, source):
     elif source == "environment":
         monkeypatch.setenv("PATROLBOT_DATABASE_URL", "")
         monkeypatch.setenv("DATABASE_URL", "secret")
+    elif source == "secrets":
+        (tmp_path / "PATROLBOT_DATABASE_URL").write_text("")
+        (tmp_path / "DATABASE_URL").write_text("secret")
+        options["_secrets_dir"] = tmp_path
     else:
         path = tmp_path / ".env"
         path.write_text('PATROLBOT_DATABASE_URL=""\nDATABASE_URL=secret\n')
@@ -66,13 +78,16 @@ def test_empty_canonical_cannot_hide_alias(tmp_path, monkeypatch, source):
 
 @pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL",
                                   "DaTaBaSe_Url", "PaTrOlBoT_DaTaBaSe_Url"])
-@pytest.mark.parametrize("source", ["argument", "environment", "dotenv"])
+@pytest.mark.parametrize("source", ["argument", "environment", "dotenv", "secrets"])
 def test_empty_alias_is_allowed(tmp_path, monkeypatch, name, source):
     options = {}
     if source == "argument":
         options[name] = ""
     elif source == "environment":
         monkeypatch.setenv(name, "")
+    elif source == "secrets":
+        (tmp_path / name).write_text("")
+        options["_secrets_dir"] = tmp_path
     else:
         path = tmp_path / ".env"
         path.write_text(f'{name}=""\n')
@@ -81,12 +96,27 @@ def test_empty_alias_is_allowed(tmp_path, monkeypatch, name, source):
 
 
 @pytest.mark.parametrize("name", ["DATABASE_URL", "PATROLBOT_DATABASE_URL"])
-@pytest.mark.parametrize("source", ["environment", "dotenv", "dotenv-files"])
+@pytest.mark.parametrize("source", ["argument", "environment", "dotenv", "dotenv-files",
+                                    "secrets", "secret-dirs"])
 def test_empty_case_variant_cannot_hide_url(tmp_path, monkeypatch, name, source):
     options = {}
-    if source == "environment":
+    if source == "argument":
+        options[name.lower()] = ""
+        options[name] = "secret"
+    elif source == "environment":
         monkeypatch.setenv(name, "secret")
         monkeypatch.setenv(name.lower(), "")
+    elif source in {"secrets", "secret-dirs"}:
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / name).write_text("secret")
+        if source == "secrets":
+            (first / name.lower()).write_text("")
+            options["_secrets_dir"] = first
+        else:
+            (second / name).write_text("")
+            options["_secrets_dir"] = (first, second)
     else:
         first, second = tmp_path / "first.env", tmp_path / "second.env"
         if source == "dotenv":
@@ -98,6 +128,28 @@ def test_empty_case_variant_cannot_hide_url(tmp_path, monkeypatch, name, source)
             options["_env_file"] = (first, second)
     with pytest.raises(RuntimeError, match="obsolete"):
         Settings(**options)
+
+
+@pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL",
+                                  "DaTaBaSe_Url", "PaTrOlBoT_DaTaBaSe_Url"])
+@pytest.mark.parametrize("source", ["argument", "environment", "dotenv"])
+def test_empty_higher_source_cannot_hide_secret_url(tmp_path, monkeypatch, name, source):
+    (tmp_path / name).write_text("postgresql://user:secret@unused/db")
+    options = {"_env_file": None, "_secrets_dir": tmp_path,
+               "database_path": str(tmp_path / "must-not-create.db")}
+    if source == "argument":
+        options["database_url"] = ""
+    elif source == "environment":
+        monkeypatch.setenv("PATROLBOT_DATABASE_URL", "")
+    else:
+        dotenv = tmp_path / ".env"
+        dotenv.write_text('PATROLBOT_DATABASE_URL=""\n')
+        options["_env_file"] = dotenv
+    with pytest.raises(RuntimeError, match="obsolete") as error:
+        create_app(Settings(**options))
+    assert "user:secret" not in repr(error.value)
+    assert "user:secret" not in "".join(traceback.format_exception(error.value))
+    assert not (tmp_path / "must-not-create.db").exists()
 
 
 @pytest.mark.parametrize("source", ["omitted", "argument", "environment", "dotenv"])

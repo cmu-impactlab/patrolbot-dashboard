@@ -8,6 +8,20 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_DATABASE_URL_NAMES = {"database_url", "patrolbot_database_url"}
+
+
+def _reject_database_url(values):
+    if any(key.lower() in _DATABASE_URL_NAMES
+           and value is not None and (not isinstance(value, str) or value != "")
+           for key, value in values.items()):
+        # RuntimeError keeps Pydantic from echoing credential-bearing input.
+        raise RuntimeError(
+            "Database URL configuration is obsolete. SQLite only; use "
+            "PATROLBOT_DATABASE_PATH; migrate data explicitly."
+        )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PATROLBOT_", env_file=".env", extra="ignore")
 
@@ -95,6 +109,11 @@ class Settings(BaseSettings):
     static_map_yaml: str = ""
     static_map_name: str = "CMU-Q Floor 1"
 
+    def __init__(__pydantic_self__, **values):
+        # Pydantic can discard conflicting case variants before customising sources.
+        _reject_database_url(values)
+        super().__init__(**values)
+
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
                                    dotenv_settings, file_secret_settings):
@@ -102,18 +121,28 @@ class Settings(BaseSettings):
         if isinstance(env_files, (str, os.PathLike)):
             env_files = (env_files,)
         # Inspect raw spellings too: case folding and file precedence can hide URLs.
-        sources = [init_settings.init_kwargs, os.environ, dotenv_settings.env_vars]
+        sources = [init_settings(), os.environ, dotenv_settings.env_vars]
         sources.extend(dotenv_values(path, encoding=dotenv_settings.env_file_encoding)
                        for path in env_files or () if Path(path).is_file())
         for values in sources:
-            if any(key.lower() in {"database_url", "patrolbot_database_url"}
-                   and value not in (None, "") for key, value in values.items()):
-                # RuntimeError keeps Pydantic from echoing credential-bearing input.
-                raise RuntimeError(
-                    "Database URL configuration is obsolete. SQLite only; use "
-                    "PATROLBOT_DATABASE_PATH; migrate data explicitly."
-                )
-        return init_settings, env_settings, dotenv_settings, file_secret_settings
+            _reject_database_url(values)
+
+        def checked_file_secrets():
+            values = file_secret_settings()
+            _reject_database_url(values)
+            secret_dirs = file_secret_settings.secrets_dir
+            if isinstance(secret_dirs, (str, os.PathLike)):
+                secret_dirs = (secret_dirs,)
+            # Secrets trim whitespace and select one spelling/path; inspect hidden values too.
+            for directory in secret_dirs or ():
+                directory = Path(directory).expanduser()
+                if directory.is_dir():
+                    for path in directory.iterdir():
+                        if path.name.lower() in _DATABASE_URL_NAMES and path.is_file():
+                            _reject_database_url({path.name: path.read_text(encoding="utf-8")})
+            return values
+
+        return init_settings, env_settings, dotenv_settings, checked_file_secrets
 
     @property
     def is_production(self) -> bool:

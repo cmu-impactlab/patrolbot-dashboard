@@ -79,10 +79,22 @@ assert Settings().database_url == ""
 
 def test_non_database_source_precedence_unchanged(tmp_path, monkeypatch):
     from app.settings import Settings
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "PATROLBOT_ROBOT_TOKEN").write_text("secret-token")
+    (secrets / "PATROLBOT_EVENT_LIMIT").write_text("11")
+    (secrets / "PATROLBOT_SESSION_SECRET").write_text("non-db-secret")
+    options = {"_secrets_dir": secrets, "_env_file": None}
+    settings = Settings(**options)
+    assert settings.robot_token == "secret-token"
+    assert settings.event_limit == 11
     dotenv = tmp_path / ".env"
     dotenv.write_text("PATROLBOT_ROBOT_TOKEN=dotenv-token\nPATROLBOT_EVENT_LIMIT=7\n")
+    options["_env_file"] = dotenv
+    assert Settings(**options).robot_token == "dotenv-token"
     monkeypatch.setenv("PATROLBOT_ROBOT_TOKEN", "environment-token")
-    assert Settings(_env_file=dotenv).robot_token == "environment-token"
-    settings = Settings(_env_file=dotenv, robot_token="constructor-token")
+    assert Settings(**options).robot_token == "environment-token"
+    settings = Settings(**options, robot_token="constructor-token")
     assert settings.robot_token == "constructor-token"
     assert settings.event_limit == 7
+    assert settings.session_secret == "non-db-secret"

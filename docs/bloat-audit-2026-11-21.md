@@ -40,13 +40,14 @@ and checked parent paths.
 ## Exact URL rejection surface and isolation
 
 The supported reject-only names are `PATROLBOT_DATABASE_URL` and unprefixed
-`DATABASE_URL` in environment/dotenv configuration, case insensitive.
+`DATABASE_URL` in environment/dotenv/secrets configuration, case insensitive.
 Constructor spellings are `database_url`, `DATABASE_URL`, and
 `PATROLBOT_DATABASE_URL`, likewise case insensitive; the first two differ only
 by case. No URI, PostgreSQL-specific or other invented aliases are recognized.
 
-`Settings.settings_customise_sources` inspects constructor inputs, raw process
-environment, and dotenv values before normal settings precedence/validation.
+`Settings` inspects raw constructor inputs before Pydantic normalizes them.
+`settings_customise_sources` checks source output, raw process environment,
+dotenv values and URL-named secret files before normal settings validation.
 Regular dotenv files are also inspected separately with original key spelling:
 case folding or a later file's empty value must not conceal a nonempty URL.
 Every nonempty value, including whitespace, unknown schemes and malformed
@@ -110,6 +111,55 @@ An initial combined mock/adapter invocation encountered duplicate pytest module
 names; separate suite invocations resolved collection. Existing Starlette/httpx
 deprecation warnings remain. No application workaround was added for the test
 environment.
+
+## Parent-review URL-source correction at `907de51`
+
+**P1, reproduced by parent:** a nonempty `PATROLBOT_DATABASE_URL` secret file
+survived the unchecked standard secrets source, allowing `create_database` to
+select SQLite. This correction wraps that source's public `__call__`, checks its
+output, and returns its values unchanged in the original fourth source position.
+Only URL-named files receive an additional raw check: Pydantic strips whitespace
+and selects one case spelling/directory, which can hide other nonempty inputs.
+All configured secret directories are checked, including lower-priority ones.
+The fixed redacted RuntimeError text is unchanged; database/factory code and
+production validation are untouched. Non-database secrets retain normal source
+precedence, parsing and values.
+
+Installed **pydantic-settings 2.15.0** also folds constructor key case before the
+custom source hook. The existing empty-canonical/nonempty-alias regression
+failed on this version, so raw constructor values now pass through the same
+URL-specific rejection helper before normal initialization. Other constructor
+arguments pass unchanged to BaseSettings. Non-string, non-None URL inputs are
+refused without comparing arbitrary input objects against empty values.
+
+Fresh checks used `/tmp/opencode/bloat-cycle/venv/bin/python -B`,
+`PYTHONDONTWRITEBYTECODE=1`, `-p no:cacheprovider --capture=sys`:
+
+| Check | Result and distinct log under `/tmp/opencode/bloat-cycle/` |
+| --- | --- |
+| Configuration + isolation, `-k 'not sqlite_factory'` | 343 passed, 4 deselected in 22.31s; `dashboard-parent-review-config-accepted.log` |
+| Complete portable script suite | 350 passed in 3.45s; `dashboard-parent-review-scripts-verified.log` |
+| Static checks | Three changed Python files parsed; `git diff --check` passed; `dashboard-parent-review-static.log` |
+
+Regressions cover both URL names/case variants in all four standard sources,
+whitespace/unsupported schemes, malformed constructor inputs, empty aliases,
+case collisions, multiple secret directories and higher-priority empty values
+hiding nonempty secrets. Exception repr/formatted tracebacks exclude synthetic
+credentials; disposable database paths remain absent. Non-database secret,
+dotenv, environment and constructor precedence is exercised alongside the
+existing fresh-process fixture/mock-launcher isolation checks.
+
+The first focused run logged 305 passed and 36 failed in
+`dashboard-parent-review-config.log`: one exposed the 2.15 constructor-folding
+gap; 35 were an overbroad traceback assertion matching the library identifier
+`file_secret_settings`. The assertion now uses a distinct credential marker.
+Intermediate passing logs are retained separately from final evidence.
+
+Full server/persistence, frontend/browser, native and CI acceptance remain with
+the parent. The earlier worker-thread/socket limits above were not retried or
+assigned a guessed cause; no application workaround was introduced. The parent's
+reported baseline of 1,053 server/persistence passes is baseline evidence, not a
+result for this correction. No network, installs or publication occurred.
 
 ## Deferred and protected
 
