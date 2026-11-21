@@ -109,10 +109,19 @@ class Settings(BaseSettings):
     static_map_yaml: str = ""
     static_map_name: str = "CMU-Q Floor 1"
 
-    def __init__(__pydantic_self__, **values):
+    def __init__(__pydantic_self__, _env_file=Path(""), **values):
+        # Pydantic's documented default sentinel selects model_config, not a file.
+        env_files = (__pydantic_self__.model_config.get("env_file")
+                     if _env_file == Path("") else _env_file)
+        if isinstance(env_files, (str, os.PathLike)):
+            env_files = (env_files,)
+        # Dotenv sources read during super().__init__, before customising sources.
+        for path in env_files or ():
+            if Path(path).expanduser().is_fifo():
+                raise RuntimeError("FIFO dotenv inputs are unsupported; use regular dotenv files.")
         # Pydantic can discard conflicting case variants before customising sources.
         _reject_database_url(values)
-        super().__init__(**values)
+        super().__init__(_env_file=_env_file, **values)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings,

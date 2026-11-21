@@ -240,6 +240,64 @@ and publication. No full-suite pass is claimed for round 3. The four existing
 SQLite factory/TestClient cases were deselected in this focused configuration
 run; the parent's 1,401-server pass above is evidence for `6e66315` only.
 
+## Final P1 correction against `0e34133`: unsupported FIFO dotenv inputs
+
+Independent `dashboard-review-3.md` proved that both reject-only URL names could
+escape the raw regular-file guard through a real `/proc/self/fd` pipe containing
+a nonempty URL followed by an empty case variant. This could silently select
+SQLite. The previously fixed constructor, secrets and tilde cases remain intact.
+
+Traced the installed `pydantic-settings==2.15.0` source in the ready venv:
+`main.py` constructs `DotEnvSettingsSource` before `settings_customise_sources`;
+`sources/providers/dotenv.py` expands paths and reads `is_file() or is_fifo()`
+during source construction. `sources/types.py` defines the default env-file
+sentinel as `Path('')`; comparison is by equality. This agrees with the parent's
+retrieved version-specific Context7 documentation. No network lookup was made.
+
+The application policy now explicitly refuses FIFO dotenv inputs, including
+empty streams, named FIFOs, tilde paths and `/proc/self/fd` pipe paths. A narrow
+pre-init `Path.expanduser().is_fifo()` check runs before Pydantic can open any
+effective dotenv input. It selects the configured default only for the documented
+`Path('')` sentinel, respects `_env_file=None`, and checks all files in an
+effective sequence. An explicit regular-file override ignores a configured FIFO.
+The exception is always `FIFO dotenv inputs are unsupported; use regular dotenv
+files.` It contains no filename, payload or credentials. There is no stream
+reread, global monkeypatch, source override or private Pydantic API dependency.
+Existing raw URL guards and non-database settings source order are unchanged.
+
+New tests use real OS pipes and named FIFOs with live writers in bounded
+five-second subprocesses. They assert the real path is a FIFO, exact redacted
+failure, unchanged unread payload bytes (or an empty nonblocking read), and no
+configured/default database file. Cases cover both URL names with hidden empty
+case variants, empty streams, constructor/config/default-sentinel selection,
+single and multiple files in either order, and absolute/tilde paths. Controls
+cover regular overrides, disabled dotenv, missing paths, directories, empty
+lists, regular configured defaults and default `.env` loading.
+
+Local evidence and remaining validation are recorded below; these are candidate
+checks, not independent review approval or committed-head acceptance.
+
+All pytest commands used `/tmp/opencode/bloat-cycle/venv/bin/python -B`,
+`PYTHONDONTWRITEBYTECODE=1` and `-p no:cacheprovider`, from `server/`:
+
+| Check | Actual result / log under `/tmp/opencode/bloat-cycle/` |
+| --- | --- |
+| Pre-fix empty real pipe, `tests/test_dotenv_fifo.py -k 'single and constructor and pipe' --maxfail=1` | 1 failed with bounded `TimeoutExpired` at 5 seconds, 85 deselected; `dashboard-fifo-before-bounded.log` |
+| `tests/test_dotenv_fifo.py tests/test_database_config.py tests/test_settings_isolation.py -k 'not sqlite_factory'` | 468 passed, 4 deselected, 1 existing Starlette/httpx deprecation warning, 78.17 seconds; `dashboard-fifo-config.log` |
+| Default `.env`/missing-file/None control added after the above collection, `tests/test_dotenv_fifo.py -k default_dotenv_and_no_file` | 1 passed, 88 deselected; `dashboard-fifo-default-control.log` |
+| Final `git diff --check` | Passed |
+
+Together the successful runs cover all **89 new tests** (81 bounded FIFO cases
+and 8 controls), plus **380 existing configuration/isolation tests**. The four
+SQLite factory/TestClient cases remain explicitly deselected here; no new full
+server, frontend, native, hosted CI or independent review result is claimed.
+An initial command launched from the repository root failed to import `app`
+before collecting tests (`dashboard-fifo-before.log`); the corrected pre-fix
+command above ran from `server/`. All logs, including failures, remain distinct.
+No sandbox rejection occurred during these focused runs. The parent owns final
+validation of a new committed head, native results, CI and independent re-review.
+Changes remain local and uncommitted.
+
 ## Deferred and protected
 
 Save/Apply feature work remains separate. No changes were made to command

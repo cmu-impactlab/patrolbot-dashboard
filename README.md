@@ -161,6 +161,13 @@ obsolete `PATROLBOT_DATABASE_URL` or `DATABASE_URL` environment/dotenv names
 migrate data explicitly before switching to a SQLite file. Empty values remain
 accepted for compatibility. No database conversion is performed automatically.
 
+Dotenv inputs must be regular files; FIFO/pipe inputs (including
+`/proc/self/fd` pipe paths) are unsupported and refused before reading, even
+when empty. This applies to effective `model_config["env_file"]` defaults and
+constructor `_env_file` overrides, including multiple files and `~` paths.
+`_env_file=None` disables dotenv loading; an explicit regular-file override
+replaces the configured default. Missing dotenv files remain optional.
+
 Configure the robot Pi to use the public WebSocket endpoint:
 
 ```env
