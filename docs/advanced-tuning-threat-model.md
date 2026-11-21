@@ -72,8 +72,8 @@ browser --HTTP/WS(ui)--> dashboard server --WS(robot)--> web bridge --ROS--> cor
 ### 3.2 WebSocket
 
 - Existing: `/ws/ui` rejects a disallowed `Origin` and requires a verified user
-  (`server/app/websocket/ui_gateway.py:23-48`); `resolve_ws_user`
-  (`local.py:85-91`); the command broker independently checks `can_command`
+  (`server/app/websocket/ui_gateway.py`); `fresh_user`
+  (`server/app/tuning/authz.py`); the command broker independently checks `can_command`
   (`broker.py:120-123`). `/ws/robot` authenticates the bridge with a
   constant-time token compare (`robot_gateway.py:37-41`).
 - TO BUILD: any tuning mutation or activation delivered over the browser WS must
@@ -92,11 +92,12 @@ browser --HTTP/WS(ui)--> dashboard server --WS(robot)--> web bridge --ROS--> cor
   `hmac.compare_digest`; `verify` checks `exp` (`sessions.py:28-39`). TTL is set
   at login (`oidc.py:169`). HTTP calls `verify` on every request
   (`get_current_user`, `local.py:43-50`), so HTTP expiry is re-checked per
-  request. The browser WebSocket resolves the user once at handshake
-  (`ui_gateway.py:44` → `resolve_ws_user`, `local.py:85-91`) and reuses that
-  resolved `user` for later frames (`browser_connected(..., user=user)`,
-  `ui_gateway.py:50`); expiry and role are **not** re-verified per WS message
-  today.
+  request. The browser WebSocket resolves the user at handshake
+  (`ui_gateway.py` → `fresh_user`, `tuning/authz.py`). Command admission re-checks
+  expiry, current role and identity through `CommandBroker.current_user`; the
+  original principal remains for audit and safe end-input cleanup. Tuning frames
+  re-check `fresh_user` and are then ignored: tuning uses HTTP, which verifies
+  credentials on each request.
 - TO BUILD: any tuning mutation or activation delivered over the browser WS must
   re-resolve the session (so `exp` is checked again) and re-check the current
   role on every mutation — it must not rely on handshake-time resolution. A

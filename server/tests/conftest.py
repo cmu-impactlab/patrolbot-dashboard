@@ -18,5 +18,6 @@ Settings.model_config["env_file"] = None
 
 # ...and any PATROLBOT_* variable already exported into the shell, which would
 # otherwise outrank both the .env file and the tests' explicit overrides.
-for _name in [name for name in os.environ if name.startswith("PATROLBOT_")]:
+for _name in [name for name in os.environ
+              if name.upper().startswith("PATROLBOT_") or name.upper() == "DATABASE_URL"]:
     del os.environ[_name]

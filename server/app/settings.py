@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+from dotenv import dotenv_values
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,13 +13,7 @@ class Settings(BaseSettings):
 
     robot_token: str = "dev-token"
     database_path: str = "data/patrolbot.db"
-    # SQLite is the supported database, in development and in production.
-    #
-    # An unsupported PostgreSQL backend is still in the tree (database/pg.py):
-    # setting this to postgresql://user:pass@host/db selects it, and it needs
-    # the `postgres` extra installed. It is not deployed, not covered by the
-    # default test run, and not exercised in CI, so treat it as experimental.
-    # Nothing in the deployment advertises or requires it.
+    # Reject-only compatibility; inspect every source before precedence hides URLs.
     database_url: str = ""
     default_robot_id: str = "patrolbot-01"
 
@@ -97,6 +95,26 @@ class Settings(BaseSettings):
     static_map_yaml: str = ""
     static_map_name: str = "CMU-Q Floor 1"
 
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        env_files = dotenv_settings.env_file
+        if isinstance(env_files, (str, os.PathLike)):
+            env_files = (env_files,)
+        # Inspect raw spellings too: case folding and file precedence can hide URLs.
+        sources = [init_settings.init_kwargs, os.environ, dotenv_settings.env_vars]
+        sources.extend(dotenv_values(path, encoding=dotenv_settings.env_file_encoding)
+                       for path in env_files or () if Path(path).is_file())
+        for values in sources:
+            if any(key.lower() in {"database_url", "patrolbot_database_url"}
+                   and value not in (None, "") for key, value in values.items()):
+                # RuntimeError keeps Pydantic from echoing credential-bearing input.
+                raise RuntimeError(
+                    "Database URL configuration is obsolete. SQLite only; use "
+                    "PATROLBOT_DATABASE_PATH; migrate data explicitly."
+                )
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
+
     @property
     def is_production(self) -> bool:
         return self.environment.strip().lower() == "production"
@@ -150,6 +168,3 @@ def validate_startup(settings: "Settings") -> None:
     if problems:
         raise RuntimeError("Refusing to start — insecure production configuration:\n  - "
                            + "\n  - ".join(problems))
-
-
-settings = Settings()

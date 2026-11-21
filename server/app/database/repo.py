@@ -1,9 +1,4 @@
-"""SQLite persistence via aiosqlite.
-
-Deliberately a thin SQL repository: swapping to PostgreSQL at Phase 5 means
-reimplementing this module only. (SQLAlchemy async was skipped because the
-dev machine runs Python 3.14 where greenlet wheels are a moving target.)
-"""
+"""SQLite persistence via aiosqlite."""
 from __future__ import annotations
 
 import contextlib

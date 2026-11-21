@@ -14,9 +14,9 @@ router = APIRouter()
 Administrator = Annotated[User, Depends(require_administrator)]
 
 # Upper bounds were already enforced with min(); the lower bounds matter just
-# as much. A negative LIMIT means "no limit" in SQLite and is an error in
-# PostgreSQL, and a negative window inverts the time range — so the bounds are
-# declared on the parameter and rejected with 422 before they reach a query.
+# as much. A negative LIMIT means "no limit" in SQLite, and a negative window
+# inverts the time range — so the bounds are declared on the parameter and
+# rejected with 422 before they reach a query.
 MAX_HISTORY_MINUTES = 7 * 24 * 60
 MAX_COMMAND_AUDIT = 500
 

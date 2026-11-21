@@ -76,7 +76,7 @@ export interface TelemetryState {
    * When the last measured-motion sample was received, by the browser's clock.
    * Raw receipt time: the envelope's transport age is kept separately in
    * `motionTransportAgeS` so the total age is sample + receipt + transport +
-   * local elapsed (see `motionAgeMs`). Null with `motion` when there is no
+   * local elapsed (see `motionFreshness`). Null with `motion` when there is no
    * sample.
    */
   motionAt: number | null;
@@ -172,24 +172,6 @@ export function motionTransportAgeMs(timestamp: string, receivedWallMs: number):
   if (!Number.isFinite(delta) || delta < -1000) return Infinity;
   if (delta <= 0) return 0;
   return Math.min(delta, 5000);
-}
-
-/**
- * Total age of the measured-motion sample in milliseconds: the odom stamp age
- * and the bridge receipt age it carries, the envelope transport age, plus the
- * local elapsed time since it arrived. Null when there is no sample — never
- * treated as zero.
- */
-export function motionAgeMs(
-  motion: MotionData | null,
-  motionAt: number | null,
-  transportAgeS: number | null = null,
-  now: number = performance.now(),
-): number | null {
-  if (motion === null || motionAt === null) return null;
-  const local = Math.max(0, now - motionAt);
-  const transport = Math.max(0, transportAgeS ?? 0) * 1000;
-  return (motion.sample_age_s + motion.receipt_age_s) * 1000 + transport + local;
 }
 
 /**

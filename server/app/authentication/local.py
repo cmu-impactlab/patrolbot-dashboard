@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, WebSocket
+from fastapi import Depends, HTTPException, Request
 
 from .sessions import COOKIE_NAME, verify
 
@@ -80,12 +80,3 @@ async def require_administrator(user: CurrentUser) -> User:
             status_code=403,
             detail="This action needs an administrator account.")
     return user
-
-
-def resolve_ws_user(settings, websocket: WebSocket) -> User | None:
-    """The WebSocket equivalent of get_current_user: the seeded local operator
-    in local mode, or the cookie-verified user in OIDC mode (None if unsigned)."""
-    if settings.auth_mode != "oidc":
-        return LOCAL_USER
-    session = verify(settings.session_secret, websocket.cookies.get(COOKIE_NAME))
-    return _user_from_session(session) if session is not None else None

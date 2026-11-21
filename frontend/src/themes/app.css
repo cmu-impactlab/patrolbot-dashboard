@@ -971,22 +971,6 @@ a { color: inherit; }
 .help-prompt { padding: 22px; }
 .help-prompt h2 { padding-right: 30px; }
 
-.restore-pose-facts {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-}
-
-.restore-pose-facts span {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-}
-
 .library-item {
   display: flex;
   align-items: center;
@@ -1353,10 +1337,7 @@ input:not([type=checkbox]), select { min-height: 44px; }
 .field-info > summary::-webkit-details-marker { display: none; }
 .field-info-content { position: fixed; right: 16px; bottom: 16px; width: min(420px, calc(100vw - 32px)); max-height: 75dvh; overflow: auto; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); z-index: 45; color: var(--text); }
 .field-info-content p { margin: 6px 0; font-size: 12px; }
-.field-disabled-reason { margin: 6px 0 0; color: var(--text-faint); font-size: 12px; }
 .field-status { display: flex; flex-wrap: wrap; gap: 4px; font-size: 10px; color: var(--text-secondary); }
-.field-unknown { color: var(--warn); }
-.field-pending { color: var(--warn); font-weight: 600; }
 .field-phase.phase-saving { color: var(--info); }
 .field-phase.phase-saved { color: var(--ok); }
 .field-phase.phase-saved_pending { color: var(--warn); }

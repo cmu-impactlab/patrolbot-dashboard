@@ -28,15 +28,20 @@ def shutdown(*_):
 signal.signal(signal.SIGTERM, shutdown)
 signal.signal(signal.SIGINT, shutdown)
 with tempfile.TemporaryDirectory(prefix="patrolbot-mobile-") as directory:
-    env = {**os.environ, "PATROLBOT_DATABASE_PATH": f"{directory}/test.db",
+    env = {**{key: value for key, value in os.environ.items()
+              if key.lower() not in {"database_url", "patrolbot_database_url", "patrolbot_database_path"}},
+           "PATROLBOT_DATABASE_PATH": f"{directory}/test.db",
            "PATROLBOT_DATABASE_URL": "", "PATROLBOT_ROBOT_TOKEN": "mobile-test-only",
            "PATROLBOT_AUTH_MODE": "local", "PATROLBOT_ENVIRONMENT": "development",
            "PATROLBOT_DEFAULT_ROBOT_ID": "patrolbot-01",
            "PATROLBOT_STATIC_MAP_YAML": "", "PATROLBOT_ALLOWED_ORIGINS": ""}
     try:
         processes.append(subprocess.Popen(
-            [str(PYTHON), "-m", "uvicorn", "app.main:app", "--host", args.host,
-             "--port", str(PORT), "--log-level", "warning"], cwd=ROOT / "server", env=env))
+            [str(PYTHON), "-c",
+             "from app.settings import Settings; Settings.model_config['env_file'] = None; "
+             "import sys, uvicorn; uvicorn.run('app.main:app', host=sys.argv[1], "
+             "port=int(sys.argv[2]), log_level='warning')",
+             args.host, str(PORT)], cwd=ROOT / "server", env=env))
         for attempt in range(50):
             if processes[0].poll() is not None:
                 raise RuntimeError("Isolated backend failed to start")

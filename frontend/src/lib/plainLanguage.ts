@@ -4,7 +4,7 @@
  * technical names live only inside collapsible "technical details" sections.
  */
 import type {
-  CommandType, ConnectionState, EventSeverity, HealthLevel, RobotStatus,
+  ConnectionState, EventSeverity, HealthLevel, RobotStatus,
 } from "../types/protocol";
 
 export const STATUS_COPY: Record<RobotStatus, { label: string; tone: string }> = {
@@ -36,22 +36,6 @@ export const SEVERITY_COPY: Record<EventSeverity, { label: string; tone: string 
   info: { label: "Info", tone: "info" },
   warning: { label: "Warning", tone: "warn" },
   critical: { label: "Critical", tone: "danger" },
-};
-
-/** What each command is called when the dashboard reports on it. */
-export const COMMAND_COPY: Record<CommandType, string> = {
-  navigate_to_pose: "Send to destination",
-  set_initial_pose: "Set robot location",
-  stop: "Stop",
-  charge_release: "Release charging",
-  motor_enable: "Turn motors on",
-  motor_disable: "Turn motors off",
-  dock_reset: "Recover operation fault",
-  software_reset: "Restart robot software",
-  undock: "Undock",
-  set_lidar_power: "Change LiDAR power",
-  teleop_start: "Start manual drive",
-  teleop_stop: "End manual input",
 };
 
 export const ESTIMATE_COPY: Record<string, string> = {

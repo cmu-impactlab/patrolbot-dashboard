@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 from fastapi.testclient import TestClient
 from app.main import create_app
 from app.settings import Settings
@@ -18,7 +19,7 @@ def test_local_catalog_endpoints_and_revisions(tmp_path):
             assert data["map_revision"] == meta["map_revision"]
             assert sum(run[1] for run in data["rle"]) == data["width"] * data["height"]
         assert client.get("/api/maps/unknown").status_code == 404
-        assert client.get("/api/map").status_code == 200
+        assert client.get("/api/map").json() == client.get("/api/maps/cmuq-floor2").json()
 
 
 # Canonical floor identities must equal the robot's catalog
@@ -36,6 +37,47 @@ EXPECTED_REVISIONS = {
 def test_packaged_revisions_match_canonical_robot_identity():
     catalog = MapCatalog(Path(__file__).resolve().parents[1] / "maps/catalog")
     assert {key: entry["revision"] for key, entry in catalog.maps.items()} == EXPECTED_REVISIONS
+
+
+def test_only_catalog_assets_are_packaged_and_selected():
+    root = Path(__file__).resolve().parents[2]
+    assert {str(p.relative_to(root / "server/maps"))
+            for p in (root / "server/maps").rglob("*") if p.is_file()} == {
+        "catalog/catalog.json", "catalog/cmuq_1st_floor.yaml",
+        "catalog/cmuq_1st_floor.pgm", "catalog/second_map.yaml", "catalog/second_map.pgm",
+    }
+    for name in ("Dockerfile.server", "docker-compose.local.yml", "docker-compose.production.yml"):
+        text = (root / "infrastructure" / name).read_text()
+        assert "/maps/catalog/second_map.yaml" in text
+        assert "/maps/cmuq-floor" not in text
+
+
+@pytest.mark.parametrize("filename", ["cmuq_1st_floor.yaml", "second_map.yaml"])
+def test_configured_catalog_static_map_and_missing_override_fallback(tmp_path, filename):
+    from app.telemetry.static_map import load_static_map
+
+    path = Path(__file__).resolve().parents[1] / "maps/catalog" / filename
+    expected = load_static_map(str(path), "Floor 2").model_dump(mode="json")
+    for override in (path, tmp_path / "missing.yaml"):
+        app = create_app(Settings(database_path=str(tmp_path / "test.db"),
+                                  static_map_yaml=str(override), static_map_name="Floor 2"))
+        with TestClient(app) as client:
+            data = client.get("/api/map").json()
+            if override == path:
+                assert data == expected
+            else:
+                assert data == client.get("/api/maps/cmuq-floor2").json()
+
+
+def test_custom_mounted_static_map(tmp_path):
+    from app.telemetry.static_map import load_static_map
+    (tmp_path / "custom.pgm").write_bytes(b"P5\n2 1\n255\n\x00\xff")
+    path = tmp_path / "custom.yaml"
+    path.write_text("image: custom.pgm\nresolution: 0.5\norigin: [1, 2, 0.3]\n")
+    app = create_app(Settings(database_path=str(tmp_path / "test.db"),
+                              static_map_yaml=str(path), static_map_name="Custom"))
+    with TestClient(app) as client:
+        assert client.get("/api/map").json() == load_static_map(str(path), "Custom").model_dump(mode="json")
 
 
 async def test_browser_disconnect_cancels_only_its_map_transaction():
