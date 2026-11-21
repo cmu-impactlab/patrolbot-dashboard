@@ -11,12 +11,14 @@ branch up to date. These exact contexts were observed completed successfully
 under the `github-actions` app (ID `15368`). The manual-only mobile-browser
 acceptance workflow is intentionally excluded; no unimplemented gate is required.
 
-Future PRs need one eligible independent review, approval of the most recent
-reviewable push by someone other than its pusher, and resolved conversations.
-New commits dismiss stale approvals. The author's local Codex or CLI review
-cannot satisfy GitHub's approval requirement. Other write-access maintainers
-can provide eligible reviews. Administrators follow the same rules, with no
-actor bypass allowances. Force pushes and deletion are blocked; unrestricted
+PR authors may manually review their own changes, including with local Codex or
+CLI review, and merge their PR once all 19 required CI checks are green, the
+branch is up to date, and conversations are resolved. GitHub prohibits authors
+from using the Approve action on their own PRs; with the required approval count
+set to zero and last-push approval disabled, no other person is required.
+New commits still dismiss stale approvals. Administrators follow the same rules,
+with no actor bypass allowances or CI bypass. Merging remains manual; this policy
+does not enable auto-merge. Force pushes and deletion are blocked; unrestricted
 eligible maintainers retain normal merge permissions once the requirements pass.
 The branch remains unlocked, without a linear-history requirement.
 
@@ -30,7 +32,7 @@ count, stale-review dismissal, last-push approval, code-owner setting, empty
 user/team/app bypass allowances, and null restrictions. The response contains
 additional metadata and nested `enabled` values, so it is not byte-identical to
 the PUT body. Also confirm a subsequent PR shows all 19 required checks and
-the review requirement before treating rollout as validated.
+no required approval before treating rollout as validated.
 
 Coordinate workflow/job/matrix renames with this payload and its regression
 tests. Validate the new contexts on GitHub and confirm their app ID before the

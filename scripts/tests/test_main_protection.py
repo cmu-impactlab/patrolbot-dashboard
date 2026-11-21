@@ -54,9 +54,9 @@ def test_review_and_merge_policy_has_no_bypass():
     assert {key: value for key, value in POLICY.items() if key != "required_status_checks"} == {
         "enforce_admins": True,
         "required_pull_request_reviews": {
-            "required_approving_review_count": 1,
+            "required_approving_review_count": 0,
             "dismiss_stale_reviews": True,
-            "require_last_push_approval": True,
+            "require_last_push_approval": False,
             "require_code_owner_reviews": False,
             "bypass_pull_request_allowances": {"users": [], "teams": [], "apps": []},
         },
