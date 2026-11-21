@@ -353,3 +353,245 @@ def test_cancellation_too_late_for_settlement_cannot_pass(monkeypatch):
     lab = WatchdogLab(monkeypatch, [result()], completed_at=1.8)
     with pytest.raises(AssertionError, match="expected terminals"):
         lab.finish()
+
+
+def stale_result():
+    frame = result(outcome='failed')
+    frame['data']['detail'] = 'Raw odometry is missing or stale.'
+    return frame
+
+
+def fault_evidence(command_id=SESSION, after=0.):
+    return dict(robot_id=ROBOT, command_id=command_id, fault='odom_stale',
+                injected_mono=after, safety_started_mono=after + .6,
+                observed_mono=after + .6, terminal_mono=after + .6,
+                base_at=after + .59, odom_at=after + .01,
+                source_before_ns=10**9, source_after_ns=10**9,
+                stamp_sec=0, stamp_nanosec=400000000, odom_values=[0.] * 7 + [1.],
+                reason='Raw odometry is missing or stale.',
+                terminal=dict(command_id=command_id, outcome='failed', detail='Raw odometry is missing or stale.'))
+
+
+def test_deliberate_stale_fault_requires_exact_terminal():
+    asyncio.run(checker.expected_stale_odom_fault(Socket([stale_result()]), ROBOT, SESSION, fault_evidence(), 0., timeout=.03))
+
+
+@pytest.mark.parametrize('detail', ['Raw odometry is missing or stale.', 'Raw odometry is invalid or stale.'])
+def test_healthy_finish_still_rejects_exact_stale_fault(detail):
+    frame = stale_result()
+    frame['data']['detail'] = detail
+    with pytest.raises(AssertionError):
+        finish([frame, result(STOP, 'succeeded')])
+
+
+@pytest.mark.parametrize('field,value', [
+    ('robot_id', 'other'), ('command_id', OLD_STOP), ('type', 'command.ack'),
+    ('outcome', 'canceled'), ('outcome', 'succeeded'), ('outcome', 'timeout'),
+    ('outcome', None), ('detail', None), ('detail', ''),
+    ('detail', 'Raw odometry is invalid or stale.'),
+    ('detail', 'Raw odometry is missing or stale. Zero publication failed; physical stop is not confirmed.'),
+    ('reason', 'Raw odometry is missing or stale.'),
+])
+def test_deliberate_stale_fault_rejects_wrong_identity_outcome_or_reason(field, value):
+    frame = stale_result()
+    if field in {'robot_id', 'type'}:
+        frame[field] = value
+    else:
+        frame['data'][field] = value
+        if field == 'reason':
+            del frame['data']['detail']
+    with pytest.raises((AssertionError, asyncio.TimeoutError)):
+        asyncio.run(checker.expected_stale_odom_fault(Socket([frame]), ROBOT, SESSION, fault_evidence(), 0., timeout=.03))
+
+
+def test_deliberate_stale_fault_noise_cannot_extend_deadline(monkeypatch):
+    clock = SimpleNamespace(now=0.)
+    monkeypatch.setattr(checker, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+
+    class NoisySocket:
+        async def recv(self):
+            clock.now += 1.
+            return json.dumps(result(OLD_STOP, 'failed'))
+
+    with pytest.raises(AssertionError, match='Late stale-odometry terminal'):
+        evidence = fault_evidence()
+        evidence.update(injected_mono=-1., safety_started_mono=0., observed_mono=0., terminal_mono=0., base_at=-.01, odom_at=-.6)
+        asyncio.run(checker.expected_stale_odom_fault(NoisySocket(), ROBOT, SESSION, evidence, -1., timeout=3))
+    assert clock.now == 3.
+
+
+@pytest.mark.parametrize('failure', [None, 'no_stop', 'stop_failed', 'wrong_identity',
+    'missing_start_completion', 'missing_stop_completion', 'wrong_detail', 'wrong_outcome',
+    'unrelated_active', 'owner', 'admission', 'revoke', 'restored', 'budget'])
+def test_fault_completion_waits_for_db_and_late_detached_revoke(monkeypatch, failure):
+    clock = SimpleNamespace(now=0.)
+    monkeypatch.setattr(checker, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    observations = []
+
+    async def sleep(delay):
+        clock.now = round(clock.now + delay, 8)
+    monkeypatch.setattr(checker.asyncio, 'sleep', sleep)
+
+    class CompletionClient:
+        async def get(self, path):
+            observations.append((path, clock.now))
+            if failure == 'budget':
+                clock.now += 2
+            if path == '/lab/status':
+                # Start terminal already arrived. Owner/active can be empty
+                # while the detached revoke is still sending its bounded zero.
+                facts = dict(active_ids=[], owner_present=False, admission_locked=False,
+                             revokes_pending=int(clock.now < .8 and failure != 'no_stop'))
+                if failure == 'unrelated_active':
+                    facts['active_ids'] = [OLD_STOP]
+                elif failure == 'owner':
+                    facts['owner_present'] = True
+                elif failure == 'admission':
+                    facts['admission_locked'] = True
+                elif failure == 'revoke':
+                    facts['revokes_pending'] = 1
+                data = dict(robot_id=ROBOT, fault='healthy' if failure == 'restored' else 'odom_stale',
+                            completion=facts)
+            else:
+                assert path == '/api/commands?limit=500'
+                start = dict(row(SESSION, 'teleop_start'), outcome='failed', detail='fault',
+                             completed_at='done' if clock.now >= .1 else None)
+                if failure == 'missing_start_completion':
+                    start['completed_at'] = None
+                elif failure == 'wrong_detail':
+                    start['detail'] = 'other'
+                elif failure == 'wrong_outcome':
+                    start['outcome'] = 'canceled'
+                data = [start]
+                if clock.now >= .8 and failure != 'no_stop':
+                    stop = dict(row(STOP, 'teleop_stop'), outcome='succeeded',
+                                completed_at='done' if clock.now >= 1. else None)
+                    if failure == 'stop_failed':
+                        stop['outcome'] = 'failed'
+                    elif failure == 'wrong_identity':
+                        stop['session_generation'] += 1
+                    elif failure == 'missing_stop_completion':
+                        stop['completed_at'] = None
+                    data.insert(0, stop)
+            return SimpleNamespace(json=lambda: data, raise_for_status=lambda: None)
+
+    async def check():
+        await checker.complete_stale_odom_fault(CompletionClient(), ROBOT, SESSION, 'fault', timeout=1.5)
+    if failure in (None, 'no_stop'):
+        asyncio.run(check())
+        assert clock.now >= (1. if failure is None else .6)
+        assert observations[-1][0] == '/api/commands?limit=500'
+    else:
+        with pytest.raises(AssertionError):
+            asyncio.run(check())
+        assert clock.now <= 2.
+
+
+@pytest.mark.parametrize('failure', [None, 'unobserved', 'zero', 'inactive', 'refusal', 'missing_reason', 'accepted', 'barrier'])
+def test_acceptance_keeps_producer_alive_until_stale_fault_and_refuses_restart(monkeypatch, capsys, failure):
+    """Exercise the checker workflow offline; receipt identity is tested above."""
+    from types import ModuleType
+    clock = SimpleNamespace(now=0.)
+    monkeypatch.setattr(checker, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    real_sleep = asyncio.sleep
+    async def sleep(delay):
+        clock.now += delay
+        await real_sleep(0)
+    monkeypatch.setattr(checker.asyncio, 'sleep', sleep)
+    monkeypatch.setenv('PATROLBOT_ISOLATED_TEST', '1')
+    monkeypatch.setattr(checker.Path, 'iterdir', lambda _: [Path('/sys/class/net/lo')])
+    state = dict(fault='healthy', stale_velocity=0, refused=False, restored=False, probes=0)
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_):
+            pass
+        async def post(self, path, json):
+            assert path == '/lab/fault'
+            if state['fault'] == 'odom_stale' and json['fault'] == 'healthy':
+                assert state['refused']
+                state['restored'] = True
+            state['fault'] = json['fault']
+            state['injected'] = clock.now
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'accepted': True})
+        async def get(self, path):
+            if path == '/api/commands?limit=500':
+                data = [dict(row(state['command_id'], 'teleop_start'),
+                             completed_at=None if failure == 'barrier' else 'done',
+                             outcome='failed', detail='Raw odometry is missing or stale.')]
+            elif path.startswith('/lab/ready'):
+                await real_sleep(0)
+                data = dict(ready=state['fault'] != 'odom_stale', has_amcl_pose=False,
+                            fault_observed=failure != 'unobserved' and state['fault'] == 'odom_stale')
+                if state['fault'] == 'odom_stale':
+                    data['fault_evidence'] = fault_evidence(state['command_id'], state['injected'])
+                    clock.now = max(clock.now, state['injected'] + .7)
+            else:
+                assert path == '/lab/status'
+                data = dict(physical_acceptance=False, received={
+                    '/input/teleop': [dict(received_mono=10000., linear=v, angular=a)
+                                      for v, a in [(0., 0.), (.18, 0.), (0., .35), (.1, 0.)]],
+                    '/cmd_vel': [dict(received_mono=10000., linear=.1)],
+                    '/cmd_vel_out': [dict(received_mono=10000., linear=-.12)],
+                    '/patrolbot/web_teleop_active': [dict(received_mono=10000., active=False)]})
+                data.update(robot_id=ROBOT, fault=state['fault'], completion=dict(
+                    active_ids=[], owner_present=False, admission_locked=False, revokes_pending=0))
+                if state['fault'] == 'odom_stale':
+                    if failure == 'zero':
+                        data['received']['/input/teleop'] = []
+                    elif failure == 'inactive':
+                        data['received']['/patrolbot/web_teleop_active'] = []
+            return SimpleNamespace(json=lambda: data, raise_for_status=lambda: None)
+    class FakeSocket(Client):
+        async def send(self, message):
+            frame = json.loads(message)
+            if frame['type'] == 'command.request':
+                accepted = state['fault'] not in {'sbc_down', 'odom_stale'}
+                if state['fault'] == 'odom_stale':
+                    assert clock.now >= state['injected'] + 1.2
+                    state['probes'] += 1
+                    assert state['probes'] == 1
+                    state['refused'] = True
+                    accepted = failure == 'accepted'
+                else:
+                    state['command_id'] = frame['data']['command_id']
+                reason = 'Manual drive requires fresh base, raw odometry and LiDAR readings.'
+                if failure == 'refusal':
+                    reason = 'Wrong odometry reason'
+                elif failure == 'missing_reason':
+                    reason = None
+                self.ack = dict(type='command.ack', robot_id=ROBOT,
+                                data=dict(command_id=frame['data']['command_id'], accepted=accepted,
+                                          reason=reason if not accepted else None))
+            elif state['fault'] == 'odom_stale':
+                state['stale_velocity'] += 1
+        async def recv(self):
+            if state['fault'] == 'odom_stale' and not state['refused']:
+                frame = stale_result()
+                frame['data']['command_id'] = state['command_id']
+                return json.dumps(frame)
+            return json.dumps(self.ack)
+    async def finish(*args, **kwargs):
+        assert state['fault'] != 'odom_stale'
+    monkeypatch.setattr(checker, 'finish', finish)
+    httpx, websockets = ModuleType('httpx'), ModuleType('websockets')
+    httpx.AsyncClient = lambda **_: Client()
+    websockets.connect = lambda _: FakeSocket()
+    monkeypatch.setitem(sys.modules, 'httpx', httpx)
+    monkeypatch.setitem(sys.modules, 'websockets', websockets)
+    envelope = ModuleType('app.protocol.envelope')
+    envelope.encode = lambda kind, robot, seq, data: json.dumps(
+        dict(type=kind, robot_id=robot, seq=seq, data=data))
+    monkeypatch.setitem(sys.modules, 'app.protocol.envelope', envelope)
+    if failure is None:
+        asyncio.run(checker.main())
+        assert state['restored'] and state['refused']
+        assert state['stale_velocity'] > 0
+        assert state['probes'] == 1
+        assert 'stale_odometry_failed_zero_inactive_and_refuses_fresh_start' in capsys.readouterr().out
+    else:
+        with pytest.raises(AssertionError):
+            asyncio.run(checker.main())
+        assert not state['restored']
+        if failure == 'barrier':
+            assert state['probes'] == 0

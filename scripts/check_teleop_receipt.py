@@ -1,6 +1,7 @@
 """Drive only the isolated software lab; prove real ROS subscription receipts."""
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -40,6 +41,105 @@ def terminal_id(frame, robot, expected):
         return None
     assert data.get("outcome") in expected[command_id], frame
     return command_id
+
+
+def stale_odom_detail(evidence, robot, command_id, after):
+    """Validate fault-time evidence, including the two production expiry paths."""
+    assert isinstance(evidence, dict), evidence
+    assert evidence.get('robot_id') == robot and evidence.get('command_id') == command_id, evidence
+    assert evidence.get('fault') == 'odom_stale', evidence
+    for key in ('injected_mono', 'safety_started_mono', 'observed_mono', 'terminal_mono',
+                'base_at', 'odom_at'):
+        value = evidence.get(key)
+        assert type(value) in (int, float) and math.isfinite(value), (key, evidence)
+    start, end = evidence['safety_started_mono'], evidence['observed_mono']
+    assert after <= evidence['injected_mono'] <= start <= end <= evidence['terminal_mono'] <= time.monotonic(), evidence
+    assert evidence['injected_mono'] < evidence['base_at'] <= start, evidence
+    assert end - evidence['base_at'] <= .5, evidence
+    assert evidence['odom_at'] <= start, evidence
+    values = evidence.get('odom_values')
+    assert isinstance(values, list) and len(values) == 8, evidence
+    assert all(type(value) in (int, float) and math.isfinite(value) for value in values), evidence
+    for key in ('source_before_ns', 'source_after_ns', 'stamp_sec', 'stamp_nanosec'):
+        assert type(evidence.get(key)) is int and evidence[key] >= 0, (key, evidence)
+    assert evidence['stamp_nanosec'] < 10**9, evidence
+    stamp = evidence['stamp_sec'] * 10**9 + evidence['stamp_nanosec']
+    assert stamp <= evidence['source_before_ns'] <= evidence['source_after_ns'], evidence
+    source_age = (evidence['source_after_ns'] - stamp) / 1e9
+    receipt_before, receipt_after = start - evidence['odom_at'], end - evidence['odom_at']
+    assert all(math.isfinite(age) for age in (source_age, receipt_before, receipt_after)), evidence
+    reason = evidence.get('reason')
+    # Bracket the delegated safety call: either clock can cross .5 s inside it.
+    if reason == 'Raw odometry is invalid or stale.':
+        assert source_age > .5 and 0 <= receipt_before <= .5, evidence
+    else:
+        assert reason == 'Raw odometry is missing or stale.' and receipt_after > .5, evidence
+    terminal = evidence.get('terminal')
+    assert isinstance(terminal, dict) and terminal.get('command_id') == command_id, evidence
+    assert terminal.get('outcome') == 'failed' and terminal.get('detail') == reason, evidence
+    return reason
+
+
+async def expected_stale_odom_fault(socket, robot, command_id, evidence, after, timeout=6):
+    """Only the deliberately injected odometry fault may expect a failed result."""
+    deadline = time.monotonic() + timeout
+    detail = stale_odom_detail(evidence, robot, command_id, after)
+    while True:
+        budget = deadline - time.monotonic()
+        assert budget > 0, "Missing exact stale-odometry terminal"
+        frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=budget))
+        assert time.monotonic() < deadline, "Late stale-odometry terminal"
+        if terminal_id(frame, robot, {command_id: {"failed"}}) is not None:
+            assert frame["data"].get("detail") == detail, frame
+            return
+
+
+async def complete_stale_odom_fault(client, robot, command_id, detail, timeout=6):
+    """Passively settle audit writes and concurrent automatic stop admission."""
+    deadline = time.monotonic() + timeout
+    settled_after = None
+    stop_id = None
+
+    def remaining():
+        budget = deadline - time.monotonic()
+        assert budget > 0, 'Stale-odometry completion barrier expired'
+        return budget
+
+    while True:
+        budget = remaining()
+        response = await asyncio.wait_for(client.get('/lab/status'), budget)
+        remaining()
+        response.raise_for_status()
+        status = response.json()
+        assert status['robot_id'] == robot and status['fault'] == 'odom_stale', status
+        facts = status['completion']
+        # Read audit after server facts so a just-finished revoke's stop is included.
+        budget = remaining()
+        response = await asyncio.wait_for(client.get('/api/commands?limit=500'), budget)
+        remaining()
+        response.raise_for_status()
+        audit = response.json()
+        resolved = session_stop_id(audit, robot, command_id)
+        assert stop_id is None or resolved == stop_id, 'Expected stop disappeared from audit'
+        stop_id = resolved
+        start = next(row for row in audit if row['command_id'] == command_id)
+        complete = bool(start.get('completed_at'))
+        if complete:
+            assert start.get('outcome') == 'failed' and start.get('detail') == detail, start
+            if settled_after is None:
+                # As in finish(None), allow the bounded .3 s zero send to settle.
+                settled_after = time.monotonic() + .5
+        if stop_id is not None:
+            stop = next(row for row in audit if row['command_id'] == stop_id)
+            if stop.get('completed_at'):
+                assert stop.get('outcome') == 'succeeded', stop
+            else:
+                complete = False
+        if (complete and time.monotonic() >= settled_after
+                and facts['active_ids'] == [] and facts['owner_present'] is False
+                and facts['admission_locked'] is False and facts['revokes_pending'] == 0):
+            return
+        await asyncio.sleep(min(.02, remaining()))
 
 
 async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
@@ -124,20 +224,26 @@ async def main():
 
     assert os.environ.get("PATROLBOT_ISOLATED_TEST") == "1"
     assert {path.name for path in Path("/sys/class/net").iterdir()} == {"lo"}
-    root = "http://127.0.0.1:8027"
+    port = int(os.environ.get("TELEOP_LAB_PORT", "8027"))
+    root = f"http://127.0.0.1:{port}"
     robot = "isolated-web-teleop"
     from app.protocol.envelope import encode
     results = []
     async with httpx.AsyncClient(base_url=root) as client:
-        async def wait_ready():
+        async def wait_ready(fault="healthy"):
+            # Require new bridge-received sensor/idle/lifecycle events for every
+            # intent. Publication counters cannot attest runtime freshness.
+            after = time.monotonic()
             deadline = time.monotonic() + 20
+            result = None
             while time.monotonic() < deadline:
-                result = (await client.get("/lab/ready")).json()
+                result = (await client.get(f"/lab/ready?after={after}&fault={fault}")).json()
                 if result.get("ready"):
                     assert result["has_amcl_pose"] is False
+                    print(json.dumps({"intent_readiness": result}), flush=True)
                     return
                 await asyncio.sleep(.1)
-            raise AssertionError("Isolated ROS bridge did not provide fresh manual capability/data")
+            raise AssertionError(f"Isolated ROS bridge readiness deadline: {result}")
 
         async def wait_receipt(topic, predicate, newer_than):
             deadline = time.monotonic() + 3
@@ -151,7 +257,7 @@ async def main():
             raise AssertionError("No actual ROS subscriber receipt on " + topic)
 
         await wait_ready()
-        async with websockets.connect("ws://127.0.0.1:8027/ws/ui") as socket:
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws/ui") as socket:
             # Ignore snapshots/telemetry when matching exact command lifecycle.
             async def reply(command_id, accepted=True):
                 deadline = time.monotonic() + 5
@@ -167,6 +273,7 @@ async def main():
             seq = 0
 
             async def start():
+                await wait_ready()
                 command_id = str(uuid4())
                 await socket.send(encode("command.request", robot, 1,
                     {"command_id": command_id, "command": "teleop_start"}))
@@ -228,16 +335,60 @@ async def main():
             await finish(socket, client, robot, command_id, expect_stop=False)
             results.append("physical_joystick_priority_and_web_session_revocation")
             await client.post("/lab/fault", json={"fault": "healthy"})
-            await asyncio.sleep(.7)
+            await wait_ready()
 
             await client.post("/lab/fault", json={"fault": "sbc_down"})
-            await asyncio.sleep(.15)
+            await wait_ready("sbc_down")
             command_id = str(uuid4())
             await socket.send(encode("command.request", robot, 1,
                 {"command_id": command_id, "command": "teleop_start"}))
             await reply(command_id, accepted=False)
             results.append("missing_hardware_refuses_without_localization_bypass")
             await client.post("/lab/fault", json={"fault": "healthy"})
+
+            command_id = await start()
+            begin = await stream(command_id, .1, 0., duration=.15)
+            await wait_receipt('/input/teleop', lambda item: item['linear'] == .1, begin)
+            # Keep the producer alive so only the deliberate sensor fault ends input.
+            producer = asyncio.create_task(stream(command_id, .1, 0., duration=20))
+            try:
+                begin = time.monotonic()
+                response = await client.post('/lab/fault', json={'fault': 'odom_stale'})
+                response.raise_for_status()
+                assert response.json()['accepted'] is True
+                deadline = time.monotonic() + 3
+                observed = None
+                while time.monotonic() < deadline:
+                    observed = (await client.get(
+                        f'/lab/ready?after={begin}&fault=odom_stale')).json()
+                    if observed.get('fault_observed'):
+                        break
+                    await asyncio.sleep(.02)
+                else:
+                    raise AssertionError(f'Bridge did not observe deliberately stale odometry: {observed}')
+                print(json.dumps({'stale_odom_observation': observed}), flush=True)
+                await wait_receipt('/input/teleop',
+                    lambda item: item['linear'] == 0. and item['angular'] == 0., begin)
+                await wait_receipt('/patrolbot/web_teleop_active', lambda item: item['active'] is False, begin)
+                await expected_stale_odom_fault(socket, robot, command_id,
+                                                observed.get('fault_evidence'), begin)
+            finally:
+                producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+            refused_id = str(uuid4())
+            await complete_stale_odom_fault(client, robot, command_id,
+                                            observed['fault_evidence']['reason'])
+            await socket.send(encode('command.request', robot, 1,
+                {'command_id': refused_id, 'command': 'teleop_start'}))
+            refusal = await reply(refused_id, accepted=False)
+            assert refusal['data'].get('reason') == 'Manual drive requires fresh base, raw odometry and LiDAR readings.', refusal
+            results.append('stale_odometry_failed_zero_inactive_and_refuses_fresh_start')
+            await client.post('/lab/fault', json={'fault': 'healthy'})
+            await wait_ready()
+
         data = (await client.get("/lab/status")).json()
         print(json.dumps({"passed": True, "checks": results,
                           "physical_acceptance": False, "simulated_hardware": True,
