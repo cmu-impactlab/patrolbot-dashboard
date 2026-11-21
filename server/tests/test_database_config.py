@@ -130,6 +130,32 @@ def test_empty_case_variant_cannot_hide_url(tmp_path, monkeypatch, name, source)
         Settings(**options)
 
 
+@pytest.mark.parametrize("name", ["DATABASE_URL", "database_url", "DaTaBaSe_Url",
+                                  "PATROLBOT_DATABASE_URL", "patrolbot_database_url",
+                                  "PaTrOlBoT_DaTaBaSe_Url"])
+@pytest.mark.parametrize("hiding", ["same-file-case", "later-file", "later-file-case"])
+@pytest.mark.parametrize("tilde", [False, True])
+def test_raw_dotenv_paths_cannot_hide_url(tmp_path, monkeypatch, name, hiding, tilde):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    credential = "tilde-credential-marker"
+    first, second = tmp_path / "first.env", tmp_path / "second.env"
+    first.write_text(f'{name}="postgresql://user:{credential}@unused/db"\n')
+    hidden_name = name.swapcase() if hiding.endswith("case") else name
+    if hiding == "same-file-case":
+        first.write_text(first.read_text() + f'{hidden_name}=""\n')
+        files = (first,)
+    else:
+        second.write_text(f'{hidden_name}=""\n')
+        files = (first, second)
+    paths = tuple(f"~/{path.name}" if tilde else path for path in files)
+    database = tmp_path / "must-not-create.db"
+    with pytest.raises(RuntimeError, match="obsolete") as error:
+        Settings(_env_file=paths, database_url="", database_path=str(database))
+    assert credential not in repr(error.value)
+    assert credential not in "".join(traceback.format_exception(error.value))
+    assert not database.exists()
+
+
 @pytest.mark.parametrize("name", ["database_url", "DATABASE_URL", "PATROLBOT_DATABASE_URL",
                                   "DaTaBaSe_Url", "PaTrOlBoT_DaTaBaSe_Url"])
 @pytest.mark.parametrize("source", ["argument", "environment", "dotenv"])

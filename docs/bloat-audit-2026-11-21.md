@@ -69,12 +69,13 @@ of deployment settings, including unprefixed DATABASE_URL.
 Historical manifests are byte-for-byte unchanged. `verify_release --source-ref`
 reads exact Git blobs at the named revision; it never substitutes current map
 paths. Tests cover missing paths, exact hash mismatches, missing refs and an
-actual Git blob against a different temporary working tree. That test uses the
-available HEAD and does not require a historical branch in shallow CI checkouts.
+actual Git blob against a modified working file. The real-Git test now creates
+its own miniature temporary repository and commit; it needs neither checkout
+metadata nor a historical branch in archive or shallow CI checkouts.
 Separately, the local `deployed/dashboard-20261015` ref matched **all 62 entries**
 of the observed manifest with `--live` omitted. No remote inspection occurred.
 
-## Validation obtained and limits
+## Earlier implementation validation and limits
 
 Used `/home/yousef/Projects/repos/patrolbot-dashboard/server/.venv/bin/python -B`
 (Python 3.14.10, Pydantic 2.13.4), `PYTHONDONTWRITEBYTECODE=1`, pytest
@@ -160,6 +161,84 @@ the parent. The earlier worker-thread/socket limits above were not retried or
 assigned a guessed cause; no application workaround was introduced. The parent's
 reported baseline of 1,053 server/persistence passes is baseline evidence, not a
 result for this correction. No network, installs or publication occurred.
+
+## Round 3 corrections against `6e66315`
+
+The parent's immutable committed `6e66315` snapshot produced the following
+results in `/tmp/opencode/bloat-cycle/validation-dashboard-6e66315/`, with no
+retries. These supersede the earlier runtime/environment limitations as evidence
+for that commit, but do not validate the uncommitted round 3 changes.
+
+| Parent check | Result |
+| --- | --- |
+| Complete server | 1,401 passed |
+| Complete web adapter | 342 passed, 1 skipped |
+| Complete mock suite | 26 passed |
+| Contracts / tuning parity | 136 passed / passed |
+| Clean npm install, TypeScript, preview and E2E types, production build, bundle budget | All passed |
+| Mock browser | 3 passed |
+| Complete frontend | **572 passed, 1 failed**: measured-profile map test indexed an absent sender call |
+| Complete scripts in Git archive | **349 passed, 1 failed**: real-Git fixture assumed checkout `.git` metadata |
+
+Independent Codex full review 2 additionally reproduced a **P1 dotenv bypass**:
+Pydantic expands `~/first.env` and `~/second.env`, while the raw rejection loop
+tested unexpanded paths. A later empty value could hide an earlier nonempty URL
+and permit SQLite selection. The raw loop now expands each path once and uses
+that same path for both `is_file()` and `dotenv_values()`. It preserves the
+existing source order, normal non-database settings, and fixed redacted error.
+Real files under a temporary HOME cover both reject-only names, uppercase,
+lowercase and mixed case, same-file case collisions, multiple files, later
+empty values and an empty constructor override. Absolute paths are controls.
+Before the fix these tests gave **18 failed, 18 passed**; all 18 failures were
+tilde cases. Non-database precedence now exercises absolute and tilde paths
+through multiple dotenv files, environment, constructor and secrets sources.
+
+Inspection of the actual LiDAR guard confirmed that source age `.1` plus elapsed
+receipt age must remain at most `.5` seconds. The map test's one-time real
+`performance.now()` receipt therefore expired after `.4` seconds. This explains
+how the parent's host-load failure can arise; the original failed run itself did
+not record elapsed time. This test file now spies on `performance.now()` with a
+per-test synthetic monotonic clock. A controlled 401 ms advance reproduces the
+exact explanation, `LiDAR is off, starting, stale or unavailable — wait for fresh
+scans.`, a disabled measured confirmation, and zero sends. Another advance after
+an enabled button renders proves that confirmation rechecks freshness before
+sending, without waiting for a periodic render. Existing frame, coordinates,
+heading and one-shot assertions remain. Unmount cleanup cancels the component's
+interval before mocks/globals are restored. No fake timers, sleeps, retries,
+production guard, timeout or runtime changes were introduced.
+
+The real-Git fixture now commits known synthetic bytes in its own temporary
+repository using command-local identity, with inherited Git overrides and
+global/system configuration isolated. It checks the actual
+`repository_mismatches` function against a commit hash after changing and
+deleting the working file, as well as mutated hashes, missing committed paths
+and missing refs. No assertions are skipped and no Git calls in that test are
+stubbed. The fixture never depends on or writes the user's repository metadata.
+
+Fresh round 3 checks used the ready venv and parent snapshot dependencies;
+logs are separate files under `/tmp/opencode/bloat-cycle/`:
+
+| Check | Result / log |
+| --- | --- |
+| Before-fix raw dotenv regression | 18 failed, 18 passed, 331 deselected; `dashboard-round3-tilde-before.log` |
+| Configuration + process isolation, `-k 'not sqlite_factory'` | 380 passed, 4 deselected; `dashboard-round3-config.log` |
+| Complete script suite | 350 passed; `dashboard-round3-scripts.log` |
+| Release tests copied to a temporary archive with no `.git` and invalid inherited Git overrides | 3 passed; `dashboard-round3-archive-git.log` |
+| LiveMapWidget file, including controlled elapsed-time reproduction | 23 passed; `dashboard-round3-map-resolved.log` |
+
+The focused Vitest run used a temporary source/dependency symlink mirror and
+config under `/tmp/dashboard-round3-frontend`, with React plugin, jsdom and the
+normal setup file. `preserveSymlinks`, a contracts alias and filesystem allowlist
+resolve existing files without modifying repository dependencies. Three initial
+resolver/configuration attempts collected no tests; their logs
+`dashboard-round3-map.log`, `dashboard-round3-map-verified.log` and
+`dashboard-round3-map-focused.log` remain intact. The successful run did not
+retry the unchanged parent failure. Earlier failed logs are also unmodified.
+
+The parent owns the final clean install, full Vitest/server validation, review
+and publication. No full-suite pass is claimed for round 3. The four existing
+SQLite factory/TestClient cases were deselected in this focused configuration
+run; the parent's 1,401-server pass above is evidence for `6e66315` only.
 
 ## Deferred and protected
 

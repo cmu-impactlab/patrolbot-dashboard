@@ -13,8 +13,11 @@ vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string
 } }), useMapsQuery: () => ({ data: [{ map_id: "cmuq-floor1", map_revision: "test-first", name: "Floor 1" }, { map_id: "cmuq-floor2", map_revision: "test-revision", name: "Floor 2" }] }) }));
 vi.mock("./bitmap", () => ({ buildMapBitmap: () => document.createElement("canvas") }));
 let paint: FrameRequestCallback;
+let now: number;
 const sender = vi.fn((_frame: string) => true);
 beforeEach(() => {
+  now = 1000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { paint = callback; return 1; });
   vi.stubGlobal("cancelAnimationFrame", () => {});
   class TestPointer extends MouseEvent {
@@ -63,6 +66,30 @@ describe("live map command boundary", () => {
     expect(data.seed_profile).toBe("measured");
     expect(data.goal).toMatchObject({ map_id: "cmuq-floor2", map_revision: "test-revision", x: -3.19, y: 10.19 });
     expect(data.goal.yaw).toBeCloseTo(Math.PI / 2);
+  });
+  it("refuses measured confirmation when source age plus elapsed receipt time expires", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    now += 401; // Source age .1 s plus receipt age .401 s exceeds the .5 s guard.
+    fireEvent.click(screen.getByLabelText(/Measured position and heading/));
+    fireEvent.change(screen.getByLabelText("Heading"), { target: { value: "90" } });
+    const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
+    const reason = "LiDAR is off, starting, stale or unavailable — wait for fresh scans.";
+    expect(screen.getByRole("status").textContent).toBe(reason);
+    expect(confirm.disabled).toBe(true);
+    expect(confirm.title).toBe(reason);
+    fireEvent.click(confirm);
+    expect(sender).not.toHaveBeenCalled();
+  });
+  it("rechecks elapsed receipt time at confirmation before the next render", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    now += 401;
+    fireEvent.click(confirm);
+    expect(screen.getByRole("alert").textContent).toBe(
+      "LiDAR is off, starting, stale or unavailable — wait for fresh scans.",
+    );
+    expect(sender).not.toHaveBeenCalled();
   });
   it("keeps the coarse profile omitted and resets measured intent after a send", () => {
     const canvas = mount(); down(canvas); up(canvas);

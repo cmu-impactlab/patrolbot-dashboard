@@ -122,8 +122,10 @@ class Settings(BaseSettings):
             env_files = (env_files,)
         # Inspect raw spellings too: case folding and file precedence can hide URLs.
         sources = [init_settings(), os.environ, dotenv_settings.env_vars]
-        sources.extend(dotenv_values(path, encoding=dotenv_settings.env_file_encoding)
-                       for path in env_files or () if Path(path).is_file())
+        for path in env_files or ():
+            path = Path(path).expanduser()
+            if path.is_file():
+                sources.append(dotenv_values(path, encoding=dotenv_settings.env_file_encoding))
         for values in sources:
             _reject_database_url(values)
 

@@ -77,8 +77,10 @@ assert Settings().database_url == ""
     assert not (tmp_path / "also-must-not-create.db").exists()
 
 
-def test_non_database_source_precedence_unchanged(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tilde", [False, True])
+def test_non_database_source_precedence_unchanged(tmp_path, monkeypatch, tilde):
     from app.settings import Settings
+    monkeypatch.setenv("HOME", str(tmp_path))
     secrets = tmp_path / "secrets"
     secrets.mkdir()
     (secrets / "PATROLBOT_ROBOT_TOKEN").write_text("secret-token")
@@ -90,7 +92,10 @@ def test_non_database_source_precedence_unchanged(tmp_path, monkeypatch):
     assert settings.event_limit == 11
     dotenv = tmp_path / ".env"
     dotenv.write_text("PATROLBOT_ROBOT_TOKEN=dotenv-token\nPATROLBOT_EVENT_LIMIT=7\n")
-    options["_env_file"] = dotenv
+    first = tmp_path / "first.env"
+    first.write_text("PATROLBOT_ROBOT_TOKEN=earlier-token\nPATROLBOT_EVENT_LIMIT=9\n")
+    options["_env_file"] = tuple(f"~/{path.name}" if tilde else path
+                                 for path in (first, dotenv))
     assert Settings(**options).robot_token == "dotenv-token"
     monkeypatch.setenv("PATROLBOT_ROBOT_TOKEN", "environment-token")
     assert Settings(**options).robot_token == "environment-token"
