@@ -29,6 +29,100 @@ def executor_fixture(**kwargs):
               wake=Mock(), shutdown=Mock(return_value=True), **kwargs)
 
 
+@pytest.mark.parametrize('ending', ['return', 'error', 'cancel'])
+def test_completion_tracks_detached_revoke_through_stop_creation(ending):
+    async def check():
+        entered, release = asyncio.Event(), asyncio.Event()
+        broker = NS(active={}, _admission_locks={}, teleop=NS(owners={lab.ROBOT_ID: object()}))
+
+        async def revoke(robot_id, reason, *, issue_stop=True):
+            assert robot_id == lab.ROBOT_ID and reason == 'fault' and issue_stop
+            entered.set()
+            await release.wait()
+            if ending == 'error':
+                raise ValueError('audit failure')
+            broker.active['stop'] = NS(robot_id=robot_id, command_id='stop')
+            return 'unchanged'
+
+        broker.teleop.revoke = revoke
+        snapshot = lab.observe_broker_completion(broker)
+        task = asyncio.create_task(broker.teleop.revoke(lab.ROBOT_ID, 'fault', issue_stop=True))
+        await entered.wait()
+        broker.teleop.owners.clear()
+        assert snapshot() == dict(active_ids=[], owner_present=False,
+                                  admission_locked=False, revokes_pending=1)
+        if ending == 'cancel':
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            release.set()
+            if ending == 'error':
+                with pytest.raises(ValueError, match='audit failure'):
+                    await task
+            else:
+                assert await task == 'unchanged'
+                assert snapshot()['active_ids'] == ['stop']
+        assert snapshot()['revokes_pending'] == 0
+        lock = asyncio.Lock()
+        broker._admission_locks[lab.ROBOT_ID] = lock
+        async with lock:
+            assert snapshot()['admission_locked'] is True
+        assert snapshot()['admission_locked'] is False
+    asyncio.run(check())
+
+
+def test_production_revoke_can_create_stop_after_terminal_detaches_owner():
+    import uuid
+    # Execute the production methods without importing optional server dependencies.
+    path = Path(__file__).resolve().parents[2] / 'server/app/commands/teleop.py'
+    controller_class = next(node for node in ast.parse(path.read_text()).body
+                            if isinstance(node, ast.ClassDef) and node.name == 'TeleopController')
+    controller_class.body = [node for node in controller_class.body
+                             if getattr(node, 'name', None) in {'revoke', 'terminal'}]
+    namespace = dict(uuid=uuid, TeleopVelocityData=NS, CommandRequestData=NS,
+                     Envelope=NS(model_validate_json=lambda value: value), encode=lambda *args: args)
+    exec(compile(ast.Module(body=[controller_class], type_ignores=[]), str(path), 'exec'), namespace)
+
+    async def check():
+        sending, sent, auditing, audited = (asyncio.Event() for _ in range(4))
+        broker = NS(hub=NS(), active={}, _admission_locks={}, can_command=lambda _: True)
+        broker.teleop = controller = namespace['TeleopController']()
+        controller.broker, controller.owners, controller.revisions = broker, {}, {}
+        owner = NS(phase='active', client=object(), command_id='start', seq=1,
+                   stop_issued=False, start_terminal=False, stop_ids=set())
+        controller.owners[lab.ROBOT_ID] = owner
+        controller.bound = lambda _: True
+
+        async def send(*_):
+            sending.set()
+            await sent.wait()
+            return True
+
+        async def request(client, envelope, payload):
+            assert client is owner.client and payload.command == 'teleop_stop'
+            auditing.set()
+            await audited.wait()
+            broker.active[payload.command_id] = NS(robot_id=lab.ROBOT_ID,
+                                                    command_id=payload.command_id)
+
+        controller.send = send
+        broker.handle_browser_request = request
+        snapshot = lab.observe_broker_completion(broker)
+        task = asyncio.create_task(controller.revoke(lab.ROBOT_ID, 'fault'))
+        await sending.wait()
+        controller.terminal(NS(robot_id=lab.ROBOT_ID, command_id='start'))
+        assert not snapshot()['owner_present'] and snapshot()['revokes_pending'] == 1
+        assert snapshot()['active_ids'] == []
+        sent.set()
+        await auditing.wait()
+        assert snapshot()['revokes_pending'] == 1 and snapshot()['active_ids'] == []
+        audited.set()
+        await task
+        assert snapshot()['revokes_pending'] == 0 and len(snapshot()['active_ids']) == 1
+    asyncio.run(check())
+
+
 def lab_run_statements():
     return next(item for item in ast.parse(inspect.getsource(lab)).body
                 if isinstance(item, ast.FunctionDef) and item.name == 'run_lab').body

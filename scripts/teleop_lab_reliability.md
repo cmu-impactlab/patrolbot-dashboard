@@ -1,5 +1,60 @@
 # Isolated teleop harness investigation (2026-11-20)
 
+## Fault completion ordering correction (2026-11-21)
+
+Base HEAD: `538b96f61dd8b2e28e796a63aac9536f9df3455f`. The parent's fixed-count
+native matrix remains **5 passed, 1 failed**; both hosted PR checks were green.
+The retained failure is
+`/tmp/opencode/author-review/lab-matrix-538b96f/serial-2/full.log`.
+All six healthy checks passed, and the actual fault correctly produced the exact
+failed terminal, fault-time evidence, zero and inactive receipts. The checker
+then issued its single restart probe before automatic stop completion. The log
+shows the start closing at `09:29:22,323`, automatic stop forwarding at `,324`,
+the probe's busy refusal at `,337`, and stop success at `,341`. The busy reason
+is correctly rejected; it is not an alternative acceptable stale-sensor reason.
+
+The checker now inserts a bounded passive completion barrier after the exact
+fault terminal and zero/inactive receipts, before sending the one refusal probe.
+It requires the exact start's completed `failed` audit and matching retained
+detail, and any automatic stop's original session identity and completed
+`succeeded` audit. It reuses `session_stop_id()` and the existing six-second
+budget / half-second send settlement policy (`send()` is bounded at .3 seconds).
+It polls observations without retrying commands. Missing completion, failed or
+misidentified stops, and exhausted budgets fail closed.
+
+The lab alone observes in-flight `revoke()` calls with a delegating try/finally
+wrapper installed during application lifespan startup. Its event-loop status
+snapshot exposes pending revokes, active command IDs, owner presence and the
+admission lock. An empty active set and completed start are insufficient while
+a detached revoke can still create/audit a stop. The checker requires every
+admission fact clear, then reads the audit after that snapshot so a just-finished
+revoke's stop cannot escape validation. Stale odometry publishing remains off
+through the barrier and exact refusal. Production files, guards, return values,
+safety timing, healthy terminal policy and fault identity/detail checks are
+unchanged.
+
+Deterministic offline tests cover terminal-before-start-audit completion, a
+detached revoke that creates its stop after the initial settlement interval,
+delayed stop completion, failed/wrong-identity stops, missing completed rows,
+wrong start detail/outcome, unrelated active commands, retained owner/admission/
+revoke barriers and budget expiry. The production `revoke()` and `terminal()`
+method bodies also execute against controlled send/audit events to reproduce
+owner removal before stop creation. They are AST-loaded because the supplied
+venv lacks optional server dependency `pydantic`; no dependencies were installed.
+Workflow tests require no probe on barrier failure and exactly one probe after
+completion, with the exact stale-odometry refusal still mandatory.
+
+Validation uses `/home/yousef/Projects/repos/patrolbot-repo/.venv/bin/python -B`,
+`PYTHONDONTWRITEBYTECODE=1`, `PYTHONPATH=scripts:server`, pytest
+`-q -rs -p no:cacheprovider`, with coroutine, unraisable and thread warnings
+treated as errors. Focused lab/checker/evidence tests: **300 passed**. Complete
+portable `scripts/tests`: **347 passed**. Python parsing, runner shell syntax
+and `git diff --check` pass. This is an uncommitted local patch on the base SHA;
+the parent owns independent re-review, a fresh fixed-count six-case matrix and
+all 19 CI checks before any merge. No network, installs, Docker, ROS, robot,
+remote operations or merge were performed. `RTK.md` remains absent. The previous
+five native passes and one failure are retained and do not validate this patch.
+
 ## Full-review P2 correction (2026-11-21)
 
 Base HEAD: `1c103f554b18d11d114c57eda776de09c19fcd1c`. Production

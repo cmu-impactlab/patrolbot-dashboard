@@ -94,6 +94,54 @@ async def expected_stale_odom_fault(socket, robot, command_id, evidence, after, 
             return
 
 
+async def complete_stale_odom_fault(client, robot, command_id, detail, timeout=6):
+    """Passively settle audit writes and concurrent automatic stop admission."""
+    deadline = time.monotonic() + timeout
+    settled_after = None
+    stop_id = None
+
+    def remaining():
+        budget = deadline - time.monotonic()
+        assert budget > 0, 'Stale-odometry completion barrier expired'
+        return budget
+
+    while True:
+        budget = remaining()
+        response = await asyncio.wait_for(client.get('/lab/status'), budget)
+        remaining()
+        response.raise_for_status()
+        status = response.json()
+        assert status['robot_id'] == robot and status['fault'] == 'odom_stale', status
+        facts = status['completion']
+        # Read audit after server facts so a just-finished revoke's stop is included.
+        budget = remaining()
+        response = await asyncio.wait_for(client.get('/api/commands?limit=500'), budget)
+        remaining()
+        response.raise_for_status()
+        audit = response.json()
+        resolved = session_stop_id(audit, robot, command_id)
+        assert stop_id is None or resolved == stop_id, 'Expected stop disappeared from audit'
+        stop_id = resolved
+        start = next(row for row in audit if row['command_id'] == command_id)
+        complete = bool(start.get('completed_at'))
+        if complete:
+            assert start.get('outcome') == 'failed' and start.get('detail') == detail, start
+            if settled_after is None:
+                # As in finish(None), allow the bounded .3 s zero send to settle.
+                settled_after = time.monotonic() + .5
+        if stop_id is not None:
+            stop = next(row for row in audit if row['command_id'] == stop_id)
+            if stop.get('completed_at'):
+                assert stop.get('outcome') == 'succeeded', stop
+            else:
+                complete = False
+        if (complete and time.monotonic() >= settled_after
+                and facts['active_ids'] == [] and facts['owner_present'] is False
+                and facts['admission_locked'] is False and facts['revokes_pending'] == 0):
+            return
+        await asyncio.sleep(min(.02, remaining()))
+
+
 async def finish(socket, client, robot, command_id, expect_stop, timeout=6):
     deadline = time.monotonic() + timeout
 
@@ -331,6 +379,8 @@ async def main():
                 except asyncio.CancelledError:
                     pass
             refused_id = str(uuid4())
+            await complete_stale_odom_fault(client, robot, command_id,
+                                            observed['fault_evidence']['reason'])
             await socket.send(encode('command.request', robot, 1,
                 {'command_id': refused_id, 'command': 'teleop_start'}))
             refusal = await reply(refused_id, accepted=False)

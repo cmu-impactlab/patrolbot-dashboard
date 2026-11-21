@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 import gc
 import hashlib
 import inspect
@@ -142,6 +143,31 @@ def observe_odom_fault(teleop, state):
         return send(kind, data)
 
     teleop.session.safety, teleop.session.send = observe_safety, observe_send
+
+
+def observe_broker_completion(broker):
+    """LAB ONLY, server event loop: include revokes holding a detached owner."""
+    revoke = broker.teleop.revoke
+    pending = 0
+
+    async def observed_revoke(robot_id, *args, **kwargs):
+        nonlocal pending
+        tracked = robot_id == ROBOT_ID
+        pending += tracked
+        try:
+            return await revoke(robot_id, *args, **kwargs)
+        finally:
+            pending -= tracked
+
+    broker.teleop.revoke = observed_revoke
+
+    def snapshot():
+        lock = broker._admission_locks.get(ROBOT_ID)
+        return dict(active_ids=[entry.command_id for entry in broker.active.values()
+                                if entry.robot_id == ROBOT_ID],
+                    owner_present=ROBOT_ID in broker.teleop.owners,
+                    admission_locked=bool(lock and lock.locked()), revokes_pending=pending)
+    return snapshot
 
 
 def readiness_snapshot(bridge, node, server, state, lifecycle, metrics, after, fault):
@@ -419,6 +445,15 @@ def run_lab(resources):
     settings = Settings(_env_file=None, database_path=str(directory / "test.sqlite3"),
                         default_robot_id=ROBOT_ID, robot_token="isolated-teleop-only")
     app = create_app(settings)
+    application_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lab_lifespan(app):
+        async with application_lifespan(app):
+            app.state.lab_completion = observe_broker_completion(app.state.hub.commands)
+            yield
+
+    app.router.lifespan_context = lab_lifespan
     # Register lab-only diagnostics before the application's SPA catch-all.
     from starlette.routing import Mount
     static_mounts = [route for route in app.router.routes if isinstance(route, Mount) and route.path == ""]
@@ -431,6 +466,7 @@ def run_lab(resources):
             records = {topic: list(samples) for topic, samples in history.items()}
         return {"physical_acceptance": False, "simulated_hardware": True,
                 "robot_id": ROBOT_ID, "fault": state["fault"],
+                "completion": app.state.lab_completion(),
                 "odom_count": state["odom_count"], "base_count": state["base_count"],
                 "received": records}
 
