@@ -1,6 +1,4 @@
 """No-motion integration checks for the independent measured-speed channel."""
-import json
-from types import SimpleNamespace
 import pytest
 
 from app.protocol.envelope import decode, encode
@@ -8,15 +6,19 @@ from app.protocol.messages import MotionData
 from app.settings import Settings
 from app.telemetry.hub import TelemetryHub
 from app.telemetry.store import Slice
+from test_web_teleop import fake_base
 
 
 @pytest.mark.asyncio
-async def test_motion_without_amcl_is_rebroadcast_and_keeps_generation():
+@pytest.mark.parametrize("has_origin", [False, True])
+async def test_motion_without_amcl_is_rebroadcast_and_keeps_generation(has_origin):
     hub = TelemetryHub(Settings())
     session = hub.get_or_create_state("unit")
     session.websocket = object()
     session.connected_mono = 0
-    session.state.base_state = Slice(SimpleNamespace(session_generation=7), 1)
+    base = fake_base(odom_epoch="epoch" if has_origin else None,
+                     odom_epoch_generation=1 if has_origin else None)
+    session.state.base_state = Slice(base, 1)
     session.state.motion = Slice()
     published = []
     hub.publish = lambda kind, robot, data: published.append((kind, data))

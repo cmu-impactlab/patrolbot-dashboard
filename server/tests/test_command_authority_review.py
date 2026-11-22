@@ -14,7 +14,7 @@ from app.commands.broker import ActiveCommand
 from app.database.repo import Database
 from app.main import create_app
 from app.protocol.envelope import decode, encode
-from app.protocol.messages import PoseData
+from app.protocol.messages import MotionData, PoseData
 from app.settings import Settings
 from test_web_teleop import (
     ROBOT, Socket, browser_frames, fake_base, lab, reply, request, samples,
@@ -170,6 +170,88 @@ async def test_authority_rechecked_after_audit_await(lab, tmp_path, monkeypatch,
         await db.close()
 
 
+@pytest.mark.parametrize("change,reason", [
+    ("expired", "fresh, valid session-bound measured-motion"),
+    ("moving", "still moving"),
+    ("new_session", "fresh, valid session-bound measured-motion"),
+])
+async def test_undock_rechecks_measured_stop_after_audit_await(lab, tmp_path, monkeypatch, change, reason):
+    state = lab.session.state
+    state.set_capabilities(["undock"])
+    state.record_base_state(fake_base(dock_state="DOCKED_CONFIRMED",
+                                     undock_profile_commissioned=True,
+                                     odom_epoch="isolated-epoch", odom_epoch_generation=1))
+    stopped = MotionData(source="raw_odom", linear_velocity=0., angular_velocity=0.,
+                         sample_age_s=.01, receipt_age_s=.01, session_generation=7,
+                         odom_epoch="isolated-epoch", odom_epoch_generation=1)
+    state.record_motion(stopped)
+    db = Database(str(tmp_path / "undock-admission.db"))
+    await db.init()
+    lab.hub.db = db
+    original = db.add_command_audit
+
+    async def change_motion(*args, **kwargs):
+        await original(*args, **kwargs)
+        if change == "expired":
+            state.motion.received_mono = time.monotonic() - 1.6
+        elif change == "moving":
+            state.record_motion(stopped.model_copy(update={"linear_velocity": .1}))
+        else:
+            state.record_base_state(state.base_state.data.model_copy(update={"session_generation": 8}))
+
+    monkeypatch.setattr(db, "add_command_audit", change_motion)
+    try:
+        assert lab.hub.commands._validate_robot_state(lab.session, "undock") is None
+        command_id = await request(lab, "undock")
+        assert not lab.robot.frames
+        assert command_id not in lab.hub.commands.active
+        assert await db.command_recorded(command_id)
+        ack = next(f["data"] for f in browser_frames(lab.client) if f["type"] == "command.ack")
+        assert ack["command_id"] == command_id and not ack["accepted"]
+        assert reason in ack["reason"]
+    finally:
+        lab.hub.db = None
+        await db.close()
+
+
+@pytest.mark.parametrize("same_origin", [True, False])
+async def test_undock_discards_stop_on_origin_transition(lab, same_origin):
+    state = lab.session.state
+    state.set_capabilities(["undock"])
+    base = fake_base(dock_state="DOCKED_CONFIRMED", undock_profile_commissioned=True,
+                     odom_epoch="old-epoch", odom_epoch_generation=2)
+    stopped = MotionData(source="raw_odom", linear_velocity=0., angular_velocity=0.,
+                         sample_age_s=.01, receipt_age_s=.01, session_generation=7,
+                         odom_epoch="old-epoch", odom_epoch_generation=2)
+    broker = lab.hub.commands
+
+    async def telemetry(kind, payload):
+        frame = decode(encode(f"telemetry.{kind}", ROBOT, 1, payload))
+        await lab.hub.handle_robot_message(lab.session, *frame)
+
+    await telemetry("base_state", base)
+    await telemetry("motion", stopped)
+    assert broker._validate_robot_state(lab.session, "undock") is None
+    if same_origin:
+        await telemetry("base_state", base.model_copy(update={"odom_epoch_valid": False}))
+        await telemetry("motion", stopped)
+        assert state.motion.data is None
+        new_base = base
+    else:
+        # A bridge process restart can reuse the numeric session generation.
+        new_base = base.model_copy(update={"odom_epoch": "new-epoch", "odom_epoch_generation": 1})
+    await telemetry("base_state", new_base)
+    assert state.motion.data is None
+    assert "measured-motion" in broker._validate_robot_state(lab.session, "undock")
+    if not same_origin:
+        await telemetry("motion", stopped)
+        assert state.motion.data is None
+    await telemetry("motion", stopped.model_copy(update={
+        "odom_epoch": new_base.odom_epoch, "odom_epoch_generation": new_base.odom_epoch_generation,
+    }))
+    assert broker._validate_robot_state(lab.session, "undock") is None
+
+
 async def motion(lab, command):
     """Supply explicit fake healthy evidence, without bypassing any gate."""
     map_id, revision = "isolated-map", "sha256:" + "1" * 64
@@ -182,11 +264,15 @@ async def motion(lab, command):
     ])
     lab.session.state.record_base_state(fake_base(
         map_id=map_id, map_revision=revision, localization_recovery_required=False,
-        localization_seed_stamp_ns=1,
+        localization_seed_stamp_ns=1, odom_epoch="isolated-epoch", odom_epoch_generation=1,
         dock_state="DOCKED_CONFIRMED" if command == "undock" else "CLEAR_CONFIRMED"))
     lab.session.state.record_pose(PoseData(
         map_id=map_id, map_revision=revision, x=1., y=1., yaw=0.,
         linear_velocity=0., angular_velocity=0., localized=True))
+    lab.session.state.record_motion(MotionData(
+        source="raw_odom", linear_velocity=0., angular_velocity=0.,
+        sample_age_s=.01, receipt_age_s=.01, session_generation=7,
+        odom_epoch="isolated-epoch", odom_epoch_generation=1))
     extra = {"goal": dict(map_id=map_id, map_revision=revision, x=2., y=2.)} if command == "navigate_to_pose" else {}
     command_id = await request(lab, command, **extra)
     assert command_id in lab.hub.commands.active

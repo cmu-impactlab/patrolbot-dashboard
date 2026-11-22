@@ -378,28 +378,33 @@ class CommandBroker:
         forwarded = payload.model_copy(update={"operator_authorized": True})
         frame = encode("command.request", envelope.robot_id, self.hub._next_seq(), forwarded)
 
-        async def send_bound():
+        async def send_bound() -> str | None:
             # wait_for schedules this on another task: recheck after that
             # scheduling boundary, not only before constructing the coroutine.
             if ((not self.can_command(client) and not self.can_end(client, command))
                     or self.hub.robots.get(robot_id) is not session
                     or session.websocket is not entry.robot_websocket):
-                return False
+                self.lease.release_client(client)
+                return "Command authority or robot connection changed before publication; command was not sent."
+            if command == "undock":
+                # The audit write and task scheduling can outlive the measured
+                # stop. Check current evidence again at the forwarding boundary.
+                reason = self._validate_robot_state(session, command, excluding=entry)
+                if reason is not None:
+                    return reason
             await entry.robot_websocket.send_text(frame)
-            return True
+            return None
 
         try:
             if command in {"teleop_start", "teleop_stop"} | MOTION_COMMANDS:
-                sent = await asyncio.wait_for(send_bound(),
+                refusal = await asyncio.wait_for(send_bound(),
                     timeout=(max(.001, self.ack_timeout_s) if command in MOTION_COMMANDS
                              else max(.001, min(.3, self.hub.settings.teleop_send_timeout_s))))
-                if not sent:
+                if refusal is not None:
                     if command in {"teleop_start", "teleop_stop"}:
                         self.teleop.terminal(entry)
-                    self.lease.release_client(client)
-                    detail = "Command authority or robot connection changed before publication; command was not sent."
-                    self._reject(robot_id, command_id, detail)
-                    await self._finish(entry, "rejected", detail)
+                    self._reject(robot_id, command_id, refusal)
+                    await self._finish(entry, "rejected", refusal)
                     return
                 if session.websocket is not entry.robot_websocket or self.hub.robots.get(robot_id) is not session:
                     raise ConnectionError("robot session changed during publication")
@@ -524,7 +529,8 @@ class CommandBroker:
         return None
 
     def _validate_robot_state(self, session: "RobotSession", command: str,
-                              allow_unlocalized: bool = False) -> str | None:
+                              allow_unlocalized: bool = False, *,
+                              excluding: ActiveCommand | None = None) -> str | None:
         """Refusal reason for a gated command, from live state.
 
         `allow_unlocalized` is the operator's per-command override, carried
@@ -554,9 +560,12 @@ class CommandBroker:
                                        base_state_age=state.base_state.age(),
                                        pose_age=state.pose.age(),
                                        allow_unlocalized=allow_unlocalized)
-        if any(entry.command == "undock" and entry.robot_id == session.robot_id
+        if any(entry is not excluding and entry.command == "undock" and entry.robot_id == session.robot_id
                for entry in self.active.values()):
             facts.undock_active = True
+        if command == "undock":
+            gates.set_undock_motion_facts(
+                facts, state.base_state.data, state.motion.data, state.motion.age())
         if command == "dock_reset":
             # Recovery must work without AMCL/map pose, just like manual drive.
             # Only session-bound raw measured motion can establish a stop.

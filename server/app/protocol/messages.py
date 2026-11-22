@@ -161,6 +161,8 @@ class BaseStateData(MapContext):
     # Missing epoch fields remain parseable for legacy recordings but are
     # unsafe for navigation and localization health.
     odom_epoch_valid: bool = False
+    odom_epoch: str | None = Field(default=None, max_length=MOTION_MAX_EPOCH_LENGTH)
+    odom_epoch_generation: StrictInt | None = Field(default=None, ge=0, le=MOTION_MAX_GENERATION)
     # Raw odometry receipt age at the bridge, independent of map/localization.
     # Missing evidence is never authorization for web manual drive.
     raw_odom_age_s: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -200,6 +202,14 @@ class MotionData(BaseModel):
     # state was not yet known; the UI must not treat that as a valid origin.
     odom_epoch: str = Field(max_length=MOTION_MAX_EPOCH_LENGTH)
     odom_epoch_generation: StrictInt = Field(ge=0, le=MOTION_MAX_GENERATION)
+
+
+def motion_matches_base_origin(motion: MotionData, base: BaseStateData) -> bool:
+    return (base.odom_epoch_valid and bool(base.odom_epoch)
+            and base.odom_epoch_generation is not None and base.odom_epoch_generation > 0
+            and motion.session_generation == base.session_generation
+            and motion.odom_epoch == base.odom_epoch
+            and motion.odom_epoch_generation == base.odom_epoch_generation)
 
 
 class DiagnosticItem(BaseModel):

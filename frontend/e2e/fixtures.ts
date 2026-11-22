@@ -1,18 +1,26 @@
 import { type Page, type WebSocketRoute } from "@playwright/test";
 import presets from "./presets.json" with { type: "json" };
 import type { LayoutDoc } from "../src/stores/layoutStore";
+import type { MotionData } from "../src/types/protocol";
 
 export const READY_BASE_STATE = {
   map_id: "cmuq-floor2", map_revision: "test-revision",
   lidar_state: "READY", lidar_scan_age: 0.1, session_generation: 1, link_connected: true, telemetry_age: 0.1, hardware_state_valid: true,
   charge_state: "not_charging", motors_enabled: true, estop_pressed: false,
   fault_flags: 0, stall_value: 0, bumpers_front: false, bumpers_rear: false, bumpers_valid: true,
-  odom_epoch_valid: true, localization_recovery_required: false, localization_seed_stamp_ns: 1,
+  odom_epoch_valid: true, odom_epoch: "test-origin", odom_epoch_generation: 1,
+  localization_recovery_required: false, localization_seed_stamp_ns: 1,
   raw_odom_age_s: .02,
 };
 
+export const STOPPED_MOTION: MotionData = {
+  source: "raw_odom", session_generation: READY_BASE_STATE.session_generation,
+  odom_epoch: READY_BASE_STATE.odom_epoch, odom_epoch_generation: READY_BASE_STATE.odom_epoch_generation,
+  sample_age_s: 0, receipt_age_s: 0, linear_velocity: 0, angular_velocity: 0,
+};
+
 export async function dashboardFixture(page: Page, role = "operator", preset = "Operator", largeMap = false,
-  capabilities: string[] = []) {
+  capabilities: string[] = [], { omitPose = false } = {}) {
   const commands: { command: string; command_id: string; goal: unknown }[] = [];
   const teleopFrames: { command_id: string; seq: number; linear: number; angular: number; deadman: boolean }[] = [];
   const saves: LayoutDoc[] = [];
@@ -68,11 +76,11 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
     socketReady();
     send("server.snapshot", { connection: { state: "online" }, robot_status: { status: "ready", detail: "Ready" },
       system_health: { overall: "healthy", subsystems: [{ id: "computer", label: "Computer", level: "healthy", message: "Long network diagnostic ".repeat(15), updated_at: new Date().toISOString() }] },
-      map_version: 1, pose: { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
+      map_version: 1, pose: omitPose ? null : { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
       battery: { voltage: 25, percentage: 85, charging: false },
       resources: { cpu_percent: 20, memory_percent: 40, disk_percent: 30, wifi_signal_dbm: -52 },
       base_state: baseState, capabilities,
-      events: [{ id: 1, ts: new Date().toISOString(), severity: "warning", title: "Long alert", message: "Long message ".repeat(35) }], slice_ages_s: {pose: 0, base_state: 0, battery: 0, resources: 0},
+      events: [{ id: 1, ts: new Date().toISOString(), severity: "warning", title: "Long alert", message: "Long message ".repeat(35) }], slice_ages_s: {pose: omitPose ? null : 0, base_state: 0, battery: 0, resources: 0},
     });
     clearInterval(baseTimer);
     baseTimer = setInterval(() => send("telemetry.base_state", baseState), 100);

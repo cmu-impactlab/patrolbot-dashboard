@@ -333,6 +333,8 @@ def normalize_base_state(state: Any) -> dict:
             getattr(state, "undock_profile_commissioned", False)),
         # Missing epoch fields fail closed downstream.
         "odom_epoch_valid": bool(getattr(state, "odom_epoch_valid", False)),
+        "odom_epoch": getattr(state, "odom_epoch", None),
+        "odom_epoch_generation": getattr(state, "odom_epoch_generation", None),
         "localization_recovery_required": bool(
             getattr(state, "localization_recovery_required", True)),
         "localization_recovery_stage": str(

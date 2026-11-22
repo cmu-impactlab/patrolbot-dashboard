@@ -294,6 +294,8 @@ class MockRobot:
             await ws.send(self.frame("telemetry.base_state", base_state_payload(
                 session_generation=self.session_generation,
                 odom_epoch_valid=self.odom_epoch_valid,
+                odom_epoch=self.odom_epoch,
+                odom_epoch_generation=self.odom_epoch_generation,
                 localization_recovery_required=self.localization_recovery_required,
                 localization_seed_stamp_ns=self.localization_seed_stamp_ns,
                 charging=self.battery.charging, docked=self.on_dock,

@@ -24,6 +24,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from ..protocol.messages import BaseStateData, MotionData, motion_matches_base_origin
+
 # The robot's *own* report of how stale its drive-base link is. Anything older
 # than this is not a basis for allowing motion.
 MAX_TELEMETRY_AGE_S = 2.0
@@ -90,6 +92,8 @@ class StateFacts:
     # Set from the operator's per-command override, not from telemetry.
     allow_unlocalized: bool = False
     stationary: bool = False
+    measured_motion_fresh: bool = False
+    measured_stationary: bool = False
     capabilities: tuple[str, ...] = ()
     # A navigate_to_pose this server is still waiting on. `stationary` does not
     # cover it: a goal that has been accepted but has not started moving yet
@@ -231,6 +235,26 @@ def _stationary_reason(facts: StateFacts) -> str | None:
     if not facts.stationary:
         return "The robot is still moving — wait until it has stopped."
     return None
+
+
+def set_undock_motion_facts(facts: StateFacts, base: BaseStateData | None,
+                           motion: MotionData | None, receipt_age: float | None) -> None:
+    """Only fresh session-bound raw odometry can establish an undock stop."""
+    facts.measured_motion_fresh = False
+    facts.measured_stationary = False
+    if base is None or motion is None or receipt_age is None:
+        return
+    ages = (receipt_age, motion.sample_age_s, motion.receipt_age_s)
+    if (not all(math.isfinite(age) and age >= 0 for age in ages)
+            or sum(ages) > 1.5
+            or motion.source != "raw_odom"
+            or not motion_matches_base_origin(motion, base)
+            or not math.isfinite(motion.linear_velocity)
+            or not math.isfinite(motion.angular_velocity)):
+        return
+    facts.measured_motion_fresh = True
+    facts.measured_stationary = (abs(motion.linear_velocity) <= STATIONARY_LINEAR_MS
+                                and abs(motion.angular_velocity) <= STATIONARY_ANGULAR_RPS)
 
 
 def lidar_reason(facts: StateFacts) -> str | None:
@@ -405,7 +429,12 @@ def undock_reason(facts: StateFacts) -> str | None:
     if facts.navigating:
         return ("The robot is still driving to a destination. Stop it before "
                 "backing it off the dock.")
-    return _stationary_reason(facts)
+    if not facts.measured_motion_fresh:
+        return ("Wait for fresh, valid session-bound measured-motion readings "
+                "before undocking.")
+    if not facts.measured_stationary:
+        return "The robot is still moving — wait until it has stopped."
+    return None
 
 
 def software_reset_reason(facts: StateFacts) -> str | None:

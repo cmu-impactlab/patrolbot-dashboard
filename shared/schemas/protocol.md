@@ -72,13 +72,22 @@ substitute. Every value is finite and bounded: `linear_velocity` is m/s,
 `angular_velocity` rad/s, the ages are seconds since the odom stamp and since the
 bridge received the message, and `source` is `"raw_odom"`. `session_generation`
 binds the sample to the drive-base session and `odom_epoch`/`odom_epoch_generation`
-to the odometry origin epoch; a sample whose generation does not match the live
-base state is dropped, never merged. A reading the bridge cannot trust is not
+to the odometry origin epoch. `telemetry.base_state` carries the same origin
+fields from ROS `BaseState`; a mismatched motion sample is dropped, and cached
+motion is discarded when the reported origin or its validity changes. A reading the bridge cannot trust is not
 sent at all — a missing `motion` (or an omitted field in an old recording) means
 "no measurement", never a fabricated zero. Browsers age the value by the odom
 sample age, the bridge receipt age, envelope transport age and their own local
 elapsed time, and clear it on a snapshot whose session/epoch generation is older
 than the live one.
+
+For Undock, the server checks fresh measured stationarity both at admission and
+immediately before forwarding. The motion must match the live hardware session
+and valid odometry epoch (identity and generation), and its total age must not
+exceed 1.5 seconds. Legacy base-state frames without an origin identity still
+decode, but cannot authorize Undock. Neither a parked pose nor a missing motion
+frame is evidence of a stop. This does not change localization requirements for
+navigation.
 
 ## Server → Browser  (`/ws/ui`)
 

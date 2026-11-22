@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { dashboardFixture, READY_BASE_STATE } from "./fixtures";
+import { dashboardFixture, READY_BASE_STATE, STOPPED_MOTION } from "./fixtures";
 
 async function menu(page: import("@playwright/test").Page) {
   // App hydration can finish after page.goto's load event. Wait for the
@@ -306,6 +306,7 @@ test("charging actions retain touch confirmations and visible rejection reasons"
   await expect(nav.getByRole("button",{name:"Undock",exact:true})).toBeDisabled();
   await expect(nav).toContainText("rear bumper is pressed");
   fixture.send("telemetry.base_state",{...base,charge_state:"charging"});
+  fixture.send("telemetry.motion", STOPPED_MOTION);
   await nav.getByRole("button",{name:"Undock",exact:true}).click();
   await expect.poll(() => fixture.commands.length).toBe(2);
   expect(fixture.commands[1].command).toBe("undock");

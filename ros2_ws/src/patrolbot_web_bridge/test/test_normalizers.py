@@ -323,22 +323,30 @@ def test_base_state_epoch_fields_forward_and_missing_fields_fail_closed():
         front_bumper_pressed = False
         rear_bumper_pressed = False
         odom_epoch_valid = True
+        odom_epoch = "test-epoch"
+        odom_epoch_generation = 2
         localization_recovery_required = False
         localization_recovery_stage = "READY"
         localization_seed_stamp_ns = 123
 
     result = normalizers.normalize_base_state(State())
     assert result["odom_epoch_valid"] is True
+    assert result["odom_epoch"] == "test-epoch"
+    assert result["odom_epoch_generation"] == 2
     assert result["localization_recovery_required"] is False
     assert result["localization_recovery_stage"] == "READY"
     assert result["localization_seed_stamp_ns"] == 123
 
     del State.odom_epoch_valid
+    del State.odom_epoch
+    del State.odom_epoch_generation
     del State.localization_recovery_required
     del State.localization_recovery_stage
     del State.localization_seed_stamp_ns
     result = normalizers.normalize_base_state(State())
     assert result["odom_epoch_valid"] is False
+    assert result["odom_epoch"] is None
+    assert result["odom_epoch_generation"] is None
     assert result["localization_recovery_required"] is True
     assert result["localization_recovery_stage"] == ""
     assert result["localization_seed_stamp_ns"] == 0

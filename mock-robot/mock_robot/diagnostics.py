@@ -41,6 +41,8 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
                        motors_enabled: bool = True,
                        undock_active: bool = False,
                        odom_epoch_valid: bool = False,
+                       odom_epoch: str | None = None,
+                       odom_epoch_generation: int | None = None,
                        localization_recovery_required: bool = True,
                        localization_seed_stamp_ns: int = 0,
                        lidar_state: str = "READY", lidar_scan_age: float = 0.0) -> dict:
@@ -60,6 +62,8 @@ def base_state_payload(*, session_generation: int, charging: bool, docked: bool,
         "lidar_power_supported": True,
         "session_generation": session_generation,
         "odom_epoch_valid": odom_epoch_valid,
+        "odom_epoch": odom_epoch,
+        "odom_epoch_generation": odom_epoch_generation,
         "localization_recovery_required": localization_recovery_required,
         "localization_recovery_stage": (
             "wait-origin" if not odom_epoch_valid

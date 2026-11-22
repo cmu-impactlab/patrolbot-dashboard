@@ -32,7 +32,8 @@ def facts(**overrides) -> gates.StateFacts:
                 hardware_state_valid=True, charge_state="charging",
                 motors_enabled=False, estop_pressed=False, fault_flags=0,
                 bumpers_front=False, bumpers_rear=False, bumpers_valid=True, localized=True,
-                stationary=True, capabilities=ALL_CAPS)
+                stationary=True, measured_motion_fresh=True, measured_stationary=True,
+                capabilities=ALL_CAPS)
     return gates.StateFacts(**{**base, **overrides})
 
 
@@ -61,9 +62,12 @@ def test_every_gate_refuses_an_unheard_base_state(gate, age):
 
 @pytest.mark.parametrize("gate", sorted(ALLOWABLE))
 @pytest.mark.parametrize("age", [None, STALE], ids=["never-received", "stale"])
-def test_every_gate_refuses_an_unheard_pose(gate, age):
+def test_pose_receipt_is_required_only_for_charge_release(gate, age):
     reason = gates.GATES[gate](facts(pose_age=age, **ALLOWABLE[gate]))
-    assert reason is not None and "position update" in reason.lower()
+    if gate == "undock":
+        assert reason is None  # Fresh measured motion is independent of AMCL.
+    else:
+        assert reason is not None and "position update" in reason.lower()
 
 
 @pytest.mark.parametrize("gate", ["motor_enable", "motor_disable"])
@@ -120,7 +124,8 @@ def base_state_frame(sequence: int, **overrides) -> str:
             "hardware_state_valid": True, "charge_state": "charging",
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
-            "bumpers_valid": True}
+            "bumpers_valid": True, "odom_epoch_valid": True,
+            "odom_epoch": "epoch-1", "odom_epoch_generation": 1}
     data.update(overrides)
     return encode("telemetry.base_state", "patrolbot-01", sequence, data)
 
@@ -129,6 +134,14 @@ def pose_frame(sequence: int) -> str:
     return encode("telemetry.pose", "patrolbot-01", sequence, {
         "map_id": "cmuq-floor2", "map_revision": "sha256:6c0b66e5e81120a902055888aaa1985b0c15168aa7bf168a2c3a60d766cbf2b1", "x": 1.0, "y": 1.0, "yaw": 0.0, "linear_velocity": 0.0,
         "angular_velocity": 0.0, "localized": True,
+    })
+
+
+def motion_frame(sequence: int) -> str:
+    return encode("telemetry.motion", "patrolbot-01", sequence, {
+        "source": "raw_odom", "linear_velocity": 0., "angular_velocity": 0.,
+        "sample_age_s": .01, "receipt_age_s": .01, "session_generation": 1,
+        "odom_epoch": "epoch-1", "odom_epoch_generation": 1,
     })
 
 
@@ -161,8 +174,10 @@ def freeze(state, slice_name: str, seconds: float = STALE) -> None:
     getattr(state, slice_name).received_mono -= seconds
 
 
-@pytest.mark.parametrize("frozen_slice", ["base_state", "pose"])
-@pytest.mark.parametrize("command", ["charge_release", "undock"])
+@pytest.mark.parametrize("command,frozen_slice", [
+    ("charge_release", "base_state"), ("charge_release", "pose"),
+    ("undock", "base_state"), ("undock", "motion"),
+])
 def test_frozen_slice_is_refused_while_the_robot_still_looks_online(
         client, frozen_slice, command):
     with client.websocket_connect("/ws/robot?token=test-token") as robot:
@@ -170,13 +185,14 @@ def test_frozen_slice_is_refused_while_the_robot_still_looks_online(
         robot.receive_text()
         robot.send_text(base_state_frame(1))
         robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(3))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()  # snapshot — also a sync point
 
             state = client.app.state.hub.primary().state
             freeze(state, frozen_slice)
             # ...and the robot keeps talking, exactly as the real bridge does.
-            robot.send_text(resources_frame(3))
+            robot.send_text(resources_frame(4))
             with client.websocket_connect("/ws/ui") as sync:
                 sync.receive_text()
 
@@ -198,6 +214,7 @@ def test_refusal_is_recorded_in_the_audit(client):
         robot.receive_text()
         robot.send_text(base_state_frame(1))
         robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(3))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             freeze(client.app.state.hub.primary().state, "base_state")
@@ -218,9 +235,15 @@ def test_fresh_telemetry_still_forwards(client):
         robot.receive_text()
         robot.send_text(base_state_frame(1))
         robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(3))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             command_id, frame = command_frame("undock")
             ui.send_text(frame)
             forwarded = json.loads(robot.receive_text())
             assert forwarded["data"]["command_id"] == command_id
+
+
+def test_undock_refuses_unheard_measured_motion_even_with_recent_parked_pose():
+    reason = gates.undock_reason(facts(measured_motion_fresh=False))
+    assert reason is not None and "measured-motion" in reason
