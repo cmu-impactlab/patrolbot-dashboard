@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import WebSocket
 
 from ..protocol.envelope import Envelope, encode
-from ..protocol.messages import BatteryData, CapabilitiesData, EventData
+from ..protocol.messages import BatteryData, CapabilitiesData, EventData, motion_matches_base_origin
 from ..settings import Settings
 from .store import EventIdAllocator, RobotState
 
@@ -377,6 +377,8 @@ class TelemetryHub:
             if (base is None or state.base_state.received_mono is None
                     or state.base_state.received_mono < session.connected_mono
                     or payload.session_generation != base.session_generation
+                    or ((base.odom_epoch is not None or base.odom_epoch_generation is not None)
+                        and not motion_matches_base_origin(payload, base))
                     or (current is not None and payload.odom_epoch_generation < current.odom_epoch_generation)):
                 return
             from datetime import datetime, timezone

@@ -4,12 +4,12 @@
  * while the robot is on the dock.
  */
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavControlsWidget } from "./NavControlsWidget";
 import { useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
-import type { BaseStateData, PoseData } from "../types/protocol";
+import type { BaseStateData, MotionData, PoseData } from "../types/protocol";
 
 const CAPS = ["undock", "motor_enable", "motor_disable"];
 
@@ -20,6 +20,7 @@ const PARKED: PoseData = {
 function baseState(overrides: Partial<BaseStateData> = {}): BaseStateData {
   return {
     lidar_state: "READY", lidar_scan_age: 0.1, session_generation: 1,
+    odom_epoch_valid: true, odom_epoch: "epoch-1", odom_epoch_generation: 1,
     link_connected: true,
     telemetry_age: 0.1,
     hardware_state_valid: true,
@@ -36,7 +37,7 @@ function baseState(overrides: Partial<BaseStateData> = {}): BaseStateData {
 }
 
 function setState(base: BaseStateData | null, pose: PoseData | null = PARKED,
-                  capabilities: string[] = CAPS) {
+                  capabilities: string[] = CAPS, measured: Partial<MotionData> = {}) {
   useAuthStore.setState({ user: { id: 1, username: "test", display_name: "Test", role: "operator", auth_mode: "local" } });
   useTelemetryStore.setState({
     wsConnected: true,
@@ -47,6 +48,11 @@ function setState(base: BaseStateData | null, pose: PoseData | null = PARKED,
     poseReceivedAt: pose === null ? 0 : performance.now(),
     baseState: base,
     pose,
+    motion: { source: "raw_odom", linear_velocity: 0,
+      angular_velocity: 0, sample_age_s: .01, receipt_age_s: .01,
+      session_generation: 1, odom_epoch: "epoch-1", odom_epoch_generation: 1, ...measured },
+    motionAt: performance.now(),
+    motionTransportAgeS: .01,
     capabilities,
     poseSetThisSession: true,
   });
@@ -142,7 +148,7 @@ describe("NavControlsWidget dock control", () => {
 
   it("greys out while the robot is still moving", () => {
     setState(baseState({ charge_state: "charging" }),
-             { ...PARKED, linear_velocity: 0.3 });
+             { ...PARKED, linear_velocity: 0.3 }, CAPS, { linear_velocity: .3 });
     render(<NavControlsWidget />);
 
     expect(dockButton().disabled).toBe(true);
@@ -416,5 +422,67 @@ it("keeps Stop and motor disable available while LiDAR is off", () => {
   render(<NavControlsWidget />);
   expect((screen.getByRole("button", { name: "Stop Robot" }) as HTMLButtonElement).disabled).toBe(false);
   expect((screen.getByRole("button", { name: "Turn motors off" }) as HTMLButtonElement).disabled).toBe(false);
+  cleanup();
+});
+
+
+describe("measured-motion undock admission", () => {
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
+  beforeEach(() => {
+    useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null, lastResult: null, stoppedGoal: null, allowUnlocalized: false });
+  });
+  const motion = { source: "raw_odom" as const, linear_velocity: 0, angular_velocity: 0,
+    sample_age_s: .01, receipt_age_s: .01, session_generation: 1,
+    odom_epoch: "epoch-1", odom_epoch_generation: 1 };
+  it("enables undock without pose while navigation remains blocked", () => {
+    setState(baseState({ odom_epoch_valid: true, localization_recovery_required: true }), null);
+    useTelemetryStore.setState({ poseSetThisSession: false, motion, motionAt: performance.now(), motionTransportAgeS: .01 });
+    render(<NavControlsWidget />);
+    expect(dockButton().disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+  it.each([
+    null, { ...motion, source: "amcl" }, { ...motion, session_generation: 2 },
+    { ...motion, linear_velocity: .021 }, { ...motion, angular_velocity: -.051 },
+    { ...motion, linear_velocity: NaN }, { ...motion, angular_velocity: Infinity },
+    { ...motion, sample_age_s: -1 }, { ...motion, receipt_age_s: NaN },
+    { ...motion, sample_age_s: .8, receipt_age_s: .8 },
+    { ...motion, odom_epoch: "" }, { ...motion, odom_epoch_generation: 0 },
+    { ...motion, odom_epoch: "retired-epoch" }, { ...motion, odom_epoch_generation: 2 },
+  ])("refuses invalid measured motion despite a parked pose: %o", sample => {
+    setState(baseState({ odom_epoch_valid: true }));
+    useTelemetryStore.setState({ motion: sample as typeof motion | null, motionAt: performance.now(), motionTransportAgeS: .01 });
+    render(<NavControlsWidget />);
+    expect(dockButton().disabled).toBe(true);
+  });
+  it("disables an enabled undock when motion expires without new telemetry", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+    setState(baseState({ odom_epoch_valid: true }));
+    useTelemetryStore.setState({ motion: { ...motion, sample_age_s: .45, receipt_age_s: .45 }, motionAt: performance.now(), motionTransportAgeS: .45 });
+    render(<NavControlsWidget />);
+    expect(dockButton().disabled).toBe(false);
+    act(() => vi.advanceTimersByTime(250));
+    expect(dockButton().disabled).toBe(true);
+    expect(dockButton().title).toContain("measured-motion");
+  });
+});
+
+it("accepts measured motion from the real store without restoring map readiness", () => {
+  setState(baseState({ localization_recovery_required: true }), null);
+  useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null });
+  useTelemetryStore.setState({ poseSetThisSession: false, motion: null, motionAt: null, motionTransportAgeS: null });
+  render(<NavControlsWidget />);
+  expect(dockButton().disabled).toBe(true);
+  act(() => useTelemetryStore.getState().handleFrame({
+    version: 1, type: "telemetry.motion", robot_id: "patrolbot-01", sequence: 1,
+    timestamp: new Date().toISOString(),
+    data: { source: "raw_odom", linear_velocity: 0, angular_velocity: 0,
+      sample_age_s: .01, receipt_age_s: .01, session_generation: 1,
+      odom_epoch: "epoch-1", odom_epoch_generation: 1 },
+  }));
+  expect(dockButton().disabled).toBe(false);
+  expect(useTelemetryStore.getState().pose).toBeNull();
+  expect(useTelemetryStore.getState().poseSetThisSession).toBe(false);
+  expect((screen.getByRole("button", { name: "Send Robot Here" }) as HTMLButtonElement).disabled).toBe(true);
   cleanup();
 });

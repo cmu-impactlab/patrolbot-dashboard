@@ -6,6 +6,9 @@
   "timestamp": "2026-07-17T10:31:16.100Z",
   "data": {
     "session_generation": 4,
+    "odom_epoch_valid": true,
+    "odom_epoch": "3f2a6c1d-8b47-4e02-9a15-0d6c7b21e5a0",
+    "odom_epoch_generation": 2,
     "link_connected": true,
     "telemetry_age": 0.12,
     "hardware_state_valid": true,

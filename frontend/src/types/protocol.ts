@@ -90,6 +90,8 @@ export interface BaseStateData extends MapContext {
   lidar_scan_age?: number;
   map_activated_stamp_ns?: number;
   odom_epoch_valid?: boolean;
+  odom_epoch?: string | null;
+  odom_epoch_generation?: number | null;
   localization_recovery_required?: boolean;
   localization_recovery_stage?: string;
   localization_seed_stamp_ns?: number;
@@ -141,6 +143,13 @@ export interface MotionData {
   session_generation: number;
   odom_epoch: string;
   odom_epoch_generation: number;
+}
+
+export function motionMatchesBaseOrigin(sample: MotionData, base: BaseStateData): boolean {
+  return base.odom_epoch_valid === true && typeof base.odom_epoch === "string" && base.odom_epoch.length > 0
+    && typeof base.odom_epoch_generation === "number" && Number.isSafeInteger(base.odom_epoch_generation)
+    && base.odom_epoch_generation > 0 && sample.session_generation === base.session_generation
+    && sample.odom_epoch === base.odom_epoch && sample.odom_epoch_generation === base.odom_epoch_generation;
 }
 
 export interface DiagnosticItem {

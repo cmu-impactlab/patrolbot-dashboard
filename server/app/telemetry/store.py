@@ -230,7 +230,12 @@ class RobotState:
                 f"The robot's {where} bumper touched something. Check that its path is clear.",
             ))
         self._prev_bumper = bumper
-        if self.motion.data is not None and self.motion.data.session_generation != data.session_generation:
+        prior = self.base_state.data
+        if self.motion.data is not None and (
+                self.motion.data.session_generation != data.session_generation
+                or (prior is not None
+                    and (prior.odom_epoch_valid, prior.odom_epoch, prior.odom_epoch_generation)
+                    != (data.odom_epoch_valid, data.odom_epoch, data.odom_epoch_generation))):
             self.motion.data = None
             self.motion.received_mono = None
         self.base_state.set(data)

@@ -2,6 +2,7 @@ import { sameMap } from "../lib/mapContext";
 
 import { localizationRecoveryReason } from "../lib/localizationRecovery";
 import { create } from "zustand";
+import { motionMatchesBaseOrigin } from "../types/protocol";
 import type {
   AnyFrame,
   BaseStateData,
@@ -190,6 +191,10 @@ export function motionSuperseded(
     || !Number.isSafeInteger(sample.session_generation) || !Number.isSafeInteger(sample.odom_epoch_generation)
     || typeof sample.odom_epoch !== "string" || sample.odom_epoch.length === 0 || sample.odom_epoch.length > 128) return true;
   if (baseState !== null && sample.session_generation !== baseState.session_generation) {
+    return true;
+  }
+  if (baseState !== null && (baseState.odom_epoch != null || baseState.odom_epoch_generation != null)
+    && !motionMatchesBaseOrigin(sample, baseState)) {
     return true;
   }
   if (current !== null && sample.odom_epoch_generation < current.odom_epoch_generation) {
@@ -386,18 +391,21 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           ),
         });
         break;
-      case "telemetry.base_state":
+      case "telemetry.base_state": {
+        const prior = get().baseState;
+        const next = frame.data;
         set({ ...bump, baseState: frame.data, baseStateAt: performance.now(),
-          // A new drive-base session supersedes the measured twist bound to the
-          // old one; keeping it would let the gauge mix two sessions.
-          ...(get().baseState !== null &&
-              frame.data.session_generation !== get().baseState!.session_generation
+          // Do not revive a cached stop when the origin becomes valid again.
+          ...(prior !== null && (next.session_generation !== prior.session_generation
+            || next.odom_epoch_valid !== prior.odom_epoch_valid || next.odom_epoch !== prior.odom_epoch
+            || next.odom_epoch_generation !== prior.odom_epoch_generation)
             ? { motion: null, motionAt: null, motionTransportAgeS: null }
             : {}),
           // Full robot reset remains false until a new seed is accepted.
           poseSetThisSession: get().connection.state === "online" &&
             localizationRecoveryReason(frame.data, performance.now()) === null });
         break;
+      }
       case "telemetry.motion": {
         // Drop a sample from a superseded session or an older odom origin
         // generation instead of moving the gauge backwards.

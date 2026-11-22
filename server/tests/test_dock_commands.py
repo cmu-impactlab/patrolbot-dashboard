@@ -27,7 +27,7 @@ def facts(**overrides) -> gates.StateFacts:
                 bumpers_front=False, bumpers_rear=False, bumpers_valid=True, localized=True,
                 odom_epoch_valid=True, localization_recovery_required=False,
                 localization_seed_stamp_ns=1,
-                stationary=True, capabilities=ALL_CAPS)
+                stationary=True, measured_motion_fresh=True, measured_stationary=True, capabilities=ALL_CAPS)
     return gates.StateFacts(**{**base, **overrides})
 
 
@@ -121,7 +121,7 @@ def test_undock_refuses_duplicate_reported_by_robot_state():
     ({"charge_state": "not_charging"}, "not on its dock"),
     ({"bumpers_rear": True}, "rear bumper"),
     ({"estop_pressed": True}, "emergency stop"),
-    ({"stationary": False}, "still moving"),
+    ({"measured_stationary": False}, "still moving"),
     # An accepted nav goal that hasn't started moving yet still reads as
     # stationary, so `stationary` alone let an undock through that the robot
     # then refused with "another navigation is active" (2026-07-28 12:27).
@@ -260,10 +260,19 @@ def base_state_frame(sequence: int, **overrides) -> str:
             "motors_enabled": False, "estop_pressed": False, "fault_flags": 0,
             "stall_value": 0, "bumpers_front": False, "bumpers_rear": False,
             "bumpers_valid": True, "odom_epoch_valid": True,
+            "odom_epoch": "epoch-1", "odom_epoch_generation": 1,
             "localization_recovery_required": False,
             "localization_seed_stamp_ns": 1}
     data.update(overrides)
     return encode("telemetry.base_state", "patrolbot-01", sequence, data)
+
+
+def motion_frame(sequence: int, moving: bool = False, **overrides) -> str:
+    data = dict(source="raw_odom", linear_velocity=.4 if moving else 0., angular_velocity=0.,
+                sample_age_s=.01, receipt_age_s=.01, session_generation=1,
+                odom_epoch="epoch-1", odom_epoch_generation=1)
+    data.update(overrides)
+    return encode("telemetry.motion", "patrolbot-01", sequence, data)
 
 
 def pose_frame(sequence: int, moving: bool = False, localized: bool = True) -> str:
@@ -330,7 +339,7 @@ def test_undock_forwarded_straight_from_charging(client):
         robot.send_text(hello_frame())
         robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="charging", motors_enabled=False))
-        robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(2))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             command_id, frame = command_frame("undock")
@@ -374,7 +383,8 @@ def test_undock_rejected_while_moving(client):
         robot.send_text(hello_frame())
         robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="docked"))
-        robot.send_text(pose_frame(2, moving=True))
+        robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(3, moving=True))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             _, frame = command_frame("undock")
@@ -489,7 +499,7 @@ def test_undock_allowed_once_the_robot_advertises_it_late(client):
         robot.send_text(hello_frame(capabilities=("pose",)))
         robot.receive_text()
         robot.send_text(base_state_frame(1, charge_state="charging"))
-        robot.send_text(pose_frame(2))
+        robot.send_text(motion_frame(2))
         with client.websocket_connect("/ws/ui") as ui:
             ui.receive_text()
             _, frame = command_frame("undock")
@@ -672,3 +682,72 @@ def test_motor_disable_admission_is_independent_of_stale_lidar_and_faults():
     assert gates.rejection_reason('motor_disable',facts(lidar_state='OFF',fault_flags=1,
         estop_pressed=True,stationary=False,hardware_state_valid=False,base_state_age=5)) is None
     assert gates.rejection_reason('motor_disable',facts(capabilities=())) is not None
+
+
+@pytest.mark.parametrize("pose_present", [False, True])
+@pytest.mark.parametrize("changes,allowed", [
+    ({}, True), ({"missing": True}, False), ({"source": "amcl"}, False),
+    ({"session_generation": 2}, False), ({"linear_velocity": .021}, False),
+    ({"angular_velocity": -.051}, False), ({"linear_velocity": float("nan")}, False),
+    ({"angular_velocity": float("inf")}, False),
+    ({"sample_age_s": .6, "receipt_age_s": .6, "server_age": .31}, False),
+    ({"sample_age_s": .6, "receipt_age_s": .6, "server_age": .3}, True),
+    *[({key: value}, False) for key in ("sample_age_s", "receipt_age_s", "server_age")
+      for value in (-.01, float("nan"), float("inf"))],
+    ({"odom_epoch": ""}, False), ({"odom_epoch_generation": 0}, False),
+    ({"odom_epoch": "retired-epoch"}, False), ({"odom_epoch_generation": 2}, False),
+    ({"legacy_base": True}, False), ({"invalid_epoch": True}, False),
+])
+def test_broker_undock_requires_measured_motion_without_pose_fallback(pose_present, changes, allowed):
+    from types import SimpleNamespace as NS
+    from app.commands.broker import CommandBroker
+    from app.protocol.messages import BaseStateData
+    base = BaseStateData.model_validate(json.loads(base_state_frame(1))["data"])
+    base.odom_epoch_valid = not changes.get("invalid_epoch", False)
+    if changes.get("legacy_base"):
+        base.odom_epoch = base.odom_epoch_generation = None
+    motion = dict(source="raw_odom", sample_age_s=.01, receipt_age_s=.01,
+                  session_generation=1, linear_velocity=0., angular_velocity=0.,
+                  odom_epoch="epoch-1", odom_epoch_generation=1)
+    motion.update({k: v for k, v in changes.items()
+                   if k not in {"server_age", "missing", "invalid_epoch", "legacy_base"}})
+    state = NS(connection="online", capabilities=list(ALL_CAPS),
+               base_state=NS(data=base, age=lambda: .01),
+               pose=NS(data=NS(localized=True, linear_velocity=0., angular_velocity=0.) if pose_present else None,
+                       age=lambda: .01 if pose_present else None),
+               motion=NS(data=None if changes.get("missing") else NS(**motion),
+                         age=lambda: changes.get("server_age", .01)))
+    broker = CommandBroker.__new__(CommandBroker)
+    broker.active = {}
+    broker.lidar_recovery_required = set()
+    broker.lidar_state_after = {}
+    session = NS(robot_id="robot", state=state)
+    reason = broker._validate_robot_state(session, "undock")
+    assert (reason is None) is allowed, reason
+    if not allowed and changes.get("missing"):
+        assert "measured-motion" in reason
+    if not pose_present:
+        base.charge_state = "not_charging"
+        base.motors_enabled = True
+        assert broker._validate_robot_state(session, "navigate_to_pose") is not None
+
+
+@pytest.mark.parametrize("invalid", [None, {"source": "amcl"}, {"linear_velocity": "invalid"},
+                                     {"session_generation": 2}, {"sample_age_s": 1.5}])
+def test_undock_gateway_refuses_missing_or_rejected_motion_with_parked_pose(client, invalid):
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        robot.send_text(base_state_frame(1))
+        robot.send_text(pose_frame(2))
+        if invalid is not None:
+            robot.send_text(motion_frame(3, **invalid))
+        # A valid later frame synchronizes processing after any rejected frame.
+        robot.send_text(base_state_frame(4))
+        with client.websocket_connect("/ws/ui") as ui:
+            ui.receive_text()
+            _, frame = command_frame("undock")
+            ui.send_text(frame)
+            ack = recv_until(ui, "command.ack")
+            assert ack["data"]["accepted"] is False
+            assert "measured-motion" in ack["data"]["reason"]

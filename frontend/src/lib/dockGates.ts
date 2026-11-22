@@ -7,15 +7,11 @@
  * greyed out with its reason rather than hidden, so an operator can tell the
  * difference between "this robot can't do that" and "not yet".
  *
- * One rule is deliberately NOT mirrored: the server also refuses when it has
- * not *received* a base_state or pose recently (gates.MAX_RECEIPT_AGE_S), which
- * catches a robot whose telemetry froze while its heartbeat kept beating. That
- * needs per-slice receipt times and a ticker to re-evaluate as time passes with
- * no new frames, neither of which this store has. The consequence is bounded
- * and in the safe direction: the button stays live for a few seconds longer
- * than it should, and pressing it returns the server's refusal sentence.
+ * Undock uses independently measured raw motion, including all age components.
+ * The widget periodically re-evaluates it even when telemetry stops.
  */
-import type { BaseStateData, CommandType, PoseData } from "../types/protocol";
+import { motionFreshness, type MotionReadout } from "./motion";
+import { motionMatchesBaseOrigin, type BaseStateData, type CommandType, type PoseData } from "../types/protocol";
 
 export const MAX_TELEMETRY_AGE_S = 2.0;
 export const STATIONARY_LINEAR_MS = 0.02;
@@ -43,6 +39,8 @@ export interface StateFacts {
   undockProfileCommissioned: boolean | null;
   localized: boolean;
   stationary: boolean;
+  measuredMotionFresh: boolean;
+  measuredStationary: boolean;
   capabilities: string[];
   /**
    * A navigate_to_pose still in flight. `stationary` does not cover it: a goal
@@ -60,7 +58,13 @@ export function factsFrom(
   pose: PoseData | null,
   capabilities: string[],
   navigating = false,
+  motion?: MotionReadout,
+  now = performance.now(),
 ): StateFacts {
+  const speed = motion ? motionFreshness(motion, now, baseState?.session_generation ?? null) : null;
+  const raw = motion?.motion;
+  const measuredMotionFresh = motion?.transportAgeS != null && speed?.fresh === true && raw?.source === "raw_odom"
+    && baseState !== null && motionMatchesBaseOrigin(raw, baseState);
   return {
     online: connectionState === "online",
     linkConnected: baseState?.link_connected ?? false,
@@ -81,6 +85,11 @@ export function factsFrom(
       pose != null &&
       Math.abs(pose.linear_velocity) <= STATIONARY_LINEAR_MS &&
       Math.abs(pose.angular_velocity) <= STATIONARY_ANGULAR_RPS,
+    measuredMotionFresh,
+    measuredStationary: measuredMotionFresh && speed?.linear != null && speed.angular != null
+      && Number.isFinite(speed.linear) && Number.isFinite(speed.angular)
+      && Math.abs(speed.linear) <= STATIONARY_LINEAR_MS
+      && Math.abs(speed.angular) <= STATIONARY_ANGULAR_RPS,
     capabilities,
     navigating,
   };
@@ -179,7 +188,10 @@ export function undockReason(facts: StateFacts): string | null {
   if (facts.navigating) {
     return "The robot is still driving to a destination. Stop it before backing it off the dock.";
   }
-  return stationaryReason(facts);
+  if (!facts.measuredMotionFresh) {
+    return "Wait for fresh, valid session-bound measured-motion readings before undocking.";
+  }
+  return facts.measuredStationary ? null : "The robot is still moving — wait until it has stopped.";
 }
 
 /** Emergency reset has no robot-state prerequisites. */

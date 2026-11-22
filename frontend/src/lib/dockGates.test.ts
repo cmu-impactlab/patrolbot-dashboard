@@ -32,6 +32,8 @@ function facts(overrides: Partial<StateFacts> = {}): StateFacts {
     undockProfileCommissioned: null,
     localized: true,
     stationary: true,
+    measuredMotionFresh: true,
+    measuredStationary: true,
     capabilities: ALL_CAPS,
     navigating: false,
     ...overrides,
@@ -135,7 +137,7 @@ describe("undock", () => {
     [{ chargeState: "not_charging" }, "not on its dock"],
     [{ bumpersRear: true }, "rear bumper"],
     [{ estopPressed: true }, "emergency stop"],
-    [{ stationary: false }, "still moving"],
+    [{ measuredStationary: false }, "still moving"],
     [{ faultFlags: 2 }, "fault"],
     [{ telemetryAge: 9 }, "stale"],
   ])("refuses %o", (overrides, fragment) => {
@@ -248,5 +250,43 @@ describe("latched charge after physical clearance", () => {
     const unknown = facts({ chargeState: "float", dockState: "CLEAR_CONFIRMED", dockStateValid });
     expect(motorEnableReason(unknown)).toBeNull();
     expect(chargeReleaseReason(unknown)).toBeNull();
+  });
+});
+
+it("never uses a parked map pose to prove undock stationarity", () => {
+  const base = { link_connected: true, telemetry_age: .01, hardware_state_valid: true,
+    charge_state: "charging", bumpers_valid: true } as BaseStateData;
+  const pose = { x: 0, y: 0, yaw: 0, linear_velocity: 0, angular_velocity: 0, localized: true };
+  expect(undockReason(factsFrom("online", base, pose, ALL_CAPS))).toContain("measured-motion");
+});
+
+describe("undock measured-motion age budget", () => {
+  const base = { link_connected: true, telemetry_age: .01, hardware_state_valid: true,
+    charge_state: "charging", bumpers_valid: true, session_generation: 1,
+    odom_epoch_valid: true, odom_epoch: "epoch-1", odom_epoch_generation: 1 } as BaseStateData;
+  const sample = { source: "raw_odom" as const, linear_velocity: .02, angular_velocity: -.05,
+    sample_age_s: .25, receipt_age_s: .25, session_generation: 1,
+    odom_epoch: "epoch-1", odom_epoch_generation: 1 };
+  const readout = { motion: sample, motionAt: 0, transportAgeS: .5 };
+  it("accepts the inclusive total budget and speed limits without a pose", () => {
+    expect(undockReason(factsFrom("online", base, null, ALL_CAPS, false, readout, 500))).toBeNull();
+    expect(undockReason(factsFrom("online", base, null, ALL_CAPS, false, readout, 501))).toContain("measured-motion");
+  });
+  it.each([-.1, NaN, Infinity])("rejects every invalid age component: %s", age => {
+    const cases = [
+      { ...readout, motion: { ...sample, sample_age_s: age } },
+      { ...readout, motion: { ...sample, receipt_age_s: age } },
+      { ...readout, transportAgeS: age },
+      { ...readout, motionAt: 300 - age * 1000 },
+    ];
+    for (const reading of cases) {
+      expect(undockReason(factsFrom("online", base, null, ALL_CAPS, false, reading, 300))).toContain("measured-motion");
+    }
+  });
+  it("refuses missing timestamps, missing transport age and invalid base origin", () => {
+    for (const reading of [{ ...readout, motionAt: null }, { ...readout, transportAgeS: null }]) {
+      expect(undockReason(factsFrom("online", base, null, ALL_CAPS, false, reading, 300))).toContain("measured-motion");
+    }
+    expect(undockReason(factsFrom("online", { ...base, odom_epoch_valid: false }, null, ALL_CAPS, false, readout, 500))).toContain("measured-motion");
   });
 });

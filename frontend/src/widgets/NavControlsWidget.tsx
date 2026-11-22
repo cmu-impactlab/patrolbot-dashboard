@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowUpFromDot, Crosshair, MapPin, Octagon, Play, Power, X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTeleopStore } from "../stores/teleopStore";
@@ -12,6 +12,7 @@ import { useTelemetryStore } from "../stores/telemetryStore";
 import {
   factsFrom, motorEnableReason, motorDisableReason, showsUndock, softwareResetReason, undockReason,
 } from "../lib/dockGates";
+import { useMotion } from "../lib/motion";
 import { useIsFresh } from "../lib/freshness";
 
 const OUTCOME_COPY: Record<string, string> = {
@@ -40,6 +41,12 @@ export function NavControlsWidget() {
   const poseSetThisSession = useTelemetryStore((state) => state.poseSetThisSession);
   const baseState = useTelemetryStore((state) => state.baseState);
   const pose = useTelemetryStore((state) => state.pose);
+  const motion = useMotion();
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => tick(value => value + 1), 250);
+    return () => clearInterval(timer);
+  }, []);
   const capabilities = useTelemetryStore((state) => state.capabilities);
   const send = useCommandStore((state) => state.send);
   const active = useCommandStore((state) => state.active);
@@ -88,7 +95,7 @@ export function NavControlsWidget() {
   const poseFresh = useIsFresh(useTelemetryStore((state) => state.poseReceivedAt));
   const facts = factsFrom(connection.state, baseFresh ? baseState : null,
     poseFresh ? pose : null, capabilities,
-    active?.command === "navigate_to_pose");
+    active?.command === "navigate_to_pose", motion, performance.now());
   const onDock = showsUndock(facts);
   const undockBlockedReason = lidarReason ?? undockReason(facts);
   const undockBusy = active?.command === "undock" || facts.undockActive;
