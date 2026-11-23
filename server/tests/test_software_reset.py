@@ -104,3 +104,39 @@ async def test_explicit_reset_retires_old_intents_but_never_overlaps_a_running_r
             assert list(broker.active)==["old"]
     finally:
         for entry in broker.active.values():entry.cancel_timers()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('authorized', [False, True])
+async def test_reset_only_capability_preserves_operator_authorization_and_dedupe(authorized):
+    import json
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+    from app.protocol.messages import CommandRequestData
+
+    empty = SimpleNamespace(data=None, age=lambda: None)
+    session = SimpleNamespace(robot_id='robot', websocket=SimpleNamespace(send_text=AsyncMock()),
+        state=SimpleNamespace(connection='online', base_state=empty, pose=empty,
+                              capabilities=['software_reset']))
+    published = []
+    hub = SimpleNamespace(settings=SimpleNamespace(command_rate_per_min=20), db=None,
+        robots={'robot': session}, publish=lambda *args: published.append(args),
+        _next_seq=lambda: 1, emit_event=AsyncMock())
+    broker = CommandBroker(hub)
+    client = SimpleNamespace(user=SimpleNamespace(id=1, username='operator', can_command=authorized))
+    payload = CommandRequestData(command_id=str(uuid4()), command='software_reset', operator_authorized=True)
+    try:
+        await broker.handle_browser_request(client, SimpleNamespace(robot_id='robot'), payload)
+        assert session.websocket.send_text.call_count == int(authorized)
+        if authorized:
+            forwarded = json.loads(session.websocket.send_text.call_args.args[0])
+            assert forwarded['data']['operator_authorized'] is True
+            assert forwarded['data']['command_id'] == payload.command_id
+            await broker.handle_browser_request(client, SimpleNamespace(robot_id='robot'), payload)
+            assert session.websocket.send_text.call_count == 1
+        else:
+            assert not broker.active and not broker.reset_pending
+        assert published
+    finally:
+        for entry in broker.active.values():
+            entry.cancel_timers()

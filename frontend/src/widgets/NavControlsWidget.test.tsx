@@ -307,6 +307,24 @@ describe("software reset", () => {
     expect(button.closest("details")).toBeNull();
     expect(button.disabled).toBe(false);
   });
+  it("offers confirmed reset alone without enabling motors or undock", () => {
+    setState(baseState({ dock_state: "DOCKED_CONFIRMED", dock_state_valid: true }), PARKED, ["software_reset"]);
+    const sent: string[] = [];
+    useCommandStore.setState({ send: command => { sent.push(command); } });
+    render(<NavControlsWidget />);
+    expect(motorEnableButton().disabled).toBe(true);
+    expect(dockButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Restart robot software" }));
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm software reset" }));
+    expect(sent).toEqual(["software_reset"]);
+  });
+  it("keeps reset-only maintenance unavailable to observers", () => {
+    setState(null, null, ["software_reset"]);
+    useAuthStore.setState({ user: { id: 2, username: "observer", display_name: "Observer", role: "observer", auth_mode: "local" } });
+    render(<NavControlsWidget />);
+    expect((screen.getByRole("button", { name: "Restart robot software" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("allows a recovery request before any pose or hardware telemetry exists", () => {
     setState(null, null, [...CAPS, "software_reset"]);
     const sent: string[] = [];
