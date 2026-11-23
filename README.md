@@ -275,8 +275,9 @@ half-finished control you can press:
 
 ## Safety
 
-- Robot commands are disabled unless `WEB_BRIDGE_ENABLE_COMMANDS=1` reaches
-  the bridge container.
+- Motion/hardware commands are disabled unless `WEB_BRIDGE_ENABLE_COMMANDS=1`
+  reaches the bridge container. Reset-only maintenance is a separate explicit
+  opt-in; see [reset maintenance](docs/reset-maintenance.md).
 - Enable commands only with an operator physically present and holding the
   e-stop.
 - Motion is goal-based; the dashboard does not provide a direct velocity path.

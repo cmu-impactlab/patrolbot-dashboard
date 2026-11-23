@@ -7,8 +7,9 @@ the dashboard server. It never opens connections to the SBC — SBC health is
 whatever /patrolbot/base_state already reports.
 
 Motion commands (Phase 3) are OFF by default: without
-WEB_BRIDGE_ENABLE_COMMANDS=1 this node has no publishers and no
-action/service clients, and every command.request is declined. When enabled,
+WEB_BRIDGE_ENABLE_COMMANDS=1 this node creates no motion executor or teleop.
+WEB_BRIDGE_ENABLE_RESET=1 separately opts into the existing Unix reset supervisor;
+without either switch every command.request is declined. When commands are enabled,
 commands are goal-based only (Nav2 NavigateToPose, /initialpose, cancel) —
 never /cmd_vel, and never anything that talks to the SBC.
 """
@@ -215,6 +216,8 @@ class WebBridgeNode(Node):
                     policy_required=lambda: bool(self._tuning and self._tuning.policy_required))
             except (OSError, ValueError, ImportError) as error:
                 self.get_logger().error(f"Web manual drive is unavailable: {error}")
+        if (self._commands is not None
+                or os.environ.get("WEB_BRIDGE_ENABLE_RESET", "0") == "1"):
             reset_socket = os.environ.get("PATROLBOT_RESET_SOCKET", "")
             if reset_socket:
                 self._system_reset = SystemResetClient(reset_socket, self.ws)
@@ -547,12 +550,6 @@ class WebBridgeNode(Node):
                     self.ws.send("command.ack", {"command_id": data.get("command_id", ""),
                         "accepted": False, "reason": "End manual drive before sending another robot command."})
                     continue
-            if self._commands is None:
-                self.ws.send("command.ack", {
-                    "command_id": str(data.get("command_id", "")),
-                    "accepted": False, "reason": DISABLED_REASON,
-                })
-                continue
             if data.get("command") == "software_reset":
                 if self._system_reset is None:
                     self.ws.send("command.ack", {"command_id": str(data.get("command_id", "")),
@@ -563,6 +560,12 @@ class WebBridgeNode(Node):
                     # before the next command is drained.
                     self._reset_input_after = time.monotonic()
                     self._system_reset.request(data)
+                continue
+            if self._commands is None:
+                self.ws.send("command.ack", {
+                    "command_id": str(data.get("command_id", "")),
+                    "accepted": False, "reason": DISABLED_REASON,
+                })
                 continue
             current_yaw = None
             if self._latest_amcl is not None:
@@ -708,8 +711,8 @@ class WebBridgeNode(Node):
             available = self._commands.available_capabilities()
             if self._teleop is not None:
                 available.append(TELEOP_CAPABILITY)
-            if self._system_reset is not None and self._system_reset.available:
-                available.append("software_reset")
+        if self._system_reset is not None and self._system_reset.available:
+            available.append("software_reset")
         if self._tuning is not None:
             available.extend(self._tuning.capabilities())
         # Log through the ROS logger, not the stdlib one: nothing configures a
