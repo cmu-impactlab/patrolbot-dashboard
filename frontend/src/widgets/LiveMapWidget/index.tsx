@@ -23,6 +23,7 @@ import { fitView, followView, screenToWorld, worldToScreen, zoomAt, type View } 
 
 /** Longest the orientation arrow can stretch on screen. */
 const MAX_ARROW_PX = 80;
+const DEFAULT_FLOOR_MAP = "cmuq-floor1";
 
 /** Below this on-screen footprint length the robot is too small to read as a
  *  shape, so a fixed-size heading marker is drawn on top of it. The footprint
@@ -296,15 +297,23 @@ function drawScene(
 
 export function LiveMapWidget() {
   const mapVersion = useTelemetryStore((state) => state.mapVersion);
-  const [viewedMap, setViewedMap] = useState("cmuq-floor2");
+  const [manuallyViewedMap, setManuallyViewedMap] = useState<string | null>(null);
   const catalog = useMapsQuery();
   const activeMap = useTelemetryStore(state => state.baseState);
+  const online = useTelemetryStore(state => state.wsConnected && state.connection.state === "online");
+  const baseAt = useTelemetryStore(state => state.baseStateAt);
+  const baseFresh = useIsFresh(baseAt);
+  const activeMapIsCurrent = online && baseFresh;
+  const currentFloor = activeMapIsCurrent
+    ? catalog.data?.find(floor => sameMap(activeMap, floor))?.map_id
+    : undefined;
+  // Wait for live context on open without overriding any deliberate browsing.
+  const viewedMap = manuallyViewedMap ?? currentFloor ?? DEFAULT_FLOOR_MAP;
   const lidarPending = useCommandStore(state => state.lidarPending);
   const lidarRecoveryRequired = useCommandStore(state => state.lidarRecoveryRequired);
   const lidarStateAfter = useCommandStore(state => state.lidarStateAfter);
-  const baseAt = useTelemetryStore(state => state.baseStateAt);
   const waitingForState = lidarStateAfter !== null && (baseAt === null || baseAt <= lidarStateAfter);
-  const mapLidarReason = useLidarReadyReason(activeMap, useTelemetryStore(state => state.baseStateAt))
+  const mapLidarReason = useLidarReadyReason(activeMap, baseAt)
     ?? (lidarPending !== null ? "LiDAR power is pending or its outcome is unknown. Wait for its result." : lidarRecoveryRequired ? "LiDAR power recovery is required. Make a new explicit power request first." : waitingForState ? "Waiting for fresh LiDAR state after the power command." : null);
   const mapQuery = useMapQuery(mapVersion, viewedMap);
   const followRobot = useUiStore((state) => state.followRobot);
@@ -324,7 +333,6 @@ export function LiveMapWidget() {
   const [pending, setPending] = useState<{ mode: "goal" | "initialpose"; goal: GoalData } | null>(null);
   const pendingRef = useRef<typeof pending>(null);
   const [error, setError] = useState<string | null>(null);
-  const online = useTelemetryStore(state => state.wsConnected && state.connection.state === "online");
   const user = useAuthStore(state => state.user);
   const baseSession = useTelemetryStore(state => state.baseState?.session_generation);
   const robotId = useTelemetryStore(state => state.robotId);
@@ -410,7 +418,7 @@ export function LiveMapWidget() {
     clear();
     setMeasuredPose(false);
     if (pickMode !== "none") { setInteracting(true); setFollowRobot(false); }
-  }, [pickMode, online, mapVersion, robotId, fullscreen, user, baseSession]);
+  }, [pickMode, online, mapVersion, robotId, fullscreen, user, baseSession, viewedMap]);
   useEffect(() => {
     const hide = () => { if (document.hidden) { clear(); useCommandStore.getState().setPickMode("none"); } };
     document.addEventListener("visibilitychange", hide);
@@ -529,8 +537,8 @@ export function LiveMapWidget() {
             color: sameMap(activeMap, floor) ? "var(--cmu-red)" : undefined }}
           onClick={() => { clear(); setMeasuredPose(false); useCommandStore.getState().setPickMode("none");
             viewRef.current = null; bitmapRef.current = null; signatureRef.current = "";
-            setFollowRobot(false); setViewedMap(floor.map_id!); }}>
-          {floor.name}{sameMap(activeMap, floor) ? (online ? " ● Active" : " ● Last known (stale)") : ""}
+             setFollowRobot(false); setManuallyViewedMap(floor.map_id!); }}>
+          {floor.name}{sameMap(activeMap, floor) ? (activeMapIsCurrent ? " ● Active" : " ● Last known (stale)") : ""}
         </button>)}
         <button className="btn" disabled aria-pressed="false"
           title="Floor 3 is locked because its map is not available yet."

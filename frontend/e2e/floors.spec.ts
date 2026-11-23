@@ -6,12 +6,16 @@ test("floor browsing is view-only and active floor stays independent", async ({ 
   await page.goto("/");
   const floors = page.getByRole("group", { name: "Viewed floor" });
   await expect(floors).toBeVisible();
+  const activeFloor = floors.getByRole("button", { name: "Floor 2 ● Active" });
+  await expect(activeFloor).toHaveAttribute("aria-pressed", "true");
   const lockedFloor = floors.getByRole("button", { name: "Floor 3 — Map unavailable" });
   await expect(lockedFloor).toBeVisible();
   await expect(lockedFloor).toBeDisabled();
   await expect(lockedFloor).toHaveAttribute("aria-pressed", "false");
   await floors.getByRole("button", { name: "Floor 1" }).click();
   await expect(floors.getByRole("button", { name: "Floor 1" })).toHaveAttribute("aria-pressed", "true");
-  await expect(floors.getByRole("button", { name: "Floor 2 ● Active" })).toHaveAttribute("aria-pressed", "false");
+  await expect(activeFloor).toHaveAttribute("aria-pressed", "false");
+  await page.reload();
+  await expect(activeFloor).toHaveAttribute("aria-pressed", "true");
   expect(state.commands).toEqual([]);
 });

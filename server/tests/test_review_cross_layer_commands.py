@@ -145,7 +145,7 @@ class CommandLink:
                 if kind == "command.result" and payload.command_id == command_id]
 
 
-async def test_navigation_timeout_retains_owner_until_actual_terminal():
+async def test_navigation_disconnect_retains_owner_until_actual_terminal():
     link = CommandLink()
     entry = link.entry("navigate_to_pose", "long-navigation")
     try:
@@ -153,7 +153,7 @@ async def test_navigation_timeout_retains_owner_until_actual_terminal():
         goal = link.accept(entry.command_id)
         await link.flush()
         assert entry.acked
-        await link.broker._result_timeout(entry)
+        await link.broker.robot_disconnected(link.session)
         await link.flush()
         assert goal.cancel_calls == 1
         assert link.sent[-1]["data"]["command_id"] == entry.command_id

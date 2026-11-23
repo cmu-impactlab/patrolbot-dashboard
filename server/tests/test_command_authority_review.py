@@ -283,8 +283,11 @@ def cancellations(lab):
     return [frame for frame in lab.robot.frames if frame["type"] == "command.cancel"]
 
 
-@pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
-@pytest.mark.parametrize("path", ["ack_timeout", "result_timeout", "robot_timeout", "robot_disconnect", "reconnect"])
+@pytest.mark.parametrize("command,path", [
+    (command, path)
+    for command in ["navigate_to_pose", "undock"]
+    for path in ["ack_timeout", "robot_timeout", "robot_disconnect", "reconnect"]
+] + [("undock", "result_timeout")])
 async def test_motion_uncertainty_cancels_and_retains_ownership(lab, command, path):
     entry = await motion(lab, command)
     broker = lab.hub.commands
@@ -315,6 +318,25 @@ async def test_motion_uncertainty_cancels_and_retains_ownership(lab, command, pa
     await reply(lab, entry.command_id)
     assert broker.active[entry.command_id] is entry
     assert len(cancellations(lab)) == 1
+
+
+async def test_acknowledged_navigation_outlives_the_generic_result_timeout(lab):
+    broker = lab.hub.commands
+    broker.result_timeout_s = 0
+    entry = await motion(lab, "navigate_to_pose")
+    await reply(lab, entry.command_id)
+    await reply(lab, entry.command_id, "command.progress", stage="driving")
+    await asyncio.sleep(0)
+
+    assert entry.acked and not entry.uncertain
+    assert len(entry.timers) == 1  # only the acknowledgement timer
+    assert broker.active[entry.command_id] is entry
+    assert not cancellations(lab)
+    assert not any(frame["type"] == "command.result" for frame in browser_frames(lab.client))
+
+    await reply(lab, entry.command_id, "command.result", outcome="succeeded")
+    assert entry.command_id not in broker.active
+    assert browser_frames(lab.client)[-1]["data"]["outcome"] == "succeeded"
 
 
 @pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
@@ -458,8 +480,8 @@ async def test_active_ids_cannot_be_replayed_after_cache_eviction(lab, command):
 
 
 async def test_stale_timer_cannot_close_replacement_entry(lab):
-    old = ActiveCommand("same-id", "navigate_to_pose", ROBOT)
-    replacement = ActiveCommand("same-id", "navigate_to_pose", ROBOT)
+    old = ActiveCommand("same-id", "undock", ROBOT)
+    replacement = ActiveCommand("same-id", "undock", ROBOT)
     lab.hub.commands.active["same-id"] = replacement
     lab.hub.commands.ack_timeout_s = lab.hub.commands.result_timeout_s = 0
     await lab.hub.commands._ack_timeout(old)
@@ -501,11 +523,13 @@ async def test_browser_disconnect_keeps_autonomous_motion_owned_and_supervised(l
     assert lab.hub.commands.active[entry.command_id] is entry
     assert not entry.uncertain and not cancellations(lab)
     assert all(not timer.done() and not timer.cancelling() for timer in entry.timers)
-    # Losing the browser is not a terminal robot result, nor a reason to remove
-    # the timeout cancellation safeguard.
+    # Losing the browser does not change either command's deadline policy.
     lab.hub.commands.result_timeout_s = 0
     await lab.hub.commands._result_timeout(entry)
-    assert entry.uncertain and len(cancellations(lab)) == 1
+    if command == "undock":
+        assert entry.uncertain and len(cancellations(lab)) == 1
+    else:
+        assert not entry.uncertain and not cancellations(lab)
 
 
 @pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
