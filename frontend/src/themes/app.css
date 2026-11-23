@@ -1074,17 +1074,25 @@ a { color: inherit; }
 .map-canvas.panning { cursor: grabbing; }
 
 .map-controls {
+  --map-control-inset: clamp(4px, calc((100% - 176px) / 2), 8px);
   position: absolute;
-  top: 8px;
+  top: var(--map-control-inset);
   right: 8px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  justify-content: space-between;
+  /* Tighten spacing in a short widget before clipping any 44px control. */
+  height: min(191px, calc(100% - var(--map-control-inset) - var(--map-control-inset)));
   z-index: 6;
 }
 
 .map-controls .btn {
-  padding: 6px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
   box-shadow: var(--shadow);
 }
 
