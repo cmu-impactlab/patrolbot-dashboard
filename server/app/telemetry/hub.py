@@ -16,11 +16,14 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from fastapi import WebSocket
 
 from ..protocol.envelope import Envelope, encode
-from ..protocol.messages import BatteryData, CapabilitiesData, EventData, motion_matches_base_origin
+from ..protocol.messages import (
+    AUTONOMOUS_SPEED_CAPABILITY, BatteryData, CapabilitiesData, EventData, motion_matches_base_origin,
+)
 from ..settings import Settings
 from .store import EventIdAllocator, RobotState
 
@@ -93,6 +96,9 @@ class RobotSession:
     websocket: WebSocket | None = None
     generation: int = 0
     connected_mono: float = field(default_factory=time.monotonic)
+    # Minted only for a robot that declares support in its authenticated first hello.
+    autonomous_speed_caps_session: str | None = None
+    autonomous_speed_caps_retired: bool = False
 
 
 QUEUE_LIMIT = 64
@@ -273,8 +279,10 @@ class TelemetryHub:
 
     # -- robot side ----------------------------------------------------------
 
-    async def robot_connected(self, robot_id: str, websocket: WebSocket) -> RobotSession:
+    async def robot_connected(self, robot_id: str, websocket: WebSocket, *,
+                              autonomous_speed_caps: bool = False) -> RobotSession:
         previous = self.get_or_create_state(robot_id)
+        previous.autonomous_speed_caps_retired = True
         self._tuning_disconnected(previous)
         await self.commands.robot_disconnected(previous)
         previous.state.motion.data = None
@@ -287,15 +295,30 @@ class TelemetryHub:
         # A distinct session object prevents the superseded gateway coroutine
         # from injecting replies or telemetry into the replacement connection.
         session = RobotSession(robot_id, previous.state, websocket,
-                               generation=previous.generation + 1)
+                               generation=previous.generation + 1,
+                               autonomous_speed_caps_session=str(uuid4()) if autonomous_speed_caps else None)
         self.robots[robot_id] = session
         session.state.set_capabilities([])
         session.state.record_heartbeat()
         await self._apply_connection(session)
         return session
 
+    def announce_capabilities(self, session: RobotSession, advertised: list[str]) -> None:
+        if self.robots.get(session.robot_id) is not session:
+            return
+        # Other capabilities may be re-announced; speed-cap authority cannot be
+        # added or swapped on a connection. Commissioning requires a fresh hello.
+        caps = [cap for cap in advertised if cap != AUTONOMOUS_SPEED_CAPABILITY]
+        token = session.autonomous_speed_caps_session
+        if token is not None:
+            caps.append(AUTONOMOUS_SPEED_CAPABILITY)
+        session.state.set_capabilities(caps)
+        self.publish("state.capabilities", session.robot_id, CapabilitiesData(
+            capabilities=caps, autonomous_speed_caps_session=token))
+
     async def robot_disconnected(self, session: RobotSession, websocket: WebSocket) -> None:
         if self.robots.get(session.robot_id) is session and session.websocket is websocket:
+            session.autonomous_speed_caps_retired = True
             await self.commands.robot_disconnected(session)
             await self.commands.teleop.revoke(session.robot_id, "Robot disconnected; manual outcome unknown.")
             session.websocket = None
@@ -341,9 +364,7 @@ class TelemetryHub:
             # is telling us its capability set changed (e.g. its dock manager
             # came up after the bridge did). Update and fan out so an open
             # dashboard enables the matching controls without a reload.
-            state.set_capabilities(payload.capabilities)
-            self.publish("state.capabilities", session.robot_id,
-                         CapabilitiesData(capabilities=payload.capabilities))
+            self.announce_capabilities(session, payload.capabilities)
             rebroadcast = False
         elif t == "telemetry.heartbeat":
             rebroadcast = False
@@ -431,6 +452,10 @@ class TelemetryHub:
                 saved = await self.db.get_last_pose(robot_id)
                 if saved is not None:
                     snapshot.last_known_pose = GoalData(**saved)
+        if (session is not None and self.robots.get(robot_id) is session
+                and not session.autonomous_speed_caps_retired and session.state.connection == "online"
+                and AUTONOMOUS_SPEED_CAPABILITY in snapshot.capabilities):
+            snapshot.autonomous_speed_caps_session = session.autonomous_speed_caps_session
         client.offer(encode("server.snapshot", robot_id, self._next_seq(), snapshot), protected=True)
         return client
 
@@ -479,6 +504,8 @@ class TelemetryHub:
                 await self._persist_last_pose(session)
             events = session.state.set_connection(new_state)
             self.publish("state.connection", session.robot_id, session.state.connection_data())
+            if new_state != "online":
+                await self.commands.autonomous_speed.unavailable(session)
             await self._emit_events(session, events)
         # Health includes per-slice receipt ages, so it must be reconsidered
         # while the connection remains online as well as on transitions.

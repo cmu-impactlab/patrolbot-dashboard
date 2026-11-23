@@ -7,7 +7,9 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..protocol.envelope import ProtocolError, decode, encode
-from ..protocol.messages import CapabilitiesData, COMMAND_PREFIX, HelloAckData, HelloData
+from ..protocol.messages import (
+    AUTONOMOUS_SPEED_CAPABILITY, AUTONOMOUS_SPEED_RECEIPT, COMMAND_PREFIX, HelloAckData, HelloData,
+)
 
 log = logging.getLogger("robot_gateway")
 router = APIRouter()
@@ -53,12 +55,11 @@ async def robot_ws(websocket: WebSocket) -> None:
         await websocket.close(code=4400, reason="first frame must be robot.hello")
         return
 
-    session = await hub.robot_connected(envelope.robot_id, websocket)
+    session = await hub.robot_connected(envelope.robot_id, websocket,
+        autonomous_speed_caps=AUTONOMOUS_SPEED_CAPABILITY in payload.capabilities)
     # Tell already-open browsers what this robot can do, so a dashboard that
     # was open before the robot connected updates without a reload.
-    session.state.set_capabilities(payload.capabilities)
-    hub.publish("state.capabilities", envelope.robot_id,
-                CapabilitiesData(capabilities=payload.capabilities))
+    hub.announce_capabilities(session, payload.capabilities)
     state_map = session.state.map.data
     want_map = state_map is None or state_map.map_version != payload.map_version
     await websocket.send_text(
@@ -95,6 +96,9 @@ async def robot_ws(websocket: WebSocket) -> None:
                     await broker.handle_response(session, envelope, payload)
                 else:
                     log.warning("ignoring tuning.response: no tuning broker is installed")
+                continue
+            if envelope.type == AUTONOMOUS_SPEED_RECEIPT:
+                await hub.commands.autonomous_speed.receipt(session, payload)
                 continue
             if envelope.type.startswith(COMMAND_PREFIX):
                 await hub.handle_robot_command_reply(session, envelope, payload)

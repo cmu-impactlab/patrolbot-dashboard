@@ -15,7 +15,7 @@ from typing import get_args
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..protocol.envelope import Envelope, ProtocolError, decode
-from ..protocol.messages import CommandRequestData, CommandType, TeleopVelocityData
+from ..protocol.messages import AutonomousSpeedRequestData, CommandRequestData, CommandType, TeleopVelocityData
 from ..tuning.authz import fresh_user
 
 log = logging.getLogger("ui_gateway")
@@ -125,6 +125,8 @@ async def ui_ws(websocket: WebSocket) -> None:
                 continue
             if envelope.type == "command.request" and isinstance(payload, CommandRequestData):
                 await hub.commands.handle_browser_request(client, envelope, payload)
+            elif isinstance(payload, AutonomousSpeedRequestData):
+                await hub.commands.handle_autonomous_speed_request(client, envelope, payload)
             else:
                 log.warning("ignoring unexpected browser frame: %s", envelope.type)
     except WebSocketDisconnect:

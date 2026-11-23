@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from . import gates
+from .autonomous_speed import AutonomousSpeedBroker
 from ..protocol.envelope import Envelope, encode
 from ..protocol.messages import (
     CommandAckData,
@@ -103,6 +104,7 @@ class CommandBroker:
         self.rate = RateLimiter(hub.settings.command_rate_per_min)
         from .teleop import TeleopController
         self.teleop = TeleopController(self)
+        self.autonomous_speed = AutonomousSpeedBroker(self)
 
     # -- browser side ---------------------------------------------------------
 
@@ -149,6 +151,11 @@ class CommandBroker:
         lock = self._admission_locks.setdefault(envelope.robot_id, asyncio.Lock())
         async with lock:
             await self._handle_browser_request(client, envelope, payload, revision)
+
+    async def handle_autonomous_speed_request(self, client, envelope, payload):
+        lock = self._admission_locks.setdefault(envelope.robot_id, asyncio.Lock())
+        async with lock:
+            await self.autonomous_speed.request(client, envelope.robot_id, payload)
 
     async def _handle_browser_request(self, client, envelope, payload, revision):
         command_id = payload.command_id
@@ -737,6 +744,7 @@ class CommandBroker:
                 " Cancellation requested; no physical stop is confirmed. Wait for a terminal result or explicitly reset.")
 
     async def robot_disconnected(self, session: "RobotSession") -> None:
+        await self.autonomous_speed.disconnected(session)
         for entry in list(self.active.values()):
             if entry.robot_session is session and entry.command in MOTION_COMMANDS:
                 await self._motion_uncertain(entry, "Robot connection lost; motion outcome unknown.")
@@ -752,6 +760,7 @@ class CommandBroker:
                 await self._request_cancel(entry)
 
     async def shutdown(self) -> None:
+        await self.autonomous_speed.shutdown()
         await self.teleop.shutdown()
         for entry in list(self.active.values()):
             await self._request_cancel(entry)

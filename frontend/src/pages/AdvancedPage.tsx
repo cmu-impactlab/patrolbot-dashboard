@@ -4,11 +4,14 @@ import { useTelemetrySocket } from "../websocket/useTelemetrySocket";
 import { useTuningReadback } from "../lib/useTuningReadback";
 import { SpeedGauges } from "../components/SpeedGauges";
 import { OperationFaultBanner } from "../components/OperationFaultBanner";
+import { AutonomousSpeedControl } from "../components/AutonomousSpeedControl";
+import { useAutonomousSpeedStore } from "../stores/autonomousSpeedStore";
 
 /** AuthGate is the sole parent. This tab has its own fresh browser socket and
  * never loads a dashboard layout, saved command intent or another tab's lease. */
 export function AdvancedPage() {
-  useTelemetrySocket();
+  // The command listener lives in the lazy Advanced chunk, not the initial dashboard.
+  useTelemetrySocket(useAutonomousSpeedStore.getInitialState());
   return <main className="advanced-page">
     <header className="advanced-header">
       <div><h1>Advanced controls</h1><p>Saved targets and live robot values, side by side.</p></div>
@@ -27,6 +30,7 @@ function AdvancedSidebar() {
   return <aside className="advanced-side" aria-label="Speed and manual controls">
     <SpeedGauges limits={observed?.limits ?? null}
       limitsAt={observed && receivedAt !== null ? receivedAt - observed.ageS * 1000 : null} />
+    <AutonomousSpeedControl />
     <ManualDrive compact />
   </aside>;
 }

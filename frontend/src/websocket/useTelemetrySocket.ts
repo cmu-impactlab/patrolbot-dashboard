@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
+import type { AutonomousSpeedReceiptData } from "../types/protocol";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
 import { useTuningStore } from "../stores/tuningStore";
@@ -7,15 +8,24 @@ import { useTeleopStore } from "../stores/teleopStore";
 import { DashboardSocket, telemetryUrl } from "./client";
 import { startTeleopTabSync } from "./teleopTabSync";
 
-export function useTelemetrySocket(): void {
+interface SpeedCapsHandlers {
+  receipt: (robotId: string, data: AutonomousSpeedReceiptData) => void;
+  reconcile: () => void;
+}
+
+export function useTelemetrySocket(speedCaps?: SpeedCapsHandlers): void {
   const queryClient = useQueryClient();
   useEffect(() => {
     const store = useTelemetryStore.getState();
+    const stopSpeedReconcile = speedCaps && useTelemetryStore.subscribe(speedCaps.reconcile);
     const stopTabSync = startTeleopTabSync();
     const socket = new DashboardSocket(telemetryUrl(), {
       onFrame: (frame) => {
         const commands = useCommandStore.getState();
         switch (frame.type) {
+          case "command.autonomous_speed_caps_receipt":
+            speedCaps?.receipt(frame.robot_id, frame.data);
+            break;
           case "command.ack":
             if (!useTeleopStore.getState().handleAck(frame.data)) commands.handleAck(frame.data);
             break;
@@ -65,6 +75,7 @@ export function useTelemetrySocket(): void {
       registerCommandSender(null);
       socket.close();
       store.setWsConnected(false);
+      stopSpeedReconcile?.();
     };
-  }, [queryClient]);
+  }, [queryClient, speedCaps]);
 }

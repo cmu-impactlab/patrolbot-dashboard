@@ -1,14 +1,19 @@
 import { useId, useState } from "react";
+import { AUTONOMOUS_SPEED_MAX_ANGULAR, AUTONOMOUS_SPEED_MAX_LINEAR } from "../types/protocol";
+import type { AutonomousSpeedSelection } from "../types/protocol";
+export type { AutonomousSpeedSelection } from "../types/protocol";
 
 type Speed = Readonly<{ linear_m_s: number; angular_rad_s: number }>;
 type Profile = "slow" | "fast" | "custom";
-export type AutonomousSpeedSelection = Speed & Readonly<{ profile: "Slow" | "Fast" | "Custom" }>;
 
 type Props = {
   /** Local input constraints only; higher limits cannot widen the picker range. */
   limits?: Readonly<{ max_linear_m_s?: number; max_angular_rad_s?: number }>;
-  /** Receives a locally validated selection, not an instruction to apply it. */
+  /** Receives a locally validated selection; the caller owns any robot request. */
   onStage: (selection: AutonomousSpeedSelection) => void;
+  /** With a paired transport, confirming sends a bounded request instead of a local draft. */
+  connected?: boolean;
+  disabled?: boolean;
 };
 
 const PRESETS = {
@@ -35,7 +40,7 @@ function displayNumber(value: number): string {
   return Number(fixed) === value ? fixed : String(value);
 }
 
-function displaySpeed(speed: Speed): string {
+export function displaySpeed(speed: Speed): string {
   return `${displayNumber(speed.linear_m_s)} m/s, ${displayNumber(speed.angular_rad_s)} rad/s`;
 }
 
@@ -58,7 +63,7 @@ function SpeedInput({ id, label, unit, value, max, onChange }: {
   );
 }
 
-export function AutonomousSpeedPicker({ limits, onStage }: Props) {
+export function AutonomousSpeedPicker({ limits, onStage, connected = false, disabled = false }: Props) {
   const id = useId();
   const [profile, setProfile] = useState<Profile>("fast");
   const [linearText, setLinearText] = useState(() => displayNumber(PRESETS.fast.linear_m_s));
@@ -66,64 +71,68 @@ export function AutonomousSpeedPicker({ limits, onStage }: Props) {
   const [staged, setStaged] = useState<AutonomousSpeedSelection | null>(null);
 
   // Local editing limits, not live robot limits or evidence of commissioning.
-  const maxLinear = pickerMax(limits?.max_linear_m_s, 0.26);
-  const maxAngular = pickerMax(limits?.max_angular_rad_s, 0.70);
+  const maxLinear = pickerMax(limits?.max_linear_m_s, AUTONOMOUS_SPEED_MAX_LINEAR);
+  const maxAngular = pickerMax(limits?.max_angular_rad_s, AUTONOMOUS_SPEED_MAX_ANGULAR);
   const { linear_m_s, angular_rad_s } = profile === "custom"
     ? { linear_m_s: numberOrNaN(linearText), angular_rad_s: numberOrNaN(angularText) }
     : PRESETS[profile];
   const canStage = withinRange(linear_m_s, maxLinear) && withinRange(angular_rad_s, maxAngular);
 
   function stage() {
-    if (!canStage) return;
+    if (disabled || !canStage) return;
     const selection: AutonomousSpeedSelection = {
       profile: profile === "custom" ? "Custom" : PRESETS[profile].label,
       linear_m_s,
       angular_rad_s,
     };
-    setStaged(selection);
+    if (!connected) setStaged(selection);
     onStage({ ...selection });
   }
 
   return (
-    <fieldset aria-describedby={`${id}-scope`}>
+    <fieldset aria-describedby={`${id}-scope`} disabled={disabled}>
       <legend>Autonomous speed</legend>
-      <p id={`${id}-scope`}>Confirming stages a local selection only. It does not apply speed on the robot.</p>
+      <p id={`${id}-scope`}>{connected
+        ? "Request caps for autonomous navigation only. They apply only when confirmed by the robot."
+        : "Confirming stages a local selection only. It does not apply speed on the robot."}</p>
       {(["slow", "fast", "really-fast"] as const).map((key) => (
         <div key={key}>
           <label>
             <input type="radio" name={id} value={key} checked={profile === key}
               disabled={key === "really-fast"} aria-describedby={`${id}-${key}-details`}
-              onChange={() => { if (key !== "really-fast") setProfile(key); }} />
+              onChange={() => { if (!disabled && key !== "really-fast") setProfile(key); }} />
             {PRESETS[key].label}
           </label>
           {" — "}<span id={`${id}-${key}-details`}>
             {displaySpeed(PRESETS[key])}
-            {key === "fast" && " (default)"}
+            {key === "fast" && (connected ? " (initial selection)" : " (default)")}
             {key === "really-fast" && " (uncommissioned; unavailable)"}
           </span>
         </div>
       ))}
       <label>
         <input type="radio" name={id} value="custom" checked={profile === "custom"}
-          onChange={() => setProfile("custom")} />
+          onChange={() => { if (!disabled) setProfile("custom"); }} />
         Custom
       </label>
       {profile === "custom" && (
         <fieldset>
           <legend>Custom speed limits</legend>
           <SpeedInput id={`${id}-linear`} label="Linear speed" unit="m/s" value={linearText}
-            max={maxLinear} onChange={setLinearText} />
+            max={maxLinear} onChange={(text) => { if (!disabled) setLinearText(text); }} />
           <SpeedInput id={`${id}-angular`} label="Angular speed" unit="rad/s" value={angularText}
-            max={maxAngular} onChange={setAngularText} />
+            max={maxAngular} onChange={(text) => { if (!disabled) setAngularText(text); }} />
         </fieldset>
       )}
       {(maxLinear === null || maxAngular === null) ? <p>Picker limits are unavailable; staging is disabled.</p>
         : !canStage && profile !== "custom" && <p>This preset exceeds the current picker limits.</p>}
-      <p><button type="button" className="btn" disabled={!canStage} onClick={stage}>Confirm and stage</button></p>
-      <p role="status">
+      <p><button type="button" className="btn" disabled={!canStage || disabled} onClick={stage}>
+        {connected ? "Request autonomous caps" : "Confirm and stage"}
+      </button></p>
+      {!connected && <><p role="status">
         Last locally staged: {staged ? `${staged.profile} — ${displaySpeed(staged)}` : "none"}
       </p>
-      <p>Applied speed: not reported by this picker.</p>
+      <p>Applied speed: not reported by this picker.</p></>}
     </fieldset>
   );
 }
