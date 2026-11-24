@@ -34,13 +34,6 @@ def wrapper(operation='read', role='observer', *, signed=False):
     return data
 
 
-def save_wrapper(role='administrator', *, signed=True):
-    data = wrapper('save', role, signed=signed)
-    data['request'].update(base_revision=1,
-                           changes=[{'id': 'max_linear_m_s', 'value': .1}])
-    return data
-
-
 def rig(*, ready=True, clock=None):
     calls, sent = [], []
     future = Future()
@@ -78,30 +71,14 @@ def test_read_roundtrip_uses_fixed_typed_service_only():
     assert adapter.capabilities() == ['robot_tuning_read_v1']
 
 
-def test_capabilities_advertise_write_from_a_fresh_save_flag():
-    adapter, calls, sent, future, ws = rig()
-    read_snapshot(adapter, future, {'save_supported': True})
-    assert adapter.capabilities() == ['robot_tuning_read_v1', 'robot_tuning_write_v1']
-
-
-def test_full_mutation_capability_requires_activation_supported():
-    adapter, calls, sent, future, ws = rig()
-    read_snapshot(adapter, future, {'save_supported': True,
-                                    'activation_supported': True})
-    assert 'robot_tuning_v1' in adapter.capabilities()
-
-    adapter2, calls2, sent2, future2, ws2 = rig()
-    read_snapshot(adapter2, future2, {'save_supported': True})
-    assert 'robot_tuning_v1' not in adapter2.capabilities()
-
-
-def test_write_capability_is_not_advertised_from_a_stale_snapshot():
+def test_legacy_write_flags_do_not_advertise_mutations_or_remove_the_policy_gate():
     clock = {'t': 0.0}
     adapter, calls, sent, future, ws = rig(clock=lambda: clock['t'])
     read_snapshot(adapter, future, {'save_supported': True,
-                                    'activation_supported': True})
+                                    'activation_supported': True, 'policy_required': True})
+    assert adapter.capabilities() == ['robot_tuning_read_v1', 'robot_tuning_policy_v1']
     clock['t'] += 4
-    assert adapter.capabilities() == ['robot_tuning_read_v1']
+    assert adapter.capabilities() == ['robot_tuning_read_v1', 'robot_tuning_policy_v1']
 
 
 def test_no_capability_is_advertised_when_the_service_is_not_ready():
@@ -124,55 +101,6 @@ def test_disconnect_and_old_reply_never_replay():
     assert len(calls) == 1
 
 
-def test_operator_cannot_smuggle_a_mutation():
-    # No role is trusted: operator is refused whether or not claims are attached.
-    assert 'administrator' in wrapper_reason(save_wrapper('operator', signed=False))
-    assert 'administrator' in wrapper_reason(save_wrapper('operator', signed=True))
-
-
-def test_mutation_without_a_signed_authorization_is_refused():
-    data = save_wrapper(signed=False)
-    assert 'authorization' in wrapper_reason(data)
-
-
-def test_a_shape_valid_signed_mutation_is_forwarded_to_the_typed_service():
-    adapter, calls, sent, future, ws = rig()
-    data = save_wrapper()
-    assert wrapper_reason(data) is None
-    adapter.enqueue(data)
-    adapter.tick()
-    assert len(calls) == 1
-    assert json.loads(calls[0].payload_json) == data
-
-
-@pytest.mark.parametrize('field', ['version', 'robot_id', 'issued_at_ms',
-                                   'expires_at_ms', 'signature'])
-def test_mutation_rejects_an_invalid_authorization_field(field):
-    data = save_wrapper()
-    data['authorization'][field] = {'version': True, 'robot_id': 7,
-                                    'issued_at_ms': 'x', 'expires_at_ms': None,
-                                    'signature': 'not-hex'}[field]
-    assert wrapper_reason(data) is not None
-
-
-def test_mutation_rejects_a_malformed_or_out_of_bounds_authorization():
-    assert wrapper_reason(dict(save_wrapper(), authorization=None)) is not None
-    assert wrapper_reason(dict(save_wrapper(), authorization={'version': 1})) is not None
-    over = save_wrapper()
-    over['authorization']['expires_at_ms'] = over['authorization']['issued_at_ms'] + 30001
-    assert wrapper_reason(over) is not None
-    empty = save_wrapper()
-    empty['authorization']['expires_at_ms'] = empty['authorization']['issued_at_ms']
-    assert wrapper_reason(empty) is not None
-    backwards = save_wrapper()
-    backwards['authorization']['issued_at_ms'] = 2000
-    backwards['authorization']['expires_at_ms'] = 1000
-    assert wrapper_reason(backwards) is not None
-    oversized = save_wrapper()
-    oversized['authorization']['robot_id'] = 'r' * 129
-    assert wrapper_reason(oversized) is not None
-
-
 def test_read_envelope_still_needs_no_authorization():
     assert wrapper_reason(wrapper('read')) is None
 
@@ -183,14 +111,17 @@ def test_none_or_unwrapped_payload_is_refused_without_raising():
     assert wrapper_reason({'request': None, 'actor': None}) is not None
 
 
-def test_unsigned_mutation_never_reaches_the_typed_service():
+@pytest.mark.parametrize('operation', ['save', 'apply', 'redeploy', 'restore'])
+@pytest.mark.parametrize('signed', [False, True])
+def test_removed_mutation_never_reaches_the_typed_service(operation, signed):
     adapter, calls, sent, future, ws = rig()
-    data = save_wrapper(signed=False)
+    data = wrapper(operation, 'administrator', signed=signed)
     adapter.enqueue(data)
     adapter.tick()
     assert calls == []
     assert sent and sent[0][0] == 'tuning.response'
     assert sent[0][1]['outcome'] == 'refused'
+    assert 'read-only' in sent[0][1]['detail']
 
 
 @pytest.mark.parametrize('age', [float('nan'), float('inf'), -1])

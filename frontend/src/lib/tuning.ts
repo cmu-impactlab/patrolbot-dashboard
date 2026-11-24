@@ -10,10 +10,6 @@ import registrySource from "../../../contracts/robot-tuning.registry.json?raw";
  * revision store, not to the browser.
  */
 
-export const TUNING_CONTRACT = "patrolbot-robot-tuning";
-export const TUNING_VERSION = 1;
-export const TUNING_CAPABILITY = "robot_tuning_v1";
-
 export type TuningValue = number | boolean | string;
 
 export interface TuningDependency {
@@ -668,99 +664,4 @@ export function effectiveValues(snapshot: NormalizedSnapshot): Record<string, Tu
     base[entry.id] = desired !== undefined ? desired : entry.default;
   }
   return base;
-}
-
-/* ------------------------------------------------------------------ */
-/* Canonical requests                                                   */
-/* ------------------------------------------------------------------ */
-
-export interface CanonicalRequest {
-  contract: typeof TUNING_CONTRACT;
-  version: typeof TUNING_VERSION;
-  operation: "read" | "save" | "apply" | "redeploy" | "status" | "restore";
-  request_id: string;
-  generation: { capability: string; session_id: string };
-  base_revision?: number;
-  expected_revision?: number;
-  restore_revision?: number;
-  target?: "last_known_good";
-  job_id?: string;
-  changes?: BatchChange[];
-}
-
-export function newRequestId(): string {
-  return crypto.randomUUID();
-}
-
-export function generationFor(sessionId: string) {
-  return { capability: TUNING_CAPABILITY, session_id: sessionId };
-}
-
-export function saveRequest(sessionId: string, baseRevision: number, changes: BatchChange[], requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "save",
-    request_id: requestId, generation: generationFor(sessionId), base_revision: baseRevision, changes };
-}
-
-export function applyRequest(sessionId: string, expectedRevision: number, requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "apply",
-    request_id: requestId, generation: generationFor(sessionId), expected_revision: expectedRevision };
-}
-
-export function redeployRequest(sessionId: string, expectedRevision: number, requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "redeploy",
-    request_id: requestId, generation: generationFor(sessionId), expected_revision: expectedRevision };
-}
-
-export function statusRequest(sessionId: string, jobId?: string, requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "status",
-    request_id: requestId, generation: generationFor(sessionId), ...(jobId ? { job_id: jobId } : {}) };
-}
-
-export function restoreRequest(sessionId: string, expectedRevision: number, restoreRevision: number, requestId = newRequestId()): CanonicalRequest {
-  return { contract: TUNING_CONTRACT, version: TUNING_VERSION, operation: "restore",
-    request_id: requestId, generation: generationFor(sessionId), expected_revision: expectedRevision,
-    restore_revision: restoreRevision, target: "last_known_good" };
-}
-
-/* ------------------------------------------------------------------ */
-/* Response handling                                                    */
-/* ------------------------------------------------------------------ */
-
-export type TuningOutcome = "ok" | "conflict" | "refused" | "failed" | "unknown";
-
-export interface TuningResponse {
-  request_id: string;
-  outcome: TuningOutcome;
-  detail: string;
-  snapshot: NormalizedSnapshot | null;
-  job: TuningJob | null;
-}
-
-function outcome(value: unknown): TuningOutcome {
-  return value === "ok" || value === "conflict" || value === "refused" || value === "failed" || value === "unknown"
-    ? value : "unknown";
-}
-
-export function parseTuningResponse(raw: unknown): TuningResponse {
-  if (!isPlainObject(raw)) {
-    return { request_id: "", outcome: "unknown", detail: "The tuning service returned an unreadable response.", snapshot: null, job: null };
-  }
-  return {
-    request_id: typeof raw.request_id === "string" ? raw.request_id : "",
-    outcome: outcome(raw.outcome),
-    detail: typeof raw.detail === "string" ? raw.detail : "",
-    snapshot: raw.snapshot === null || raw.snapshot === undefined ? null : normalizeSnapshot(raw.snapshot),
-    job: isPlainObject(raw.job) ? (raw.job as TuningJob) : null,
-  };
-}
-
-/** Map an operation outcome to the status line shown beside a field. */
-export function outcomeLabel(outcome: TuningOutcome): "Saved and active" | "Saved — redeploy required" | "Saved — waiting for safe apply" | "Conflict" | "Failed" | "Outcome unknown" {
-  switch (outcome) {
-    case "ok": return "Saved and active";
-    case "conflict": return "Conflict";
-    case "refused": return "Failed";
-    case "failed": return "Failed";
-    default: return "Outcome unknown";
-  }
 }

@@ -1,15 +1,7 @@
-"""HTTP surface for robot tuning: auth, origin, error mapping and refusal.
-
-The browser never supplies identity: the actor is derived from the verified
-session, reads need only authentication, every mutation needs a *current*
-administrator, and the endpoint maps typed broker failures to status codes. The
-browser WebSocket has no tuning mutation channel at all.
-"""
+"""Read-only tuning HTTP surface: authentication, errors and refusal."""
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +11,6 @@ from starlette.websockets import WebSocketDisconnect
 from app.authentication import sessions
 from app.authentication.sessions import COOKIE_NAME, issue
 from app.main import create_app
-from app.tuning.broker import TuningResponse
 from app.tuning.errors import (
     TuningConflict,
     TuningInvalid,
@@ -30,7 +21,7 @@ from app.tuning.errors import (
 )
 from app.settings import Settings
 
-from tuning_fixtures import change, new_uuid, read_request, save_request, snapshot
+from tuning_fixtures import change, new_uuid, save_request, snapshot
 
 SECRET = "s3cret"
 ROBOT = "patrolbot-01"
@@ -89,83 +80,16 @@ def test_any_authenticated_role_may_read(client, monkeypatch):
         assert response.json()["session_id"] == SNAPSHOT["session_id"]
 
 
-@pytest.mark.parametrize("role", ["observer", "operator"])
-def test_non_administrators_cannot_mutate(client, role):
-    response = as_role(client, role).post(
-        f"/api/robots/{ROBOT}/tuning", json=save_request([change("amcl.alpha1", 0.1)]))
-    assert response.status_code == 403
-    assert "administrator" in response.json()["detail"]
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
+def test_tuning_mutation_route_is_absent_for_every_role(client, monkeypatch, role, method):
+    async def must_not_dispatch(*args):
+        pytest.fail("removed write reached the tuning broker")
 
-
-def test_role_change_is_re_evaluated(client):
-    as_role(client, "administrator")
-    # The same client is now an observer: a replacement cookie must downgrade.
-    as_role(client, "observer")
-    response = client.post(f"/api/robots/{ROBOT}/tuning",
-                           json=save_request([change("amcl.alpha1", 0.1)]))
-    assert response.status_code == 403
-
-
-# -- mutations ---------------------------------------------------------------
-
-def test_admin_mutation_returns_broker_response(client, monkeypatch):
-    async def fake_request(user, robot_id, payload):
-        return TuningResponse(payload["request_id"], "ok", "saved")
-
-    monkeypatch.setattr(broker(client), "request", fake_request)
-    response = as_role(client, "administrator").post(
-        f"/api/robots/{ROBOT}/tuning", json=save_request([change("amcl.alpha1", 0.1)]))
-    assert response.status_code == 200
-    body = response.json()
-    assert body["outcome"] == "ok" and body["detail"] == "saved"
-
-
-def test_unknown_outcome_is_still_a_200(client, monkeypatch):
-    async def fake_request(user, robot_id, payload):
-        return TuningResponse(payload["request_id"], "unknown", "no answer; query the job")
-
-    monkeypatch.setattr(broker(client), "request", fake_request)
-    response = as_role(client, "administrator").post(
-        f"/api/robots/{ROBOT}/tuning", json=save_request([change("amcl.alpha1", 0.1)]))
-    assert response.status_code == 200
-    assert response.json()["outcome"] == "unknown"
-
-
-def test_post_rejects_non_mutation_operations(client):
-    response = as_role(client, "administrator").post(
-        f"/api/robots/{ROBOT}/tuning", json=read_request())
-    assert response.status_code == 400
-    assert "GET" in response.json()["detail"]
-
-
-def test_forged_actor_field_is_rejected(client):
-    payload = save_request([change("amcl.alpha1", 0.1)])
-    payload["actor"] = {"role": "administrator", "id": 999, "username": "me"}
-    response = as_role(client, "administrator").post(
-        f"/api/robots/{ROBOT}/tuning", json=payload)
-    assert response.status_code == 400
-    assert response.json()["detail"]
-    assert response.headers.get("x-tuning-code") == "unknown_field"
-
-
-def test_malformed_and_duplicate_json_rejected(client):
-    as_role(client, "administrator")
-    bad = client.post(f"/api/robots/{ROBOT}/tuning", content=b"not json",
-                      headers={"content-type": "application/json"})
-    assert bad.status_code == 400
-    dup = client.post(f"/api/robots/{ROBOT}/tuning",
-                      content=b'{"operation":"save","operation":"read"}',
-                      headers={"content-type": "application/json"})
-    assert dup.status_code == 400
-
-
-def test_oversized_body_rejected(client):
-    as_role(client, "administrator")
-    body = json.dumps(save_request([change("amcl.alpha1", 0.1)]))
-    body = body[:-1] + ',"pad":"' + "x" * (20 * 1024) + '"}'
-    response = client.post(f"/api/robots/{ROBOT}/tuning", content=body.encode(),
-                           headers={"content-type": "application/json"})
-    assert response.status_code == 413
+    monkeypatch.setattr(broker(client), "request", must_not_dispatch)
+    response = as_role(client, role).request(
+        method, f"/api/robots/{ROBOT}/tuning", json=save_request([change("amcl.alpha1", 0.1)]))
+    assert response.status_code == 405
 
 
 # -- caches / error mapping --------------------------------------------------
@@ -227,32 +151,6 @@ def test_unknown_job_is_404(client, monkeypatch):
     response = as_role(client, "observer").get(
         f"/api/robots/{ROBOT}/tuning/jobs/{new_uuid()}")
     assert response.status_code == 404
-
-
-# -- origin checking ---------------------------------------------------------
-
-def test_cross_origin_mutations_are_rejected(tmp_path):
-    with build_client(tmp_path, allowed_origins="https://good.example") as client:
-        payload = save_request([change("amcl.alpha1", 0.1)])
-        as_role(client, "administrator")
-        evil = client.post(f"/api/robots/{ROBOT}/tuning", json=payload,
-                           headers={"origin": "https://evil.example"})
-        assert evil.status_code == 403
-        missing = client.post(f"/api/robots/{ROBOT}/tuning", json=payload)
-        assert missing.status_code == 403
-
-
-def test_allowed_origin_passes_and_reaches_broker(tmp_path, monkeypatch):
-    with build_client(tmp_path, allowed_origins="https://good.example") as client:
-        async def fake_request(user, robot_id, payload):
-            return TuningResponse(payload["request_id"], "ok")
-
-        monkeypatch.setattr(client.app.state.hub.tuning, "request", fake_request)
-        as_role(client, "administrator")
-        response = client.post(f"/api/robots/{ROBOT}/tuning",
-                               json=save_request([change("amcl.alpha1", 0.1)]),
-                               headers={"origin": "https://good.example"})
-        assert response.status_code == 200
 
 
 # -- browser WebSocket: no tuning channel, fresh auth per message ------------

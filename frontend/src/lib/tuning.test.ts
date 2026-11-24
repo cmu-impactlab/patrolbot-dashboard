@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   affectedServices,
-  applyRequest,
   BADGE_LABEL,
   BUNDLED_ENTRIES,
   editDisabledReason,
@@ -11,16 +10,10 @@ import {
   gaugeReading,
   freshReadback,
   normalizeSnapshot,
-  outcomeLabel,
   parseNumericInput,
   sliderRange,
-  parseTuningResponse,
-  redeployRequest,
   registryEntry,
-  restoreRequest,
-  saveRequest,
   speedBand,
-  statusRequest,
   unappliedRestartFields,
   validateBatch,
 } from "./tuning";
@@ -351,46 +344,5 @@ describe("pending deployment detection", () => {
       committed_active_revision: 4, committed_active: { max_linear_m_s: .3 },
       desired: { max_linear_m_s: .27 }, pending_keys: ["max_linear_m_s"] });
     expect(unappliedRestartFields(normalizeSnapshot(raw)).map(e => e.id)).toEqual(["max_linear_m_s"]);
-  });
-});
-
-describe("canonical requests carry exact revisions", () => {
-  const change: BatchChange = { id: "max_linear_m_s", value: 0.28 };
-  it("builds a compare-and-swap save", () => {
-    const request = saveRequest("s", 5, [change], "req-1");
-    expect(request).toMatchObject({ operation: "save", base_revision: 5, request_id: "req-1",
-      generation: { capability: "robot_tuning_v1", session_id: "s" }, changes: [change] });
-  });
-  it("carries the expected and restore revisions exactly", () => {
-    expect(applyRequest("s", 5, "r").expected_revision).toBe(5);
-    expect(redeployRequest("s", 5, "r").expected_revision).toBe(5);
-    const restore = restoreRequest("s", 5, 3, "r");
-    expect(restore).toMatchObject({ operation: "restore", expected_revision: 5, restore_revision: 3, target: "last_known_good" });
-  });
-  it("adds a job id only to a status query", () => {
-    expect(statusRequest("s", "job-1", "r").job_id).toBe("job-1");
-    expect(statusRequest("s", undefined, "r").job_id).toBeUndefined();
-  });
-  it("reuses a passed request id and mints a unique one otherwise", () => {
-    expect(saveRequest("s", 5, [change], "keep").request_id).toBe("keep");
-    expect(saveRequest("s", 5, [change]).request_id).not.toBe(saveRequest("s", 5, [change]).request_id);
-  });
-});
-
-describe("response parsing", () => {
-  it("maps unreadable responses to an unknown outcome", () => {
-    expect(parseTuningResponse("x").outcome).toBe("unknown");
-    expect(parseTuningResponse({ outcome: "weird" }).outcome).toBe("unknown");
-  });
-  it("unwraps a valid response snapshot", () => {
-    const response = parseTuningResponse({ request_id: "r", outcome: "conflict", detail: "move on", snapshot: serverSnapshot({ desired_revision: 6 }) });
-    expect(response.outcome).toBe("conflict");
-    expect(response.snapshot?.desiredRevision).toBe(6);
-  });
-  it("labels outcomes for the field status line", () => {
-    expect(outcomeLabel("ok")).toBe("Saved and active");
-    expect(outcomeLabel("conflict")).toBe("Conflict");
-    expect(outcomeLabel("failed")).toBe("Failed");
-    expect(outcomeLabel("unknown")).toBe("Outcome unknown");
   });
 });

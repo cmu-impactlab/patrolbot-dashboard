@@ -9,8 +9,7 @@ lifecycle, and never retries or replays a request.
   wrapper (request + server-derived actor) travels in ``payload_json`` and the
   result comes back in ``result_json``.
 * Advertise ``robot_tuning_read_v1`` only while the core service is actually
-  reachable (``ready``). NEVER advertise ``robot_tuning_v1`` here: mutation
-  support is not proven, so the server must keep refusing writes.
+  reachable (``ready``). This adapter does not forward tuning mutations.
 * A request whose outcome cannot be established (call failure, transport change
   while in flight, unreadable/mismatched result) is reported as ``unknown``.
   A lost transport clears the queue and marks the in-flight call unknown — it is
@@ -20,8 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
-import re
 import threading
 import time
 from collections import deque
@@ -32,28 +29,18 @@ from uuid import uuid4
 log = logging.getLogger("web_bridge.tuning")
 
 CAPABILITY_READ = "robot_tuning_read_v1"
-CAPABILITY_MUTATE = "robot_tuning_v1"
 SERVICE_NAME = "/patrolbot/tuning"
 
 CONTRACT = "patrolbot-robot-tuning"
 CONTRACT_VERSION = 1
 CAPABILITY = "robot_tuning_v1"
-OPERATIONS = ("read", "save", "apply", "redeploy", "status", "restore")
-# Operations that mutate robot-owned state and therefore must carry a
-# server-signed authorization block. `read`/`status` never do.
-MUTATION_OPERATIONS = ("save", "apply", "redeploy", "restore")
+OPERATIONS = ("read", "status")
 ROLES = ("administrator", "operator", "observer")
 
 MAX_REQUEST_BYTES = 18 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_QUEUE = 8
 MAX_USERNAME = 128
-MAX_ROBOT_ID = 128
-# Structural bounds mirroring contracts/robot-tuning-auth.json. The bridge
-# checks only the *shape* of the claims; it holds no key and never verifies the
-# HMAC. Expiry is decided by the core against its own clock.
-MAX_AUTHORIZATION_LIFETIME_MS = 30000
-MAX_SAFE_INT = 2 ** 53 - 1
 DEFAULT_DEADLINE_S = 30.0
 TICK_PERIOD_S = 0.05
 
@@ -72,35 +59,6 @@ def canonical_uuid(value: Any) -> str | None:
 
 def _finite_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _authorization_reason(authorization: Any) -> str | None:
-    """Shape-check a server authorization block; never verify the HMAC.
-
-    The bridge holds no key, so it must not pretend to authenticate a mutation:
-    the core verifies the signature, freshness and robot binding. This rejects a
-    missing, malformed or impossible claim so a mangled or unsigned envelope is
-    refused locally instead of reaching the core.
-    """
-    fields = {"version", "robot_id", "issued_at_ms", "expires_at_ms", "signature"}
-    if not isinstance(authorization, dict) or set(authorization) != fields:
-        return "The tuning authorization is malformed."
-    if type(authorization["version"]) is not int or authorization["version"] != 1:
-        return "The tuning authorization is malformed."
-    robot_id = authorization["robot_id"]
-    if not isinstance(robot_id, str) or not 1 <= len(robot_id) <= MAX_ROBOT_ID:
-        return "The tuning authorization robot binding is invalid."
-    issued = authorization["issued_at_ms"]
-    expires = authorization["expires_at_ms"]
-    if (not _finite_int(issued) or not _finite_int(expires)
-            or issued < 0 or expires < 0
-            or issued > MAX_SAFE_INT or expires > MAX_SAFE_INT
-            or not 0 < expires - issued <= MAX_AUTHORIZATION_LIFETIME_MS):
-        return "The tuning authorization lifetime is invalid."
-    signature = authorization["signature"]
-    if not isinstance(signature, str) or re.fullmatch("[0-9a-f]{64}", signature) is None:
-        return "The tuning authorization is malformed."
-    return None
 
 
 def wrapper_reason(wrapper: Any) -> str | None:
@@ -126,48 +84,16 @@ def wrapper_reason(wrapper: Any) -> str | None:
     if request.get("contract") != CONTRACT or type(request.get("version")) is not int or request["version"] != CONTRACT_VERSION:
         return "The tuning contract is not supported."
     if request.get("operation") not in OPERATIONS:
-        return "The tuning operation is not supported."
+        return "Robot tuning is read-only."
     operation = request["operation"]
-    # Role first: a non-administrator mutation is refused regardless of whether
-    # any authorization block is attached (a forged signature is not authority).
-    if operation not in ("read", "status") and actor["role"] != "administrator":
-        return "Changing tuning requires an administrator."
-    authorization = wrapper.get("authorization")
-    if authorization is not None:
-        authorization_reason = _authorization_reason(authorization)
-        if authorization_reason is not None:
-            return authorization_reason
-    # A mutation must arrive with the server's signed claims. This is a shape
-    # gate only; the core performs the real signature/expiry/robot check.
-    if operation in MUTATION_OPERATIONS and authorization is None:
-        return "Changing tuning requires a signed server authorization."
+    if wrapper.get("authorization") is not None:
+        return "Read-only tuning requests do not accept authorization claims."
     common = {"contract", "version", "operation", "request_id", "generation"}
-    extras = {"read": set(), "status": {"job_id"}, "save": {"base_revision", "changes"},
-              "apply": {"expected_revision"}, "redeploy": {"expected_revision"},
-              "restore": {"expected_revision", "restore_revision", "target"}}[operation]
+    extras = {"job_id"} if operation == "status" else set()
     if set(request) - common - extras or not common.issubset(request):
         return "The tuning request has unexpected fields."
-    for key in ("base_revision", "expected_revision", "restore_revision"):
-        if key in extras and (type(request.get(key)) is not int or not 0 <= request[key] <= 2**53 - 1):
-            return "The tuning revision is invalid."
-    if operation == "restore" and request.get("target") != "last_known_good":
-        return "The restore target is invalid."
     if operation == "status" and "job_id" in request and canonical_uuid(request["job_id"]) is None:
         return "The tuning job id is invalid."
-    if operation == "save":
-        changes = request.get("changes")
-        if not isinstance(changes, list) or not 1 <= len(changes) <= 32:
-            return "The change batch is invalid."
-        ids = set()
-        for change in changes:
-            if not isinstance(change, dict) or set(change) != {"id", "value"}:
-                return "The change shape is invalid."
-            pid, value = change["id"], change["value"]
-            if not isinstance(pid, str) or len(pid) > 64 or not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z0-9_]+)*", pid) or pid in ids:
-                return "The change identifier is invalid."
-            ids.add(pid)
-            if type(value) not in (int, float, bool) or (type(value) is float and not math.isfinite(value)):
-                return "The change value is invalid."
     if canonical_uuid(request.get("request_id")) is None:
         return "The tuning request id is not canonical."
     generation = request.get("generation")
@@ -268,18 +194,8 @@ class RosTuning:
             return False
 
     def capabilities(self) -> list[str]:
-        """Capability tokens this adapter may advertise.
-
-        Read only, and only while the core service is reachable. Mutations stay
-        unadvertised until safe activation support is proven elsewhere.
-        """
+        """Advertise reachable inspection and any required motion policy."""
         result = [CAPABILITY_READ] if self.ready else []
-        snapshot = self._snapshot or {}
-        fresh = self._snapshot_at is not None and 0 <= self._clock() - self._snapshot_at <= 3
-        if self.ready and fresh and snapshot.get("save_supported") is True:
-            result.append("robot_tuning_write_v1")
-            if snapshot.get("activation_supported") is True:
-                result.append(CAPABILITY_MUTATE)
         if self.policy_required:
             result.append("robot_tuning_policy_v1")
         return result

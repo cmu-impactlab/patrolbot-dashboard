@@ -1,5 +1,11 @@
 # Advanced tuning: code/unit readiness
 
+Historical verification record. The Advanced panel and tuning endpoint are now
+read-only. Save, apply, redeploy, and restore are not available, including for
+administrators or when an older robot advertises a write capability. The
+dashboard can still inspect live parameters, committed limits, and historical
+job status; it does not change any existing robot configuration.
+
 Updated 2026-10-20. **Code and unit tests first; deployment/environment tests are
 deferred by explicit operator instruction.** Latest operator status: SBC down.
 Nothing in this document authorizes robot contact, deployment or motion.

@@ -1,11 +1,4 @@
-"""Server-side actor derivation and fresh-credential checks for tuning.
-
-The browser never supplies role or authorization. The actor stamped onto every
-``tuning.request`` is derived here from the verified session, and mutations
-re-check that the credential is still valid *and* currently administrative at
-the moment of admission — an HTTP request is re-verified per request, and the
-browser WebSocket re-verifies per tuning frame (see ``websocket/ui_gateway``).
-"""
+"""Actor derivation and fresh-credential checks for authenticated requests."""
 from __future__ import annotations
 
 from typing import Any
@@ -62,16 +55,3 @@ def fresh_user(settings: Any, cookies: Any) -> User | None:
         return LOCAL_USER
     session = verify_session(settings.session_secret, cookies.get(COOKIE_NAME))
     return user_from_session(settings, session)
-
-
-def is_mutation(operation: Any) -> bool:
-    from .validation import MUTATION_OPERATIONS
-
-    return operation in MUTATION_OPERATIONS
-
-
-def require_administrator(user: User, operation: Any) -> None:
-    """Every mutation requires a currently-administrative account."""
-    if is_mutation(operation) and not getattr(user, "is_administrator", False):
-        raise TuningForbidden(
-            "Changing robot tuning needs an administrator account.")
