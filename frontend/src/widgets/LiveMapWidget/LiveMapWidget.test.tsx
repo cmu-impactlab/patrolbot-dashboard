@@ -64,7 +64,7 @@ describe("live map command boundary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Set location" }));
     const data = JSON.parse(sender.mock.calls[0][0]).data;
     expect(data.seed_profile).toBe("measured");
-    expect(data.goal).toMatchObject({ map_id: "cmuq-floor2", map_revision: "test-revision", x: -3.19, y: 10.19 });
+    expect(data.goal).toMatchObject({ map_id: "cmuq-floor1", map_revision: "test-first", x: -3.19, y: 10.19 });
     expect(data.goal.yaw).toBeCloseTo(Math.PI / 2);
   });
   it("refuses measured confirmation when source age plus elapsed receipt time expires", () => {
@@ -198,6 +198,28 @@ describe("live map command boundary", () => {
 
 
 describe("floor browsing", () => {
+  const activeFloorTwo = () => ({ ...useTelemetryStore.getState().baseState!,
+    map_id: "cmuq-floor2", map_revision: "test-revision" });
+
+  it("defaults to floor one until fresh telemetry identifies a known floor", () => {
+    const canvas = mount(); down(canvas); up(canvas);
+    expect(screen.getByRole("button", { name: "Floor 1" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByLabelText("Confirm map selection")).toBeTruthy();
+    act(() => useTelemetryStore.setState({ baseState: activeFloorTwo() }));
+    expect(screen.getByRole("button", { name: "Floor 2 ● Active" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByLabelText("Confirm map selection")).toBeNull();
+    expect(sender).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["stale", "test-revision", -30_000],
+    ["unknown", "unrecognized-revision", 0],
+  ] as const)("opens floor one for %s floor context", (_reason, map_revision, offset) => {
+    useTelemetryStore.setState({ baseState: { ...activeFloorTwo(), map_revision }, baseStateAt: now + offset });
+    mount();
+    expect(screen.getByRole("button", { name: "Floor 1" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("browses without commanding and cancels a pending selection", () => {
     const canvas = mount(); down(canvas); up(canvas);
     expect(screen.getByLabelText("Confirm map selection")).toBeTruthy();
@@ -208,8 +230,9 @@ describe("floor browsing", () => {
     expect(screen.getByRole("button", { name: "Floor 1" }).getAttribute("aria-pressed")).toBe("true");
   });
   it("keeps the active floor independent from viewing and labels disconnects stale", () => {
-    useTelemetryStore.setState({ baseState: { ...useTelemetryStore.getState().baseState!, map_id: "cmuq-floor2", map_revision: "test-revision" } });
+    useTelemetryStore.setState({ baseState: activeFloorTwo() });
     mount();
+    expect(screen.getByRole("button", { name: "Floor 2 ● Active" }).getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Floor 1" }));
     expect(screen.getByRole("button", { name: "Floor 2 ● Active" }).getAttribute("aria-pressed")).toBe("false");
     act(() => useTelemetryStore.setState({ wsConnected: false }));

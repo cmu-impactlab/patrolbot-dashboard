@@ -33,6 +33,9 @@ from .battery_estimator import BatteryEstimate, BatteryRuntimeEstimator
 from .status import MAX_DIAGNOSTICS_AGE_S, derive_health, derive_status
 
 DIAGNOSTIC_SOURCE_RETENTION_S = 5 * MAX_DIAGNOSTICS_AGE_S
+# The bridge emits this diagnostic on frame rejection, not as an odometry
+# heartbeat. After it ages out, silence is not a second fault.
+EVENT_ONLY_DIAGNOSTICS = frozenset({"patrolbot/odometry"})
 
 
 @dataclass
@@ -277,7 +280,8 @@ class RobotState:
         items: list[DiagnosticItem] = []
         for name, (item, received) in list(self._diagnostic_sources.items()):
             age = max(0.0, now - received)
-            if age > DIAGNOSTIC_SOURCE_RETENTION_S:
+            retention = MAX_DIAGNOSTICS_AGE_S if name in EVENT_ONLY_DIAGNOSTICS else DIAGNOSTIC_SOURCE_RETENTION_S
+            if age > retention:
                 del self._diagnostic_sources[name]
                 self._diag_levels.pop(name, None)
                 continue

@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect } from "react";
 import { useLayoutsQuery } from "./api/queries";
 import { AuthGate } from "./components/AuthGate";
 import { DashboardGrid } from "./components/DashboardGrid";
-import { DashboardTour } from "./components/DashboardTour";
 import { TourPrompt } from "./components/TourPrompt";
 import { MapSelectionHost } from "./components/MapSelectionHost";
 import { TopBar } from "./components/TopBar";
@@ -22,6 +21,10 @@ const ReplayPage = lazy(async () => ({
 }));
 const AdvancedPage = lazy(async () => ({
   default: (await import("./pages/AdvancedPage")).AdvancedPage,
+}));
+// The optional tour should not block the dashboard's initial render.
+const DashboardTour = lazy(async () => ({
+  default: (await import("./components/DashboardTour")).DashboardTour,
 }));
 
 function Dashboard() {
@@ -56,7 +59,11 @@ function Dashboard() {
         onResolved={() => {}}
         tourAlreadyStarted={tourActive}
       />
-      <DashboardTour />
+      {tourActive && (
+        <Suspense fallback={null}>
+          <DashboardTour />
+        </Suspense>
+      )}
     </div>
   );
 }
