@@ -378,7 +378,11 @@ class CommandBroker:
                 await self._close_out(entry, "rejected", "Command authority expired before publication.")
             return
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
-        entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
+        # An accepted destination is a Nav2 action, not a short RPC. Leave it
+        # owned until the robot reports a result, or handle uncertainty on
+        # lost acknowledgement/connection as usual.
+        if command != "navigate_to_pose":
+            entry.timers.append(asyncio.create_task(self._result_timeout(entry)))
 
         # This flag authorizes only this validated command. An expired former
         # operator can get it solely for SAFE_END_COMMANDS, never fresh motion.
@@ -644,6 +648,8 @@ class CommandBroker:
             await self._close_out(entry, "timeout", "The robot did not confirm the command in time.")
 
     async def _result_timeout(self, entry: ActiveCommand) -> None:
+        if entry.command == "navigate_to_pose":
+            return
         await asyncio.sleep(self.result_timeout_s)
         if self.active.get(entry.command_id) is not entry:
             return

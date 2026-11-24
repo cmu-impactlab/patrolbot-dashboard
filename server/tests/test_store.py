@@ -76,6 +76,32 @@ def test_diagnostic_sources_merge_stale_and_expire_deterministically(monkeypatch
     assert state.diagnostics.data is None
 
 
+def test_odometry_rejection_is_an_event_not_a_missing_heartbeat(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("app.telemetry.store.time.monotonic", lambda: now)
+    state = make_state()
+    rejected = DiagnosticsData(items=[DiagnosticItem(
+        name="patrolbot/odometry", level="ERROR",
+        message="odometry frame rejected: heading-discontinuity",
+    )])
+    periodic = DiagnosticsData(items=[DiagnosticItem(name="patrolbot/battery", level="OK", message="Ready")])
+
+    events = state.record_diagnostics(rejected)
+    assert len(events) == 1 and events[0].severity == "critical"
+    now += 29
+    state.record_diagnostics(periodic)
+    state.recompute()
+    assert next(item for item in state.health.subsystems if item.id == "systems").level == "fault"
+
+    now += 2
+    state.record_diagnostics(periodic)
+    state.recompute()
+    assert [item.name for item in state.diagnostics.data.items] == ["patrolbot/battery"]
+    assert next(item for item in state.health.subsystems if item.id == "systems").level == "healthy"
+    assert events[0] in state.events
+    assert len(state.record_diagnostics(rejected)) == 1
+
+
 def test_reconnect_clears_diagnostic_sources():
     state = make_state()
     state.record_diagnostics(DiagnosticsData(items=[
