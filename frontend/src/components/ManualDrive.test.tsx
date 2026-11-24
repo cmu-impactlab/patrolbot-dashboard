@@ -60,47 +60,60 @@ describe("manual drive isolated software input", () => {
     expect(frames).toEqual([]);
     expect(screen.getByText("Not armed")).toBeTruthy();
   });
-  it("sets only the forward keyboard limit without sending anything until armed", () => {
+  it("sets separate linear and angular limits without sending anything until armed", () => {
     render(<ManualDrive />);
-    const speed = screen.getByRole<HTMLInputElement>("slider", { name: "Forward speed limit" });
-    expect([speed.min, speed.max]).toEqual(["0.05", "0.3"]);
-    fireEvent.change(speed, { target: { value: ".10" } });
-    expect(speed.getAttribute("aria-valuetext")).toBe("0.10 m/s");
+    const linear = screen.getByRole<HTMLInputElement>("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole<HTMLInputElement>("slider", { name: "Angular speed limit" });
+    expect([linear.min, linear.max]).toEqual(["0.05", "0.3"]);
+    expect([angular.min, angular.max]).toEqual(["0.1", "0.7"]);
+    fireEvent.change(linear, { target: { value: ".10" } });
+    fireEvent.change(angular, { target: { value: ".30" } });
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.10 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.30 rad/s");
     expect(frames).toEqual([]);
 
     keyboardStart(); ack();
-    expect(speed.disabled).toBe(true);
+    expect(linear.disabled).toBe(true);
+    expect(angular.disabled).toBe(true);
     key("a"); hold(1600);
-    expect(velocity().at(-1)).toMatchObject({ linear: .1, angular: .7 });
+    expect(velocity().at(-1)).toMatchObject({ linear: .1, angular: .3 });
     fireEvent.keyUp(panel(), { key: "w" }); key("s");
+    fireEvent.keyUp(panel(), { key: "a" }); key("d");
     hold(2200);
-    expect(velocity().at(-1)).toMatchObject({ linear: -.3, angular: .7 });
+    expect(velocity().at(-1)).toMatchObject({ linear: -.1, angular: -.3 });
   });
-  it("scales analog forward input proportionally to the selected limit", () => {
+  it("scales each signed joystick axis proportionally to its own selected limit", () => {
     render(<ManualDrive />);
-    fireEvent.change(screen.getByRole("slider", { name: "Forward speed limit" }), { target: { value: ".10" } });
+    fireEvent.change(screen.getByRole("slider", { name: "Linear speed limit" }), { target: { value: ".10" } });
+    fireEvent.change(screen.getByRole("slider", { name: "Angular speed limit" }), { target: { value: ".30" } });
     arm();
     const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
     vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
-    fireEvent.pointerDown(stick, { button: 0, clientX: 80, clientY: 40 });
+    fireEvent.pointerDown(stick, { button: 0, clientX: 120, clientY: 40 });
     ack(); tick();
-    expect(velocity().at(-1)?.linear).toBeCloseTo(.05, 5);
+    expect(velocity().at(-1)).toMatchObject({ linear: .05, angular: -.15 });
+    fireEvent.pointerMove(stick, { clientX: 40, clientY: 120 });
+    tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: -.05, angular: .15 });
   });
   it("honors a robot ceiling below the selector minimum and refuses stale policy", () => {
     useTelemetryStore.setState({ capabilities: ["web_teleop_v1", "robot_tuning_policy_v1"] });
     const snapshot = { ...normalizeSnapshot(null), available: true, activeKnown: true,
-      effectiveLimits: { max_linear_m_s: .04, max_angular_rad_s: .7 } };
+      effectiveLimits: { max_linear_m_s: .04, max_angular_rad_s: .08 } };
     useTuningStore.setState({ snapshot, receivedAt: performance.now() });
     render(<ManualDrive />);
-    const speed = screen.getByRole<HTMLInputElement>("slider", { name: "Forward speed limit" });
-    expect(speed.disabled).toBe(true);
-    expect(speed.getAttribute("aria-valuetext")).toBe("0.04 m/s");
-    keyboardStart(); ack(); hold(400);
-    expect(velocity().at(-1)?.linear).toBeCloseTo(.04, 5);
+    const linear = screen.getByRole<HTMLInputElement>("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole<HTMLInputElement>("slider", { name: "Angular speed limit" });
+    expect(linear.disabled && angular.disabled).toBe(true);
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.04 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.08 rad/s");
+    keyboardStart(); ack(); key("a"); hold(400);
+    expect(velocity().at(-1)).toMatchObject({ linear: .04, angular: .08 });
 
     act(() => useTuningStore.setState({ receivedAt: performance.now() - 6000 }));
     tick();
-    expect(speed.getAttribute("aria-valuetext")).toBe("Unavailable");
+    expect(linear.getAttribute("aria-valuetext")).toBe("Unavailable");
+    expect(angular.getAttribute("aria-valuetext")).toBe("Unavailable");
     expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
   });
   it("waits for robot acceptance, then ramps bounded keyboard input with the exact start ID", () => {

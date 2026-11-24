@@ -42,12 +42,16 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   fixture.send("telemetry.base_state", TELEOP_BASE);
   const arm = page.getByRole("button", { name: "Arm manual drive" });
   await expect(arm).toBeEnabled();
-  const speed = page.getByRole("slider", { name: "Forward speed limit" });
-  await speed.fill("0.1");
-  await expect(speed).toHaveAttribute("aria-valuetext", "0.10 m/s");
+  const linear = page.getByRole("slider", { name: "Linear speed limit" });
+  const angular = page.getByRole("slider", { name: "Angular speed limit" });
+  await linear.fill("0.1");
+  await angular.fill("0.3");
+  await expect(linear).toHaveAttribute("aria-valuetext", "0.10 m/s");
+  await expect(angular).toHaveAttribute("aria-valuetext", "0.30 rad/s");
   expect(fixture.commands).toHaveLength(0);
   await arm.click();
-  await expect(speed).toBeDisabled();
+  await expect(linear).toBeDisabled();
+  await expect(angular).toBeDisabled();
   const stick = page.getByRole("group", { name: "Hold joystick to drive" });
   const box = (await stick.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + 10); await page.mouse.down();
@@ -69,7 +73,7 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   for (const id of starts) {
     const samples = fixture.teleopFrames.filter(frame => frame.command_id === id);
     expect(samples.map(frame => frame.seq)).toEqual(samples.map((_, index) => index));
-    expect(samples.every(frame => Math.abs(frame.linear) <= .3 && Math.abs(frame.angular) <= .7)).toBe(true);
+    expect(samples.every(frame => Math.abs(frame.linear) <= .10 && Math.abs(frame.angular) <= .30)).toBe(true);
   }
 });
 

@@ -1269,11 +1269,11 @@ input:not([type=checkbox]), select { min-height: 44px; }
 .advanced-side { display: grid; gap: 10px; min-width: 0; }
 .manual-panel { border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
 .manual-panel:focus-visible, .manual-joystick:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.manual-speeds { display: grid; gap: 5px; }
+.manual-speeds small { color: var(--text-secondary); }
 .manual-speed { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: center; }
 .manual-speed > span { font-variant-numeric: tabular-nums; }
-.manual-speed > input, .manual-speed > small { grid-column: 1 / -1; }
-.manual-speed > input { width: 100%; margin: 0; accent-color: var(--accent); }
-.manual-speed > small { color: var(--text-secondary); }
+.manual-speed > input { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: var(--accent); }
 .manual-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .manual-joystick { position: relative; width: 160px; height: 160px; margin: 24px auto; border-radius: 50%; border: 2px solid var(--border); touch-action: none; user-select: none; cursor: grab; background: var(--bg); }
 .manual-joystick[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
