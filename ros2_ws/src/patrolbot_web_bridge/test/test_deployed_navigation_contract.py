@@ -27,10 +27,15 @@ def executor():
     result = CommandExecutor.__new__(CommandExecutor)
     result._node = Mock(cfg={"path_max_points": 8})
     result._ws = Mock()
+    result._ws.send.return_value = True
+    result._ws.connection_generation = 1
     result._undock_active = result._nav_pending = None
     result._navigation_context = CONTEXT
     result._navigation_generation = 1
     result._last_progress_mono = 0
+    result._last_navigation_path = None
+    result._last_path_sent_mono = 0.0
+    result._last_path_connection_generation = None
     result._active = {"command_id": "current", "goal_id": GOAL_ID,
                       "goal_handle": Mock(), "navigation_context": CONTEXT,
                       "path_valid": False, "path_blocked": False}
@@ -92,6 +97,68 @@ def test_context_change_withdraws_path_without_resuming_goal(executor):
     kind, payload = executor._ws.send.call_args.args
     assert kind == "telemetry.path" and payload["points"] == []
     executor._active["goal_handle"].cancel_goal_async.assert_not_called()
+
+
+def reply_with_path(executor, *, available=True, owner=None):
+    path = NS(header=NS(frame_id="map", stamp=NS(sec=1, nanosec=0)), poses=[])
+    if available:
+        path.poses = [NS(pose=NS(position=NS(x=x, y=2.0, z=0.0),
+                                  orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0)))
+                      for x in (1.0, 3.0)]
+    future = Future(NS(active=True, path=path))
+    executor._path_future = future
+    executor._on_navigation_path(owner or executor._active, future)
+
+
+def test_retries_identical_route_after_recovery_update_is_rejected(executor):
+    socket = executor._ws
+    socket.send.side_effect = [True, True, False, True]
+    reply_with_path(executor)
+    reply_with_path(executor, available=False)
+    assert executor._active["path_valid"] is False
+    reply_with_path(executor)
+    reply_with_path(executor)
+
+    paths = [call.args[1] for call in socket.send.call_args_list]
+    assert [path["path_valid"] for path in paths] == [True, False, True, True]
+    assert paths[1]["points"] == [] and paths[1]["goal"] is None
+    assert paths[0] == paths[2] == paths[3]
+
+
+def test_refreshes_unchanged_route_after_queue_eviction_or_reconnect(executor, monkeypatch):
+    now = 10.0
+    monkeypatch.setattr("patrolbot_web_bridge.commands.time.monotonic", lambda: now)
+    reply_with_path(executor)
+    now += 0.5
+    reply_with_path(executor)
+    assert executor._ws.send.call_count == 1  # Don't send at the polling rate.
+
+    now += 5.0
+    reply_with_path(executor)
+    assert executor._ws.send.call_count == 2  # Successful enqueue may still be evicted.
+
+    executor._ws.connection_generation += 1
+    now += 0.5
+    reply_with_path(executor)
+    assert executor._ws.send.call_count == 3
+
+
+@pytest.mark.parametrize("boundary", ["stop", "terminal", "origin"])
+def test_late_verified_reply_cannot_restore_withdrawn_route(executor, boundary):
+    active = executor._active
+    reply_with_path(executor)
+    if boundary == "stop":
+        active["goal_handle"].cancel_goal_async.return_value = Future(
+            NS(goals_canceling=[object()], return_code=0))
+        executor._cancel_navigation("current")
+    elif boundary == "terminal":
+        executor._on_result("current", Future(NS(status=4)))
+    else:
+        executor.update_navigation_context({})
+
+    executor._ws.send.reset_mock()
+    reply_with_path(executor, owner=active)
+    executor._ws.send.assert_not_called()
 
 
 def test_unknown_undock_retains_owner_and_requests_one_cancel(executor):

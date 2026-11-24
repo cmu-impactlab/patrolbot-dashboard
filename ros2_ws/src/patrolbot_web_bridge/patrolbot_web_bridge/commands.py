@@ -42,6 +42,10 @@ MAX_RECEIPT_AGE_S = 3.0
 # is" are different failures, and only the first is the operator's to accept.
 MAX_ODOM_AGE_S = 3.0
 
+# A queued path is not a delivery acknowledgement. Refresh verified telemetry
+# well below the polling rate so a dropped frame does not hide an entire route.
+NAVIGATION_PATH_REFRESH_S = 5.0
+
 # action_msgs/GoalStatus terminal codes.
 _STATUS_SUCCEEDED = 4
 _STATUS_CANCELED = 5
@@ -400,6 +404,8 @@ class CommandExecutor:
         self._path_client = node.create_client(GetNavigationPath, "/patrolbot/navigate_to_pose_path")
         self._path_future = None
         self._last_navigation_path = None
+        self._last_path_sent_mono = 0.0
+        self._last_path_connection_generation = None
         node.create_timer(.5, self._poll_navigation_path)
         from patrolbot_interfaces.action import LocalizeOnMap
         self._LocalizeOnMap = LocalizeOnMap
@@ -906,9 +912,20 @@ class CommandExecutor:
             self._clear_navigation_path()
             return
         payload = self.navigation_path(active["goal_id"], response.path)
-        if payload is not None and payload != self._last_navigation_path:
+        if payload is None:
+            return
+        now = time.monotonic()
+        generation = self._ws.connection_generation
+        if (payload == self._last_navigation_path
+                and generation == self._last_path_connection_generation
+                and now - self._last_path_sent_mono < NAVIGATION_PATH_REFRESH_S):
+            return
+        # Only a fresh reply for this goal can restore the path. Never replay
+        # a cached plan after Stop, terminal results, or context invalidation.
+        if self._ws.send("telemetry.path", payload):
             self._last_navigation_path = payload
-            self._ws.send("telemetry.path", payload)
+            self._last_path_sent_mono = now
+            self._last_path_connection_generation = generation
 
     def navigation_path(self, goal_id: bytes, path) -> dict | None:
         active = self._active
