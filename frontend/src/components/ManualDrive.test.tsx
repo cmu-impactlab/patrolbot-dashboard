@@ -5,6 +5,8 @@ import { canCommand, useAuthStore } from "../stores/authStore";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTeleopStore } from "../stores/teleopStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { useTuningStore } from "../stores/tuningStore";
+import { normalizeSnapshot } from "../lib/tuning";
 import type { BaseStateData, TeleopVelocityData } from "../types/protocol";
 
 const base: BaseStateData = { session_generation: 1, link_connected: true, telemetry_age: 0,
@@ -47,12 +49,59 @@ describe("manual drive isolated software input", () => {
     healthy();
     frames = captureCommandSender();
   });
-  afterEach(() => { cleanup(); useTeleopStore.getState().end(); registerCommandSender(null); vi.useRealTimers(); vi.unstubAllGlobals(); });
+  afterEach(() => {
+    cleanup(); useTeleopStore.getState().end(); registerCommandSender(null);
+    useTuningStore.setState({ snapshot: null, receivedAt: null });
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  });
 
   it("opening the page never arms, enables motors or sends a command", () => {
     render(<ManualDrive />); tick();
     expect(frames).toEqual([]);
     expect(screen.getByText("Not armed")).toBeTruthy();
+  });
+  it("sets only the forward keyboard limit without sending anything until armed", () => {
+    render(<ManualDrive />);
+    const speed = screen.getByRole<HTMLInputElement>("slider", { name: "Forward speed limit" });
+    expect([speed.min, speed.max]).toEqual(["0.05", "0.3"]);
+    fireEvent.change(speed, { target: { value: ".10" } });
+    expect(speed.getAttribute("aria-valuetext")).toBe("0.10 m/s");
+    expect(frames).toEqual([]);
+
+    keyboardStart(); ack();
+    expect(speed.disabled).toBe(true);
+    key("a"); hold(1600);
+    expect(velocity().at(-1)).toMatchObject({ linear: .1, angular: .7 });
+    fireEvent.keyUp(panel(), { key: "w" }); key("s");
+    hold(2200);
+    expect(velocity().at(-1)).toMatchObject({ linear: -.3, angular: .7 });
+  });
+  it("scales analog forward input proportionally to the selected limit", () => {
+    render(<ManualDrive />);
+    fireEvent.change(screen.getByRole("slider", { name: "Forward speed limit" }), { target: { value: ".10" } });
+    arm();
+    const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
+    vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
+    fireEvent.pointerDown(stick, { button: 0, clientX: 80, clientY: 40 });
+    ack(); tick();
+    expect(velocity().at(-1)?.linear).toBeCloseTo(.05, 5);
+  });
+  it("honors a robot ceiling below the selector minimum and refuses stale policy", () => {
+    useTelemetryStore.setState({ capabilities: ["web_teleop_v1", "robot_tuning_policy_v1"] });
+    const snapshot = { ...normalizeSnapshot(null), available: true, activeKnown: true,
+      effectiveLimits: { max_linear_m_s: .04, max_angular_rad_s: .7 } };
+    useTuningStore.setState({ snapshot, receivedAt: performance.now() });
+    render(<ManualDrive />);
+    const speed = screen.getByRole<HTMLInputElement>("slider", { name: "Forward speed limit" });
+    expect(speed.disabled).toBe(true);
+    expect(speed.getAttribute("aria-valuetext")).toBe("0.04 m/s");
+    keyboardStart(); ack(); hold(400);
+    expect(velocity().at(-1)?.linear).toBeCloseTo(.04, 5);
+
+    act(() => useTuningStore.setState({ receivedAt: performance.now() - 6000 }));
+    tick();
+    expect(speed.getAttribute("aria-valuetext")).toBe("Unavailable");
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
   });
   it("waits for robot acceptance, then ramps bounded keyboard input with the exact start ID", () => {
     render(<ManualDrive />); keyboardStart(); tick(160);

@@ -41,11 +41,18 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   fixture.send("telemetry.pose", { x: 0, y: 0, yaw: 0, localized: false, linear_velocity: 0, angular_velocity: 0 }); // No AMCL prerequisite.
   fixture.send("telemetry.base_state", TELEOP_BASE);
   const arm = page.getByRole("button", { name: "Arm manual drive" });
-  await expect(arm).toBeEnabled(); await arm.click();
+  await expect(arm).toBeEnabled();
+  const speed = page.getByRole("slider", { name: "Forward speed limit" });
+  await speed.fill("0.1");
+  await expect(speed).toHaveAttribute("aria-valuetext", "0.10 m/s");
+  expect(fixture.commands).toHaveLength(0);
+  await arm.click();
+  await expect(speed).toBeDisabled();
   const stick = page.getByRole("group", { name: "Hold joystick to drive" });
   const box = (await stick.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + 10); await page.mouse.down();
   await expect.poll(() => fixture.teleopFrames.some(frame => frame.deadman && frame.linear > 0)).toBe(true);
+  expect(fixture.teleopFrames.every(frame => frame.linear <= .10)).toBe(true);
   await page.mouse.up();
   await expect.poll(() => fixture.commands.filter(command => command.command === "teleop_stop").length).toBe(1);
   expect(fixture.teleopFrames.at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
