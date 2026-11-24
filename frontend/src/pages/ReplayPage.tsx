@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchRecordingDetail } from "../api/queries";
 import { formatTime } from "../lib/format";
 import {
-  REPLAY_SPEEDS, useReplayStore, type RecordingRow, type ReplayEvent,
+  REPLAY_SPEEDS, useReplayStore, type RecordingRow, type ReplayEvent, type ReplayPose,
 } from "../stores/replayStore";
 import { useUiStore } from "../stores/uiStore";
 import { ReplayMap } from "../widgets/LiveMapWidget/ReplayMap";
@@ -121,11 +121,10 @@ function EventList({ t }: { t: number }) {
   );
 }
 
-function Readout({ t }: { t: number }) {
+function Readout({ t, here }: { t: number; here: ReplayPose | null }) {
   const poses = useReplayStore((state) => state.poses);
   const battery = useReplayStore((state) => state.battery);
   const store = useReplayStore.getState();
-  const here = store.poseAt(t);
   const routeLength = useMemo(() => store.routeLength(), [poses]);
 
   // Most recent battery reading at or before the playhead.
@@ -203,6 +202,7 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
   if (!recording) {
     return <div className="replay-page" aria-busy="true"><p className="subtext">Loading replay…</p></div>;
   }
+  const here = useReplayStore.getState().poseAt(t);
 
   return (
     <div className="replay-page">
@@ -229,13 +229,13 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
               Record the “Position &amp; speed” channel to see the robot move here.
             </div>
           ) : (
-            <ReplayMap theme={theme} />
+            <ReplayMap theme={theme} mapId={here?.map_id ?? null} revision={here?.map_revision ?? null} />
           )}
           {poses.length > 0 && <Transport t={t} />}
         </div>
         <aside className="replay-side">
           <h2><Gauge size={14} /> At this moment</h2>
-          <Readout t={t} />
+          <Readout t={t} here={here} />
           <h2><Bell size={14} /> Alerts</h2>
           <EventList t={t} />
         </aside>
