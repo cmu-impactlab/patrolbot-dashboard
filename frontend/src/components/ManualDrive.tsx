@@ -30,10 +30,10 @@ function SpeedSlider({ label, unit, minimum, maximum, selected, adjustable, onSe
   return <div className="manual-speed">
     <label htmlFor={id}>{label}</label>
     <span>{display}</span>
-    <input id={id} type="range" min={min} max={max} step="any" value={value}
+    <input id={id} type="range" min={min} max={max} step="any" value={value} data-manual-speed-trim
       aria-valuetext={display} disabled={!adjustable || max <= min}
       onChange={event => {
-        if (!adjustable || max <= min || useTeleopStore.getState().phase !== "idle") return;
+        if (!adjustable || max <= min) return;
         const next = event.currentTarget.valueAsNumber;
         if (Number.isFinite(next)) onSelect(Math.max(min, Math.min(max, next)));
       }} />
@@ -57,12 +57,14 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const { wsConnected, robotId } = telemetry;
   const keys = useRef(new Set<string>());
   const pointer = useRef<number | null>(null);
+  const heldAxes = useRef<[number, number]>([0, 0]);
   const blockedKeys = useRef(new Set<string>());
   const panel = useRef<HTMLElement>(null);
   const reset = () => {
     keys.current.forEach(key => blockedKeys.current.add(key));
     keys.current.clear();
     pointer.current = null;
+    heldAxes.current = [0, 0];
     setStick([0, 0]);
     useTeleopStore.getState().end();
   };
@@ -87,6 +89,7 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
         keys.current.forEach(key => blockedKeys.current.add(key));
         keys.current.clear();
         pointer.current = null;
+        heldAxes.current = [0, 0];
         setStick([0, 0]);
       }
     });
@@ -106,15 +109,32 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const limits = operationalLimits();
   const speedAvailable = telemetry.wsConnected && telemetry.connection.state === "online"
     && telemetry.capabilities.includes("web_teleop_v1") && limits !== null;
-  const canAdjustSpeed = speedAvailable && canCommand(user) && state.phase === "idle";
+  const localDeadmanHeld = () => pointer.current !== null || keys.current.has(" ");
+  const canAdjustSpeed = speedAvailable && canCommand(user)
+    && (state.phase === "idle" || (state.phase === "active" && state.deadman && localDeadmanHeld()));
+  const scaleInput = (linear: number, angular: number, current: NonNullable<typeof limits>,
+                      selectedLinear = linearCap, selectedAngular = angularCap): [number, number] => [
+    scaleAxis(linear, current.linear_m_s, TELEOP_LIMITS.linear_m_s, selectedLinear),
+    scaleAxis(angular, current.angular_rad_s, TELEOP_LIMITS.angular_rad_s, selectedAngular),
+  ];
+  const selectTrim = (axis: "linear" | "angular", next: number) => {
+    const manual = useTeleopStore.getState();
+    if (!canAdjustSpeed || (manual.phase !== "idle"
+      && (manual.phase !== "active" || !manual.deadman || !localDeadmanHeld()))) return;
+    if (axis === "linear") setLinearCap(next);
+    else setAngularCap(next);
+    if (manual.phase !== "active") return;
+    const current = operationalLimits();
+    if (!current) return;
+    const [linear, angular] = heldAxes.current;
+    manual.retargetHeldInput(...scaleInput(linear, angular, current,
+      axis === "linear" ? next : linearCap, axis === "angular" ? next : angularCap));
+  };
   const sendInput = (linear: number, angular: number, deadman: boolean, ramp: boolean) => {
     const current = operationalLimits();
     if (!current) { useTeleopStore.getState().end("Active speed policy unavailable."); return; }
-    useTeleopStore.getState().input(
-      scaleAxis(linear, current.linear_m_s, TELEOP_LIMITS.linear_m_s, linearCap),
-      scaleAxis(angular, current.angular_rad_s, TELEOP_LIMITS.angular_rad_s, angularCap),
-      deadman, false, ramp,
-    );
+    heldAxes.current = deadman ? [linear, angular] : [0, 0];
+    useTeleopStore.getState().input(...scaleInput(linear, angular, current), deadman, false, ramp);
   };
   const sendKeys = () => {
     let linear = 0, angular = 0;
@@ -135,7 +155,7 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const keyUp = (event: KeyboardEvent<HTMLElement>) => {
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     blockedKeys.current.delete(key);
-    if (editable(event.target)) return;
+    if (editable(event.target) && !keys.current.has(key)) return;
     keys.current.delete(key);
     if (key === " ") { event.preventDefault(); reset(); }
     else if (DIRECTIONS[key] && keys.current.has(" ")) { event.preventDefault(); sendKeys(); }
@@ -151,7 +171,12 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
 
   return <section ref={panel} className={`manual-panel${compact ? " manual-compact" : ""}`} aria-label="Manual drive keyboard panel" tabIndex={0}
     onKeyDown={keyDown} onKeyUp={keyUp} onBlur={event => {
-      if (useTeleopStore.getState().deadman || !event.currentTarget.contains(event.relatedTarget)) reset();
+      const manual = useTeleopStore.getState();
+      const target = event.relatedTarget;
+      const withinPanel = event.currentTarget.contains(target);
+      const focusingTrim = target instanceof HTMLInputElement && target.hasAttribute("data-manual-speed-trim");
+      if (manual.phase === "active" && localDeadmanHeld() && withinPanel && focusingTrim) return;
+      if (manual.deadman || !withinPanel) reset();
     }}>
     <h2>Manual drive</h2>
     <p role="status">{PHASE_COPY[state.phase]}</p>
@@ -163,11 +188,11 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
     <div className="manual-speeds">
       <SpeedSlider label="Linear speed limit" unit="m/s" minimum={0.05}
         maximum={speedAvailable ? Math.min(limits.linear_m_s.max, TELEOP_LIMITS.linear_m_s.max) : null}
-        selected={linearCap} adjustable={canAdjustSpeed} onSelect={setLinearCap} />
+        selected={linearCap} adjustable={canAdjustSpeed} onSelect={value => selectTrim("linear", value)} />
       <SpeedSlider label="Angular speed limit" unit="rad/s" minimum={0.10}
         maximum={speedAvailable ? Math.min(limits.angular_rad_s.max, TELEOP_LIMITS.angular_rad_s.max) : null}
-        selected={angularCap} adjustable={canAdjustSpeed} onSelect={setAngularCap} />
-      <small>{state.phase === "idle" ? "Set before arming. Linear covers forward and reverse." : "End manual input to change speed."}</small>
+        selected={angularCap} adjustable={canAdjustSpeed} onSelect={value => selectTrim("angular", value)} />
+      <small>Linear covers forward and reverse. Trim changes ramp while manual input is held.</small>
     </div>
     <div className="manual-actions">
       <button className="btn primary" disabled={!!reason || state.phase !== "idle"} onClick={() => { state.arm(); panel.current?.focus(); }}>Arm manual drive</button>

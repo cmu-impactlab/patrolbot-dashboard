@@ -40,7 +40,7 @@ describe("manual drive isolated software input", () => {
     vi.stubGlobal("PointerEvent", MouseEvent);
     useTeleopStore.getState().end();
     useTeleopStore.setState({ phase: "idle", externalBusy: false, session: null, detail: null, deadman: false, linear: 0, angular: 0,
-      targetLinear: 0, targetAngular: 0, ramp: false });
+      targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false });
     useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null,
       stoppedGoal: null, pickMode: "none", allowUnlocalized: false });
     useAuthStore.setState({ user: { id: 1, username: "operator", display_name: "Operator", role: "operator", auth_mode: "local" } });
@@ -73,8 +73,8 @@ describe("manual drive isolated software input", () => {
     expect(frames).toEqual([]);
 
     keyboardStart(); ack();
-    expect(linear.disabled).toBe(true);
-    expect(angular.disabled).toBe(true);
+    expect(linear.disabled).toBe(false);
+    expect(angular.disabled).toBe(false);
     key("a"); hold(1600);
     expect(velocity().at(-1)).toMatchObject({ linear: .1, angular: .3 });
     fireEvent.keyUp(panel(), { key: "w" }); key("s");
@@ -95,6 +95,61 @@ describe("manual drive isolated software input", () => {
     fireEvent.pointerMove(stick, { clientX: 40, clientY: 120 });
     tick();
     expect(velocity().at(-1)).toMatchObject({ linear: -.05, angular: .15 });
+  });
+  it("slews an active joystick trim, does not transmit from the slider, and stops on release", () => {
+    render(<ManualDrive />);
+    arm();
+    const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
+    vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
+    fireEvent.pointerDown(stick, { button: 0, clientX: 120, clientY: 40 });
+    ack(); tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: .15, angular: -.35, deadman: true });
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    const frameCount = frames.length;
+    fireEvent.change(linear, { target: { value: ".10" } });
+    expect(frames).toHaveLength(frameCount);
+    // Another pointer sample during the transition cannot jump to the new cap.
+    fireEvent.pointerMove(stick, { clientX: 120, clientY: 40 });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.126);
+    expect(velocity().at(-1)!.angular).toBeCloseTo(-.35);
+    hold(800);
+    expect(velocity().at(-1)).toMatchObject({ linear: .05, angular: -.35, deadman: true });
+    fireEvent.change(linear, { target: { value: ".30" } });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.074);
+    fireEvent.pointerUp(stick);
+    fireEvent.change(linear, { target: { value: ".25" } });
+    tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_start")).toHaveLength(1);
+  });
+  it("ends a held keyboard session on Space release even when the trim has focus", () => {
+    render(<ManualDrive />); keyboardStart(); ack(); hold(1500);
+    const angular = screen.getByRole("slider", { name: "Angular speed limit" });
+    fireEvent.blur(panel(), { relatedTarget: angular });
+    expect(requests("teleop_stop")).toHaveLength(0);
+    fireEvent.change(angular, { target: { value: ".15" } });
+    hold(240);
+    expect(velocity().at(-1)).toMatchObject({ linear: .30, angular: 0, deadman: true });
+    fireEvent.keyUp(angular, { key: " " });
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_stop")).toHaveLength(1);
+  });
+  it("E-stop ends an in-progress trim and clearing it cannot replay the held target", () => {
+    render(<ManualDrive />); keyboardStart(); ack(); hold(1500);
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    fireEvent.change(linear, { target: { value: ".10" } });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeGreaterThan(.10);
+    act(() => useTelemetryStore.setState({ baseState: { ...base, estop_pressed: true } }));
+    const count = frames.length;
+    act(() => healthy());
+    fireEvent.change(linear, { target: { value: ".25" } });
+    tick(320);
+    expect(frames).toHaveLength(count);
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_start")).toHaveLength(1);
   });
   it("resets both manual trims after the robot or socket reconnects without sending input", () => {
     render(<ManualDrive />);

@@ -64,7 +64,14 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   const panel = page.getByRole("region", { name: "Manual drive keyboard panel" });
   await panel.focus();
   await page.keyboard.down("ArrowLeft"); await page.keyboard.down("Space");
-  await expect.poll(() => fixture.teleopFrames.some(frame => frame.deadman && frame.angular > 0)).toBe(true);
+  await expect.poll(() => fixture.teleopFrames.at(-1)?.angular).toBe(.30);
+  await angular.focus();
+  await angular.fill("0.15");
+  await expect(angular).toHaveAttribute("aria-valuetext", "0.15 rad/s");
+  await expect.poll(() => fixture.teleopFrames.at(-1)?.angular).toBe(.15);
+  expect(fixture.teleopFrames.some(frame => frame.deadman && frame.angular > .15 && frame.angular < .30)).toBe(true);
+  expect(fixture.commands.filter(command => command.command === "teleop_start")).toHaveLength(2);
+  // Space travels through the focused range input on release.
   await page.keyboard.up("Space"); await page.keyboard.up("ArrowLeft");
   await expect.poll(() => fixture.commands.filter(command => command.command === "teleop_stop").length).toBe(2);
   expect(fixture.teleopFrames.at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
