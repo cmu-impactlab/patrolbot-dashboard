@@ -41,11 +41,22 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   fixture.send("telemetry.pose", { x: 0, y: 0, yaw: 0, localized: false, linear_velocity: 0, angular_velocity: 0 }); // No AMCL prerequisite.
   fixture.send("telemetry.base_state", TELEOP_BASE);
   const arm = page.getByRole("button", { name: "Arm manual drive" });
-  await expect(arm).toBeEnabled(); await arm.click();
+  await expect(arm).toBeEnabled();
+  const linear = page.getByRole("slider", { name: "Linear speed limit" });
+  const angular = page.getByRole("slider", { name: "Angular speed limit" });
+  await linear.fill("0.1");
+  await angular.fill("0.3");
+  await expect(linear).toHaveAttribute("aria-valuetext", "0.10 m/s");
+  await expect(angular).toHaveAttribute("aria-valuetext", "0.30 rad/s");
+  expect(fixture.commands).toHaveLength(0);
+  await arm.click();
+  await expect(linear).toBeDisabled();
+  await expect(angular).toBeDisabled();
   const stick = page.getByRole("group", { name: "Hold joystick to drive" });
   const box = (await stick.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + 10); await page.mouse.down();
   await expect.poll(() => fixture.teleopFrames.some(frame => frame.deadman && frame.linear > 0)).toBe(true);
+  expect(fixture.teleopFrames.every(frame => frame.linear <= .10)).toBe(true);
   await page.mouse.up();
   await expect.poll(() => fixture.commands.filter(command => command.command === "teleop_stop").length).toBe(1);
   expect(fixture.teleopFrames.at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
@@ -53,7 +64,14 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   const panel = page.getByRole("region", { name: "Manual drive keyboard panel" });
   await panel.focus();
   await page.keyboard.down("ArrowLeft"); await page.keyboard.down("Space");
-  await expect.poll(() => fixture.teleopFrames.some(frame => frame.deadman && frame.angular > 0)).toBe(true);
+  await expect.poll(() => fixture.teleopFrames.at(-1)?.angular).toBe(.30);
+  await angular.focus();
+  await angular.fill("0.15");
+  await expect(angular).toHaveAttribute("aria-valuetext", "0.15 rad/s");
+  await expect.poll(() => fixture.teleopFrames.at(-1)?.angular).toBe(.15);
+  expect(fixture.teleopFrames.some(frame => frame.deadman && frame.angular > .15 && frame.angular < .30)).toBe(true);
+  expect(fixture.commands.filter(command => command.command === "teleop_start")).toHaveLength(2);
+  // Space travels through the focused range input on release.
   await page.keyboard.up("Space"); await page.keyboard.up("ArrowLeft");
   await expect.poll(() => fixture.commands.filter(command => command.command === "teleop_stop").length).toBe(2);
   expect(fixture.teleopFrames.at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
@@ -62,7 +80,7 @@ test("advanced tab samples pointer and focused keyboard and ends with exact zero
   for (const id of starts) {
     const samples = fixture.teleopFrames.filter(frame => frame.command_id === id);
     expect(samples.map(frame => frame.seq)).toEqual(samples.map((_, index) => index));
-    expect(samples.every(frame => Math.abs(frame.linear) <= .3 && Math.abs(frame.angular) <= .7)).toBe(true);
+    expect(samples.every(frame => Math.abs(frame.linear) <= .10 && Math.abs(frame.angular) <= .30)).toBe(true);
   }
 });
 
@@ -99,4 +117,42 @@ test("a second advanced tab has no inherited intent and simulated focus loss end
   await secondPage.keyboard.up("Space"); await secondPage.keyboard.up("a");
   await expect.poll(() => second.teleopFrames.at(-1)?.deadman).toBe(false);
   await secondPage.close();
+});
+
+test("on a touch screen, lifting a trim finger does not release the held joystick", async ({ page, context, browserName }, info) => {
+  test.skip(browserName !== "chromium" || !info.project.use.hasTouch, "Chromium multitouch fixture");
+  const fixture = await dashboardFixture(page, "operator", "Operator", false, ["web_teleop_v1"]);
+  await page.goto("/?advanced=1");
+  await expect(page.getByRole("heading", { name: "Advanced controls" })).toBeVisible();
+  await fixture.wsReady;
+  fixture.send("telemetry.base_state", TELEOP_BASE);
+  await page.getByRole("button", { name: "Arm manual drive" }).click();
+  const stick = page.getByRole("group", { name: "Hold joystick to drive" });
+  const linear = page.getByRole("slider", { name: "Linear speed limit" });
+  await stick.scrollIntoViewIfNeeded();
+  const pad = (await stick.boundingBox())!;
+  const range = (await linear.boundingBox())!;
+  const drive = { id: 1, x: Math.round(pad.x + pad.width / 2), y: Math.round(pad.y + 20) };
+  const trim = { id: 2, x: Math.round(range.x + range.width * .2), y: Math.round(range.y + range.height / 2) };
+  const cdp = await context.newCDPSession(page);
+  try {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [drive] });
+    await expect.poll(() => fixture.teleopFrames.at(-1)?.linear ?? 0).toBeGreaterThan(.18);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [drive, trim] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [drive, { ...trim, x: trim.x + 10 }] });
+    await expect.poll(() => {
+      const frame = fixture.teleopFrames.at(-1);
+      return frame?.deadman === true && frame.linear > 0 && frame.linear < .12;
+    }).toBe(true);
+    const beforeLift = fixture.teleopFrames.length;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [trim] });
+    await expect.poll(() => fixture.teleopFrames.length).toBeGreaterThan(beforeLift + 1);
+    expect(fixture.teleopFrames.slice(beforeLift).every(frame => frame.deadman && frame.linear > 0 && frame.linear < .12)).toBe(true);
+    expect(fixture.commands.filter(command => command.command === "teleop_start")).toHaveLength(1);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect.poll(() => fixture.teleopFrames.at(-1)?.deadman).toBe(false);
+    expect(fixture.teleopFrames.at(-1)).toMatchObject({ linear: 0, angular: 0 });
+  } finally {
+    await cdp.detach();
+  }
 });

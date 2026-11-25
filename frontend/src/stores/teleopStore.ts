@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { manualDriveReason, operationalLimits, rampToward, TELEOP_RAMP_STEP_ANGULAR, TELEOP_RAMP_STEP_LINEAR, TELEOP_TICK_MS } from "../lib/teleop";
+import { manualDriveReason, operationalLimits, rampToward, TELEOP_LIMITS, TELEOP_RAMP_STEP_ANGULAR, TELEOP_RAMP_STEP_LINEAR, TELEOP_TICK_MS } from "../lib/teleop";
 import type { CommandAckData, CommandResultData, TeleopVelocityData } from "../types/protocol";
 import { useAuthStore } from "./authStore";
 import { nextCommandSequence, sendCommandFrame, useCommandStore } from "./commandStore";
@@ -32,11 +32,13 @@ interface TeleopState {
   targetLinear: number;
   targetAngular: number;
   ramp: boolean;
+  trimRamp: boolean;
   deadman: boolean;
   detail: string | null;
   takeover: boolean;
   arm: (takeover?: boolean) => void;
   input: (linear: number, angular: number, deadman: boolean, takeover?: boolean, digital?: boolean) => void;
+  retargetHeldInput: (linear: number, angular: number) => void;
   rampTick: () => void;
   end: (detail?: string) => void;
   handleAck: (data: CommandAckData) => boolean;
@@ -93,8 +95,7 @@ function watch(): void {
   unsubscribe = [useTelemetryStore.subscribe(check), useAuthStore.subscribe(check), useCommandStore.subscribe(check), useTuningStore.subscribe(check)];
   timer = setInterval(() => {
     check();
-    // Digital input ramps from zero toward its target AFTER the session was
-    // accepted; analog input already set its proportional target directly.
+    // Digital input and live trim changes ramp only after session acceptance.
     useTeleopStore.getState().rampTick();
     const state = useTeleopStore.getState();
     if (state.phase === "active" && state.deadman && state.session) {
@@ -108,13 +109,13 @@ function bounded(value: number, limits: { min: number; max: number }): number {
 
 export const useTeleopStore = create<TeleopState>((set, get) => ({
   phase: "idle", externalBusy: false, generation: 0, session: null, linear: 0, angular: 0,
-  targetLinear: 0, targetAngular: 0, ramp: false, deadman: false, detail: null, takeover: false,
+  targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false, deadman: false, detail: null, takeover: false,
   arm: (takeover = false) => {
     if (get().phase !== "idle") return;
     const reason = manualDriveReason();
     if (reason) { set({ detail: reason }); return; }
     useCommandStore.setState({ stoppedGoal: null, allowUnlocalized: false, pickMode: "none", lastAttempt: null });
-    set({ phase: "armed", generation: get().generation + 1, detail: null, takeover });
+    set({ phase: "armed", generation: get().generation + 1, detail: null, takeover, trimRamp: false });
     watch();
   },
   input: (linear, angular, deadman, takeover = false, digital = false) => {
@@ -133,7 +134,12 @@ export const useTeleopStore = create<TeleopState>((set, get) => ({
     } else {
       // Analog deflection is proportional: a small stick offset is a small
       // target and never ramps toward the maximum.
-      set({ linear: boundedLinear, angular: boundedAngular, targetLinear: boundedLinear,
+      const state = get();
+      // Pointer moves during a trim transition must not jump to the new cap.
+      // Centering a stick axis still requests exact zero on that axis.
+      set({ linear: state.trimRamp && boundedLinear !== 0 ? state.linear : boundedLinear,
+        angular: state.trimRamp && boundedAngular !== 0 ? state.angular : boundedAngular,
+        targetLinear: boundedLinear,
         targetAngular: boundedAngular, ramp: false, deadman: true });
     }
     if (get().phase !== "armed") return;
@@ -147,12 +153,34 @@ export const useTeleopStore = create<TeleopState>((set, get) => ({
       get().end("Not connected to the dashboard server.");
     }
   },
+  retargetHeldInput: (linear, angular) => {
+    const state = get();
+    if (state.phase !== "active" || !state.deadman || !state.session) return;
+    const reason = manualDriveReason();
+    if (reason) { state.end(reason); return; }
+    const limits = operationalLimits();
+    if (!limits) return;
+    // This only replaces the target of an accepted, still-held input. It
+    // cannot send a frame or acquire/renew authority by itself.
+    // A trim is also not a direction input: never create a nonzero target on
+    // a neutral axis or switch its sign.
+    const target = (next: number, previous: number, axis: keyof typeof limits) => {
+      if (!Number.isFinite(next) || Math.sign(next) !== Math.sign(previous)) return previous;
+      return bounded(bounded(next, limits[axis]), TELEOP_LIMITS[axis]);
+    };
+    const targetLinear = target(linear, state.targetLinear, "linear_m_s");
+    const targetAngular = target(angular, state.targetAngular, "angular_rad_s");
+    if (targetLinear !== state.targetLinear || targetAngular !== state.targetAngular) {
+      set({ targetLinear, targetAngular, trimRamp: true });
+    }
+  },
   rampTick: () => {
     const state = get();
-    if (!state.ramp || !state.deadman || state.phase !== "active") return;
+    if ((!state.ramp && !state.trimRamp) || !state.deadman || state.phase !== "active") return;
     const linear = rampToward(state.linear, state.targetLinear, TELEOP_RAMP_STEP_LINEAR);
     const angular = rampToward(state.angular, state.targetAngular, TELEOP_RAMP_STEP_ANGULAR);
-    if (linear !== state.linear || angular !== state.angular) set({ linear, angular });
+    const trimRamp = state.trimRamp && (linear !== state.targetLinear || angular !== state.targetAngular);
+    if (linear !== state.linear || angular !== state.angular || trimRamp !== state.trimRamp) set({ linear, angular, trimRamp });
   },
   end: (detail = "Manual input ended — zero requested. This is not confirmation the robot stopped.") => {
     const state = get();
@@ -160,7 +188,7 @@ export const useTeleopStore = create<TeleopState>((set, get) => ({
     clearWatch();
     // Invalidate the generation before any later ACK or next sampling tick.
     set({ phase: state.session ? "stopping" : "idle", generation: state.generation + 1,
-      deadman: false, linear: 0, angular: 0, targetLinear: 0, targetAngular: 0, ramp: false, detail });
+      deadman: false, linear: 0, angular: 0, targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false, detail });
     if (state.session) {
       sample(state.session, false);
       stop(state.session);
@@ -191,7 +219,8 @@ export const useTeleopStore = create<TeleopState>((set, get) => ({
         session.lateClosed = true;
         if (state.phase === "idle" && state.session === null) {
           set({ phase: "stopping", session, generation: state.generation + 1,
-            deadman: false, linear: 0, angular: 0, targetLinear: 0, targetAngular: 0, ramp: false, detail: "Late start acceptance — zero requested; waiting for robot closure." });
+            deadman: false, linear: 0, angular: 0, targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false,
+            detail: "Late start acceptance — zero requested; waiting for robot closure." });
         }
         sample(session, false);
         stop(session); // accepted after release: close the now-accepted start.
@@ -203,7 +232,7 @@ export const useTeleopStore = create<TeleopState>((set, get) => ({
       clearWatch();
       session.startTerminal = true;
       set({ phase: "stopping", generation: state.generation + 1, deadman: false, linear: 0, angular: 0,
-        targetLinear: 0, targetAngular: 0, ramp: false,
+        targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false,
         detail: data.reason ?? "Manual drive was not accepted. Arm again to retry." });
       sample(session, false);
       finishIfResolved(session);

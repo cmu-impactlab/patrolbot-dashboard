@@ -24,15 +24,15 @@ export function operationalLimits() {
 }
 export const TELEOP_TICK_MS = 80; // 12.5 Hz, latest sample, never a movement queue.
 
-/** Keyboard/digital input ramps from zero over this long; analog never ramps. */
+/** Keyboard input and held trim changes use the same bounded sample slew. */
 export const TELEOP_RAMP_SECONDS = 1.0;
 export const TELEOP_RAMP_STEP_LINEAR = TELEOP_LIMITS.linear_m_s.max * (TELEOP_TICK_MS / 1000) / TELEOP_RAMP_SECONDS;
 export const TELEOP_RAMP_STEP_ANGULAR = TELEOP_LIMITS.angular_rad_s.max * (TELEOP_TICK_MS / 1000) / TELEOP_RAMP_SECONDS;
 
 /**
  * Move `current` toward `target` by at most `step`. Reversal passes through
- * zero; a small analog target never grows into the full ceiling because the
- * analog path sets its target directly and never ramps.
+ * zero. A small analog deflection remains a proportional target even while a
+ * live trim change is ramping.
  */
 export function rampToward(current: number, target: number, step: number): number {
   const delta = target - current;

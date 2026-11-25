@@ -27,6 +27,7 @@ type FixtureFrame = P.AnyFrame
   | P.Envelope<"robot.hello", P.HelloData>
   | P.Envelope<"telemetry.heartbeat", P.HeartbeatData>
   | P.Envelope<"command.request", P.CommandRequestData>
+  | P.Envelope<typeof P.AUTONOMOUS_SPEED_REQUEST, P.AutonomousSpeedRequestData>
   | P.TeleopVelocityFrame
   | P.Envelope<"server.hello_ack", { want_map: boolean }>;
 `;

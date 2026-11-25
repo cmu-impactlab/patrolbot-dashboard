@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "command.autonomous_speed_caps_receipt",
+  "robot_id": "patrolbot-01",
+  "sequence": 19,
+  "timestamp": "2026-11-23T00:00:01.000Z",
+  "data": {
+    "command_id": "de05da8a-c0db-49b6-a40d-f0d703f085f9",
+    "outcome": "applied",
+    "readback": { "profile": "Fast", "linear_m_s": 0.22, "angular_rad_s": 0.7 }
+  }
+}

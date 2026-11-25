@@ -6,7 +6,7 @@ shared/schemas/fixtures/ and are validated by both test suites.
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
@@ -271,6 +271,42 @@ CommandType = Literal[
 ]
 CommandOutcome = Literal["succeeded", "failed", "rejected", "canceled", "timeout"]
 
+AUTONOMOUS_SPEED_CAPABILITY = "autonomous_speed_caps_v1"
+AUTONOMOUS_SPEED_REQUEST = "command.autonomous_speed_caps_request"
+AUTONOMOUS_SPEED_RECEIPT = "command.autonomous_speed_caps_receipt"
+SpeedCapsId = Annotated[str, Field(
+    pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+)]
+
+
+class AutonomousSpeedSelection(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", allow_inf_nan=False, frozen=True)
+    profile: Literal["Slow", "Fast", "Custom"]
+    linear_m_s: float = Field(ge=0, le=0.26)
+    angular_rad_s: float = Field(ge=0, le=0.70)
+
+    @model_validator(mode="after")
+    def match_preset(self):
+        preset = {"Slow": (0.12, 0.40), "Fast": (0.22, 0.70)}.get(self.profile)
+        if preset is not None and (self.linear_m_s, self.angular_rad_s) != preset:
+            raise ValueError("named profiles require their exact caps")
+        return self
+
+
+class AutonomousSpeedRequestData(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+    command_id: SpeedCapsId
+    session_id: SpeedCapsId
+    selection: AutonomousSpeedSelection
+    operator_authorized: bool = False  # server-stamped, never authority from the browser
+
+
+class AutonomousSpeedReceiptData(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+    command_id: SpeedCapsId
+    outcome: Literal["applied", "unknown"]
+    readback: AutonomousSpeedSelection | None = None
+
 
 class CommandRequestData(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -463,6 +499,7 @@ class CapabilitiesData(BaseModel):
     This is presentation only: the server gates every command on its own.
     """
     capabilities: list[str] = Field(default_factory=list)
+    autonomous_speed_caps_session: SpeedCapsId | None = None
 
 
 class Subsystem(BaseModel):
@@ -505,6 +542,7 @@ class SnapshotData(BaseModel):
     path: PathData | None = None
     last_known_pose: GoalData | None = None
     capabilities: list[str] = Field(default_factory=list)
+    autonomous_speed_caps_session: SpeedCapsId | None = None
     events: list[EventData] = Field(default_factory=list)
     # How long ago the server received each slice above, in seconds. A snapshot
     # is a catch-up for a browser that just connected, and the values in it can
@@ -539,6 +577,8 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "command.ack": CommandAckData,
     "command.progress": CommandProgressData,
     "command.result": CommandResultData,
+    AUTONOMOUS_SPEED_REQUEST: AutonomousSpeedRequestData,
+    AUTONOMOUS_SPEED_RECEIPT: AutonomousSpeedReceiptData,
     # Bounded tuning transport over the existing authenticated robot socket.
     # It never travels through the ordinary command broker or teleop lease.
     "tuning.request": TuningRequestData,

@@ -5,6 +5,8 @@ import { canCommand, useAuthStore } from "../stores/authStore";
 import { registerCommandSender, useCommandStore } from "../stores/commandStore";
 import { useTeleopStore } from "../stores/teleopStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
+import { useTuningStore } from "../stores/tuningStore";
+import { normalizeSnapshot } from "../lib/tuning";
 import type { BaseStateData, TeleopVelocityData } from "../types/protocol";
 
 const base: BaseStateData = { session_generation: 1, link_connected: true, telemetry_age: 0,
@@ -38,7 +40,7 @@ describe("manual drive isolated software input", () => {
     vi.stubGlobal("PointerEvent", MouseEvent);
     useTeleopStore.getState().end();
     useTeleopStore.setState({ phase: "idle", externalBusy: false, session: null, detail: null, deadman: false, linear: 0, angular: 0,
-      targetLinear: 0, targetAngular: 0, ramp: false });
+      targetLinear: 0, targetAngular: 0, ramp: false, trimRamp: false });
     useCommandStore.setState({ active: null, lidarPending: null, lidarRecoveryRequired: false, lidarStateAfter: null,
       stoppedGoal: null, pickMode: "none", allowUnlocalized: false });
     useAuthStore.setState({ user: { id: 1, username: "operator", display_name: "Operator", role: "operator", auth_mode: "local" } });
@@ -47,12 +49,144 @@ describe("manual drive isolated software input", () => {
     healthy();
     frames = captureCommandSender();
   });
-  afterEach(() => { cleanup(); useTeleopStore.getState().end(); registerCommandSender(null); vi.useRealTimers(); vi.unstubAllGlobals(); });
+  afterEach(() => {
+    cleanup(); useTeleopStore.getState().end(); registerCommandSender(null);
+    useTuningStore.setState({ snapshot: null, receivedAt: null });
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  });
 
   it("opening the page never arms, enables motors or sends a command", () => {
     render(<ManualDrive />); tick();
     expect(frames).toEqual([]);
     expect(screen.getByText("Not armed")).toBeTruthy();
+  });
+  it("sets separate linear and angular limits without sending anything until armed", () => {
+    render(<ManualDrive />);
+    const linear = screen.getByRole<HTMLInputElement>("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole<HTMLInputElement>("slider", { name: "Angular speed limit" });
+    expect([linear.min, linear.max]).toEqual(["0.05", "0.3"]);
+    expect([angular.min, angular.max]).toEqual(["0.1", "0.7"]);
+    fireEvent.change(linear, { target: { value: ".10" } });
+    fireEvent.change(angular, { target: { value: ".30" } });
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.10 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.30 rad/s");
+    expect(frames).toEqual([]);
+
+    keyboardStart(); ack();
+    expect(linear.disabled).toBe(false);
+    expect(angular.disabled).toBe(false);
+    key("a"); hold(1600);
+    expect(velocity().at(-1)).toMatchObject({ linear: .1, angular: .3 });
+    fireEvent.keyUp(panel(), { key: "w" }); key("s");
+    fireEvent.keyUp(panel(), { key: "a" }); key("d");
+    hold(2200);
+    expect(velocity().at(-1)).toMatchObject({ linear: -.1, angular: -.3 });
+  });
+  it("scales each signed joystick axis proportionally to its own selected limit", () => {
+    render(<ManualDrive />);
+    fireEvent.change(screen.getByRole("slider", { name: "Linear speed limit" }), { target: { value: ".10" } });
+    fireEvent.change(screen.getByRole("slider", { name: "Angular speed limit" }), { target: { value: ".30" } });
+    arm();
+    const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
+    vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
+    fireEvent.pointerDown(stick, { button: 0, clientX: 120, clientY: 40 });
+    ack(); tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: .05, angular: -.15 });
+    fireEvent.pointerMove(stick, { clientX: 40, clientY: 120 });
+    tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: -.05, angular: .15 });
+  });
+  it("slews an active joystick trim, does not transmit from the slider, and stops on release", () => {
+    render(<ManualDrive />);
+    arm();
+    const stick = screen.getByRole("group", { name: "Hold joystick to drive" });
+    vi.spyOn(stick, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 160, height: 160 } as DOMRect);
+    fireEvent.pointerDown(stick, { button: 0, clientX: 120, clientY: 40 });
+    ack(); tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: .15, angular: -.35, deadman: true });
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    const frameCount = frames.length;
+    fireEvent.change(linear, { target: { value: ".10" } });
+    expect(frames).toHaveLength(frameCount);
+    // Another pointer sample during the transition cannot jump to the new cap.
+    fireEvent.pointerMove(stick, { clientX: 120, clientY: 40 });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.126);
+    expect(velocity().at(-1)!.angular).toBeCloseTo(-.35);
+    hold(800);
+    expect(velocity().at(-1)).toMatchObject({ linear: .05, angular: -.35, deadman: true });
+    fireEvent.change(linear, { target: { value: ".30" } });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeCloseTo(.074);
+    fireEvent.pointerUp(stick);
+    fireEvent.change(linear, { target: { value: ".25" } });
+    tick();
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_start")).toHaveLength(1);
+  });
+  it("ends a held keyboard session on Space release even when the trim has focus", () => {
+    render(<ManualDrive />); keyboardStart(); ack(); hold(1500);
+    const angular = screen.getByRole("slider", { name: "Angular speed limit" });
+    fireEvent.blur(panel(), { relatedTarget: angular });
+    expect(requests("teleop_stop")).toHaveLength(0);
+    fireEvent.change(angular, { target: { value: ".15" } });
+    hold(240);
+    expect(velocity().at(-1)).toMatchObject({ linear: .30, angular: 0, deadman: true });
+    fireEvent.keyUp(angular, { key: " " });
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_stop")).toHaveLength(1);
+  });
+  it("E-stop ends an in-progress trim and clearing it cannot replay the held target", () => {
+    render(<ManualDrive />); keyboardStart(); ack(); hold(1500);
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    fireEvent.change(linear, { target: { value: ".10" } });
+    tick();
+    expect(velocity().at(-1)!.linear).toBeGreaterThan(.10);
+    act(() => useTelemetryStore.setState({ baseState: { ...base, estop_pressed: true } }));
+    const count = frames.length;
+    act(() => healthy());
+    fireEvent.change(linear, { target: { value: ".25" } });
+    tick(320);
+    expect(frames).toHaveLength(count);
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_start")).toHaveLength(1);
+  });
+  it("resets both manual trims after the robot or socket reconnects without sending input", () => {
+    render(<ManualDrive />);
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole("slider", { name: "Angular speed limit" });
+    fireEvent.change(linear, { target: { value: ".10" } });
+    fireEvent.change(angular, { target: { value: ".30" } });
+    act(() => useTelemetryStore.setState({ wsConnected: false }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("Unavailable");
+    act(() => useTelemetryStore.setState({ wsConnected: true }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.30 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.70 rad/s");
+
+    fireEvent.change(linear, { target: { value: ".10" } });
+    act(() => useTelemetryStore.setState({ baseState: { ...base, session_generation: 2 } }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.30 m/s");
+    expect(frames).toEqual([]);
+  });
+  it("honors a robot ceiling below the selector minimum and refuses stale policy", () => {
+    useTelemetryStore.setState({ capabilities: ["web_teleop_v1", "robot_tuning_policy_v1"] });
+    const snapshot = { ...normalizeSnapshot(null), available: true, activeKnown: true,
+      effectiveLimits: { max_linear_m_s: .04, max_angular_rad_s: .08 } };
+    useTuningStore.setState({ snapshot, receivedAt: performance.now() });
+    render(<ManualDrive />);
+    const linear = screen.getByRole<HTMLInputElement>("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole<HTMLInputElement>("slider", { name: "Angular speed limit" });
+    expect(linear.disabled && angular.disabled).toBe(true);
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.04 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.08 rad/s");
+    keyboardStart(); ack(); key("a"); hold(400);
+    expect(velocity().at(-1)).toMatchObject({ linear: .04, angular: .08 });
+
+    act(() => useTuningStore.setState({ receivedAt: performance.now() - 6000 }));
+    tick();
+    expect(linear.getAttribute("aria-valuetext")).toBe("Unavailable");
+    expect(angular.getAttribute("aria-valuetext")).toBe("Unavailable");
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
   });
   it("waits for robot acceptance, then ramps bounded keyboard input with the exact start ID", () => {
     render(<ManualDrive />); keyboardStart(); tick(160);

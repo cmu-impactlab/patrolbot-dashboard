@@ -350,6 +350,53 @@ Service results retain request correlation; disable success also requires a
 motors-disabled readback. These repairs were recovered from the saved deployment
 source and web-bridge image, not inferred from mock behavior.
 
+## Autonomous speed caps (dashboard staging; robot support not commissioned)
+
+`autonomous_speed_caps_v1` is distinct from manual drive, undock, recovery, and
+every `robot_tuning_*` capability. Only the authenticated **first** `robot.hello`
+can declare it; re-announcements cannot add, remove, or change it for that
+socket. If the Pi loses the implementation's capability, it must disconnect
+and reconnect without advertising it. The server attaches a new `autonomous_speed_caps_session`
+UUID v4 to `state.capabilities` and `server.snapshot` for that connection. A
+token is a binding, not authorization. The dashboard sends nothing without the
+explicit capability and a fresh online binding. Current robots and the mock
+do not advertise the capability.
+
+| Type | Direction | Data |
+| --- | --- | --- |
+| `command.autonomous_speed_caps_request` | Browser → server → robot | UUID v4 `command_id`, UUID v4 `session_id` copied from `autonomous_speed_caps_session`, `selection`; `operator_authorized: true` stamped by the server only after admission |
+| `command.autonomous_speed_caps_receipt` | Robot → server → requesting browser | `command_id`, `outcome` (`applied` or `unknown`), `readback` (actual effective selection for `applied`, null for `unknown`) |
+
+`selection` and `readback` have only `profile`, `linear_m_s`, and `angular_rad_s`.
+Slow must be exactly `0.12` m/s and `0.40` rad/s; Fast must be exactly `0.22`
+m/s and `0.70` rad/s. Custom accepts finite numbers in `[0, 0.26]` m/s and
+`[0, 0.70]` rad/s. Fast is an initial UI draft, not a robot default. Really
+Fast (proposed `1.80` m/s) is unavailable and not part of the wire contract.
+
+The server uses current navigation command authority, rate limits, the
+existing operator lease check (no takeover or lease transfer), and audit and
+duplicate checks. It refuses a cap request while ordinary commands or manual
+input are active or another cap request is unresolved. The server never
+changes those other controls' lifecycles. Receipts must come from the bound
+authenticated robot socket, match the request exactly, and arrive within five
+seconds of publication admission. An ack, generic command success, error,
+missing or mismatched readback, stale connection, disconnect, or deadline is
+not confirmation. Ambiguous sent writes remain blocked on this socket; no
+automatic retry. The UI only shows brief confirmation of **that request**, not
+a persistent claim about current caps. There is no standalone read or
+startup persistence operation in this dashboard slice.
+
+Pi work is separate. Before advertising support, the robot must verify that
+the request is server-authorized and independently validate the same bounds;
+deduplicate it, serialize it with all relevant owners/configuration paths, and
+refuse if motion/admission state is unsafe or unknown. Apply only to the trusted
+autonomous cap consumer, without weakening other limits, issuing motion, or
+changing manual, recovery, or undock. Return `applied` only after fresh,
+post-apply readback from the actual effective-cap path—not by echoing input or
+reading stored desired values. Keep the capability unadvertised until that
+one-owner admission, application, and readback path is reviewed and verified.
+Existing Advanced tuning remains separate.
+
 ## Guarded robot tuning
 
 Browser tuning uses the authenticated HTTP tuning API, not a browser-origin

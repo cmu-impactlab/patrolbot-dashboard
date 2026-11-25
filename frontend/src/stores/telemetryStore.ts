@@ -96,6 +96,7 @@ export interface TelemetryState {
   poseSetThisSession: boolean;
   /** Capabilities the connected robot declared; gates the undock control. */
   capabilities: string[];
+  autonomousSpeedBinding: Readonly<{ robotId: string; session: string }> | null;
 
   setWsConnected: (connected: boolean) => void;
   handleFrame: (frame: AnyFrame) => void;
@@ -234,6 +235,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
   lastKnownPose: null,
   poseSetThisSession: false,
   capabilities: [],
+  autonomousSpeedBinding: null,
 
   setWsConnected: (connected) =>
     set(
@@ -248,6 +250,7 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
             // Whatever reconnects may be a different robot — the snapshot
             // that follows re-declares what it can do.
             capabilities: [],
+            autonomousSpeedBinding: null,
             // The measured twist is bound to a connection/origin; without one
             // it must read as "no measurement", never as a stop.
             motion: null,
@@ -316,6 +319,8 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
           events: data.events,
           lastKnownPose: data.last_known_pose ?? null,
           capabilities: data.capabilities ?? [],
+          autonomousSpeedBinding: typeof data.autonomous_speed_caps_session === "string"
+            ? { robotId: frame.robot_id, session: data.autonomous_speed_caps_session } : null,
           // Reconnect to the robot estimate without publishing a pose. Only
           // fresh, accepted recovery state can satisfy the local pose gate.
           trajectory: [],
@@ -355,7 +360,9 @@ export const useTelemetryStore = create<TelemetryState>((set, get) => ({
         set({ ...bump, health: frame.data });
         break;
       case "state.capabilities":
-        set({ ...bump, capabilities: frame.data.capabilities });
+        set({ ...bump, capabilities: frame.data.capabilities,
+          autonomousSpeedBinding: typeof frame.data.autonomous_speed_caps_session === "string"
+            ? { robotId: frame.robot_id, session: frame.data.autonomous_speed_caps_session } : null });
         break;
       case "event.append":
         set({ ...bump, events: [frame.data, ...get().events].slice(0, 200) });

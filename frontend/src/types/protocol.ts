@@ -200,6 +200,7 @@ export interface RobotStatusData {
  *  rather than silently missing, whenever it is on screen at all. */
 export interface CapabilitiesData {
   capabilities: string[];
+  autonomous_speed_caps_session?: string | null;
 }
 
 export interface Subsystem {
@@ -240,6 +241,7 @@ export interface SnapshotData {
   path?: PathData | null;
   last_known_pose?: GoalData | null;
   capabilities?: string[];
+  autonomous_speed_caps_session?: string | null;
   events: EventData[];
   /** Seconds since the server received each slice, so a browser joining late
    *  can age them from when they actually arrived rather than from now. */
@@ -304,6 +306,27 @@ export interface CommandResultData {
   detail?: string | null;
 }
 
+export const AUTONOMOUS_SPEED_CAPABILITY = "autonomous_speed_caps_v1";
+export const AUTONOMOUS_SPEED_REQUEST = "command.autonomous_speed_caps_request";
+export const AUTONOMOUS_SPEED_RECEIPT = "command.autonomous_speed_caps_receipt";
+export const AUTONOMOUS_SPEED_MAX_LINEAR = 0.26;
+export const AUTONOMOUS_SPEED_MAX_ANGULAR = 0.70;
+export type AutonomousSpeedSelection = Readonly<{
+  profile: "Slow" | "Fast" | "Custom";
+  linear_m_s: number;
+  angular_rad_s: number;
+}>;
+export interface AutonomousSpeedRequestData {
+  command_id: string;
+  session_id: string;
+  selection: AutonomousSpeedSelection;
+}
+export interface AutonomousSpeedReceiptData {
+  command_id: string;
+  outcome: "applied" | "unknown";
+  readback?: AutonomousSpeedSelection | null;
+}
+
 export type AnyFrame =
   | Envelope<"server.snapshot", SnapshotData>
   | Envelope<"state.connection", ConnectionData>
@@ -322,7 +345,8 @@ export type AnyFrame =
   | Envelope<"telemetry.map", MapData>
   | Envelope<"command.ack", CommandAckData>
   | Envelope<"command.progress", CommandProgressData>
-  | Envelope<"command.result", CommandResultData>;
+  | Envelope<"command.result", CommandResultData>
+  | Envelope<typeof AUTONOMOUS_SPEED_RECEIPT, AutonomousSpeedReceiptData>;
 
 /** Decode an RLE-encoded occupancy grid into a flat cell array. */
 export function decodeRle(rle: [number, number][]): Int8Array {
