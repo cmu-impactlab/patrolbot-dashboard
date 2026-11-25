@@ -73,6 +73,8 @@ it("sends an explicit bounded request and displays only the exact current robot 
   open();
   claim();
   expect(screen.getByRole("radio", { name: "Really Fast" }).matches(":disabled")).toBe(true);
+  expect(screen.getByText("Selected ceiling: 0.22 m/s, 0.70 rad/s")).toBeTruthy();
+  expect(status()).toContain("Confirmed autonomous ceiling: unknown");
   expect(fake.send).not.toHaveBeenCalled();
   fireEvent.click(sendButton());
   const sent = request();
@@ -88,7 +90,7 @@ it("sends an explicit bounded request and displays only the exact current robot 
   receive(AUTONOMOUS_SPEED_RECEIPT, {
     command_id: sent.data.command_id, outcome: "applied", readback: sent.data.selection,
   });
-  expect(status()).toContain("Robot confirmed this request: Applied Fast");
+  expect(status()).toContain("Robot confirmed this request: Fast profile ceiling");
   expect(useCommandStore.getState().active).toBeNull();
   act(() => vi.advanceTimersByTime(5_001));
   expect(status()).toContain("unknown");

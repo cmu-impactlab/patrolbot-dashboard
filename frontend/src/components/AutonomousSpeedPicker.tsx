@@ -19,7 +19,7 @@ type Props = {
 const PRESETS = {
   slow: { label: "Slow", linear_m_s: 0.12, angular_rad_s: 0.40 },
   fast: { label: "Fast", linear_m_s: 0.22, angular_rad_s: 0.70 },
-  "really-fast": { label: "Really Fast", linear_m_s: 2.00, angular_rad_s: 0.70 },
+  "really-fast": { label: "Really Fast", linear_m_s: 1.80 },
 } as const;
 
 function pickerMax(requested: number | undefined, ceiling: number): number | null {
@@ -104,7 +104,7 @@ export function AutonomousSpeedPicker({ limits, onStage, connected = false, disa
             {PRESETS[key].label}
           </label>
           {" — "}<span id={`${id}-${key}-details`}>
-            {displaySpeed(PRESETS[key])}
+            {key === "really-fast" ? `${displayNumber(PRESETS[key].linear_m_s)} m/s` : displaySpeed(PRESETS[key])}
             {key === "fast" && (connected ? " (initial selection)" : " (default)")}
             {key === "really-fast" && " (uncommissioned; unavailable)"}
           </span>
@@ -126,6 +126,8 @@ export function AutonomousSpeedPicker({ limits, onStage, connected = false, disa
       )}
       {(maxLinear === null || maxAngular === null) ? <p>Picker limits are unavailable; staging is disabled.</p>
         : !canStage && profile !== "custom" && <p>This preset exceeds the current picker limits.</p>}
+      {connected && <p className="subtext">Selected ceiling: {canStage
+        ? displaySpeed({ linear_m_s, angular_rad_s }) : "unavailable"}</p>}
       <p><button type="button" className="btn" disabled={!canStage || disabled} onClick={stage}>
         {connected ? "Request autonomous caps" : "Confirm and stage"}
       </button></p>

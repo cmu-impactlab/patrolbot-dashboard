@@ -17,7 +17,7 @@ describe("AutonomousSpeedPicker", () => {
     expect(screen.getByRole("radio", { name: "Fast", description: "0.22 m/s, 0.70 rad/s (default)" })).toBeTruthy();
     expect(screen.getByRole("radio", { name: "Slow", description: "0.12 m/s, 0.40 rad/s" })).toBeTruthy();
     const unavailable = screen.getByRole<HTMLInputElement>("radio", {
-      name: "Really Fast", description: "2.00 m/s, 0.70 rad/s (uncommissioned; unavailable)",
+      name: "Really Fast", description: "1.80 m/s (uncommissioned; unavailable)",
     });
     expect(unavailable.disabled).toBe(true);
     fireEvent.click(unavailable);

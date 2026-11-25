@@ -371,7 +371,7 @@ do not advertise the capability.
 Slow must be exactly `0.12` m/s and `0.40` rad/s; Fast must be exactly `0.22`
 m/s and `0.70` rad/s. Custom accepts finite numbers in `[0, 0.26]` m/s and
 `[0, 0.70]` rad/s. Fast is an initial UI draft, not a robot default. Really
-Fast (`2.00` m/s) is unavailable and not part of the wire contract.
+Fast (proposed `1.80` m/s) is unavailable and not part of the wire contract.
 
 The server uses current navigation command authority, rate limits, the
 existing operator lease check (no takeover or lease transfer), and audit and

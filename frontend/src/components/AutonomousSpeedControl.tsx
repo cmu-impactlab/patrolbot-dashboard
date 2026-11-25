@@ -18,8 +18,8 @@ export function AutonomousSpeedControl() {
     <p role="status">
       {result.phase === "pending" && binding ? "Waiting for the robot to confirm the caps."
         : result.phase === "applied" && binding
-          ? `Robot confirmed this request: Applied ${result.selection.profile} — ${displaySpeed(result.selection)}.`
-          : "Applied autonomous speed: unknown."}
+          ? `Robot confirmed this request: ${result.selection.profile} profile ceiling — ${displaySpeed(result.selection)}.`
+          : "Confirmed autonomous ceiling: unknown."}
     </p>
   </section>;
 }
