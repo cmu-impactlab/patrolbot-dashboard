@@ -53,6 +53,8 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const [stick, setStick] = useState<[number, number]>([0, 0]);
   const [linearCap, setLinearCap] = useState<number | null>(null);
   const [angularCap, setAngularCap] = useState<number | null>(null);
+  const driveSession = telemetry.baseState?.session_generation;
+  const { wsConnected, robotId } = telemetry;
   const keys = useRef(new Set<string>());
   const pointer = useRef<number | null>(null);
   const blockedKeys = useRef(new Set<string>());
@@ -64,6 +66,12 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
     setStick([0, 0]);
     useTeleopStore.getState().end();
   };
+
+  useEffect(() => {
+    // Trims are input preferences for this connection, never saved robot policy.
+    setLinearCap(null);
+    setAngularCap(null);
+  }, [wsConnected, robotId, driveSession, user?.id]);
 
   useEffect(() => {
     const blur = () => reset();

@@ -96,6 +96,23 @@ describe("manual drive isolated software input", () => {
     tick();
     expect(velocity().at(-1)).toMatchObject({ linear: -.05, angular: .15 });
   });
+  it("resets both manual trims after the robot or socket reconnects without sending input", () => {
+    render(<ManualDrive />);
+    const linear = screen.getByRole("slider", { name: "Linear speed limit" });
+    const angular = screen.getByRole("slider", { name: "Angular speed limit" });
+    fireEvent.change(linear, { target: { value: ".10" } });
+    fireEvent.change(angular, { target: { value: ".30" } });
+    act(() => useTelemetryStore.setState({ wsConnected: false }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("Unavailable");
+    act(() => useTelemetryStore.setState({ wsConnected: true }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.30 m/s");
+    expect(angular.getAttribute("aria-valuetext")).toBe("0.70 rad/s");
+
+    fireEvent.change(linear, { target: { value: ".10" } });
+    act(() => useTelemetryStore.setState({ baseState: { ...base, session_generation: 2 } }));
+    expect(linear.getAttribute("aria-valuetext")).toBe("0.30 m/s");
+    expect(frames).toEqual([]);
+  });
   it("honors a robot ceiling below the selector minimum and refuses stale policy", () => {
     useTelemetryStore.setState({ capabilities: ["web_teleop_v1", "robot_tuning_policy_v1"] });
     const snapshot = { ...normalizeSnapshot(null), available: true, activeKnown: true,
