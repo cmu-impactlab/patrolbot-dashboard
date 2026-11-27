@@ -421,17 +421,25 @@ class TelemetryHub:
         from ..protocol.messages import GoalData
 
         client = BrowserClient(websocket, user=user, source_ip=source_ip)
-        self.browsers.add(client)
+        session = self.primary()
+        lookup_robot_id = session.robot_id if session else self.settings.default_robot_id
+        saved_pose = None
+        if self.db is not None:
+            with contextlib.suppress(Exception):
+                saved = await self.db.get_last_pose(lookup_robot_id)
+                if saved is not None:
+                    saved_pose = GoalData(**saved)
+        # Finish the database await before capturing live telemetry. Queue the
+        # snapshot and subscribe without yielding, so no newer update can be
+        # delivered ahead of an older snapshot.
         session = self.primary()
         robot_id = session.robot_id if session else self.settings.default_robot_id
         snapshot = (session.state.snapshot() if session else
                     RobotState(self.settings, robot_id).snapshot())
-        if self.db is not None:
-            with contextlib.suppress(Exception):
-                saved = await self.db.get_last_pose(robot_id)
-                if saved is not None:
-                    snapshot.last_known_pose = GoalData(**saved)
+        if robot_id == lookup_robot_id and saved_pose is not None:
+            snapshot.last_known_pose = saved_pose
         client.offer(encode("server.snapshot", robot_id, self._next_seq(), snapshot), protected=True)
+        self.browsers.add(client)
         return client
 
     def browser_disconnected(self, client: BrowserClient) -> None:

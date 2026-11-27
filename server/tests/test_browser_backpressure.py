@@ -12,6 +12,8 @@ import asyncio
 
 import pytest
 
+from app.protocol.envelope import decode
+from app.protocol.messages import PathData
 from app.telemetry.hub import (
     PROTECTED_TYPES,
     QUEUE_LIMIT,
@@ -172,3 +174,33 @@ def test_publish_marks_frames_from_the_protected_set():
 
     protection = [protected for _frame, protected in client._queue]
     assert protection == [False, True]
+
+
+async def test_browser_snapshot_cannot_overwrite_path_received_while_joining():
+    lookup_started = asyncio.Event()
+    finish_lookup = asyncio.Event()
+
+    class DelayedDatabase:
+        async def get_last_pose(self, robot_id):
+            lookup_started.set()
+            await finish_lookup.wait()
+            return {"x": 1.0, "y": 2.0, "map_id": "floor", "map_revision": "r1"}
+
+    hub = TelemetryHub(Settings(), db=DelayedDatabase())
+    session = hub.get_or_create_state("patrolbot-01")
+    joining = asyncio.create_task(hub.browser_connected(FakeSocket()))
+    await asyncio.wait_for(lookup_started.wait(), timeout=2)
+    path = PathData(map_id="floor", map_revision="r1", points=[(3, 4), (5, 6)])
+    session.state.record_path(path)
+    hub.publish("telemetry.path", session.robot_id, path)
+    finish_lookup.set()
+    browser = await asyncio.wait_for(joining, timeout=2)
+
+    cleared = PathData(map_id="floor", map_revision="r1", points=[])
+    session.state.record_path(cleared)
+    hub.publish("telemetry.path", session.robot_id, cleared)
+
+    [(first, snapshot), (second, update)] = [decode(frame) for frame in queued(browser)]
+    assert first.type == "server.snapshot" and snapshot.path == path
+    assert snapshot.last_known_pose.map_id == "floor"
+    assert second.type == "telemetry.path" and update == cleared

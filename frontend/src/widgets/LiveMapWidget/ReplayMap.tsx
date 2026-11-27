@@ -1,8 +1,8 @@
 import { sameMap } from "../../lib/mapContext";
 import { Crosshair, Maximize, Minus, Plus } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { useMapQuery } from "../../api/queries";
-import { useReplayStore } from "../../stores/replayStore";
+import { memo, useEffect, useRef, useState } from "react";
+import { useReplayMapQuery } from "../../api/queries";
+import { useReplayStore, type ReplayPose } from "../../stores/replayStore";
 import { ROBOT_LENGTH_M, traceFootprint } from "../../lib/robotGeometry";
 import type { MapData } from "../../types/protocol";
 import { MapGesture } from "./gestures";
@@ -28,6 +28,9 @@ function drawReplayScene(
   view: View,
   map: MapData,
   bitmap: HTMLCanvasElement,
+  poses: ReplayPose[],
+  t: number,
+  here: ReplayPose,
 ): void {
   const width = ctx.canvas.clientWidth;
   const height = ctx.canvas.clientHeight;
@@ -39,11 +42,6 @@ function drawReplayScene(
   ctx.drawImage(bitmap, mapLeft, mapTop,
                 map.width * map.resolution * view.zoom,
                 map.height * map.resolution * view.zoom);
-
-  const replay = useReplayStore.getState();
-  const poses = replay.poses;
-  if (poses.length === 0) return;
-  const t = replay.now();
 
   // The whole route, faint: where the robot went over the entire recording.
   if (poses.length > 1) {
@@ -71,9 +69,7 @@ function drawReplayScene(
     else ctx.lineTo(sx, sy);
     drawn++;
   }
-  const candidate = replay.poseAt(t);
-  const here = sameMap(candidate, map) ? candidate : null;
-  if (here && drawn > 0) {
+  if (drawn > 0) {
     const [sx, sy] = worldToScreen(view, here.x, here.y);
     ctx.lineTo(sx, sy);
   }
@@ -96,8 +92,6 @@ function drawReplayScene(
   ctx.strokeStyle = cssVar("--muted");
   ctx.lineWidth = 2;
   ctx.stroke();
-
-  if (!here) return;
 
   // The robot at the playhead, at its true footprint size and filled — on this
   // canvas there is no live robot to confuse it with.
@@ -135,22 +129,12 @@ function drawReplayScene(
   }
 }
 
-export function ReplayMap({ theme }: { theme: string }) {
-  const tMs = useReplayStore(state => state.tMs);
-  const poseAt = useReplayStore(state => state.poseAt);
-  const [playingMap, setPlayingMap] = useState(() => poseAt(tMs)?.map_id);
-  useEffect(() => {
-    let raf = 0;
-    const tick = () => {
-      const replay = useReplayStore.getState();
-      setPlayingMap(replay.poseAt(replay.now())?.map_id);
-      raf = requestAnimationFrame(tick);
-    };
-    tick();
-    return () => cancelAnimationFrame(raf);
-  }, [tMs, poseAt]);
-  const context = { map_id: playingMap };
-  const mapQuery = useMapQuery(0, context?.map_id ?? undefined);
+export const ReplayMap = memo(function ReplayMap({ theme, mapId, revision }: {
+  theme: string;
+  mapId: string | null;
+  revision: string | null;
+}) {
+  const mapQuery = useReplayMapQuery(mapId, revision);
   const poses = useReplayStore((state) => state.poses);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View | null>(null);
@@ -203,6 +187,17 @@ export function ReplayMap({ theme }: { theme: string }) {
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+      const replay = useReplayStore.getState();
+      const t = replay.now();
+      const here = replay.poseAt(t);
+      // Playback can cross a floor boundary before React switches the query.
+      if (!here || !sameMap(here, map)) {
+        if (signatureRef.current) ctx.clearRect(0, 0, width, height);
+        signatureRef.current = "";
+        raf = requestAnimationFrame(render);
+        return;
+      }
+
       const bitmapKey = `${map.map_id}:${map.map_revision}:${theme}`;
       if (!bitmapRef.current || bitmapRef.current.key !== bitmapKey) {
         bitmapRef.current = { key: bitmapKey, bitmap: buildMapBitmap(map) };
@@ -214,12 +209,8 @@ export function ReplayMap({ theme }: { theme: string }) {
           : fitView(map, width, height);
       }
 
-      const replay = useReplayStore.getState();
-      const t = replay.now();
       if (follow) {
-        const candidate = replay.poseAt(t);
-        const here = sameMap(candidate, map) ? candidate : null;
-        if (here) viewRef.current = followView(viewRef.current, width, height, here.x, here.y);
+        viewRef.current = followView(viewRef.current, width, height, here.x, here.y);
       }
 
       // Repaint only when something moved — rescaling the full-resolution map
@@ -231,7 +222,7 @@ export function ReplayMap({ theme }: { theme: string }) {
       ].join("|");
       if (signature !== signatureRef.current) {
         signatureRef.current = signature;
-        drawReplayScene(ctx, view, map, bitmapRef.current.bitmap);
+        drawReplayScene(ctx, view, map, bitmapRef.current.bitmap, replay.poses, t, here);
       }
       raf = requestAnimationFrame(render);
     };
@@ -276,16 +267,18 @@ export function ReplayMap({ theme }: { theme: string }) {
   };
 
   if (!map) {
+    const message = !mapId || !revision ? "No map information was recorded for this part of the replay."
+      : mapQuery.isLoading ? "Loading recorded map…"
+      : `Recorded map (${mapId}) is unavailable. Playback can continue without it.`;
     return (
-      <div className="map-empty">
-        {mapQuery.isLoading ? "Loading map…" : "No map available to replay against."}
-      </div>
+      <div className="map-empty" role="status">{message}</div>
     );
   }
 
   return (
     <div className="map-container">
       <canvas
+        key={JSON.stringify([mapId, revision])}
         ref={canvasRef}
         className={`map-canvas ${panning ? "panning" : ""}`}
         aria-label="Recorded robot map"
@@ -316,4 +309,4 @@ export function ReplayMap({ theme }: { theme: string }) {
       <div className="map-meta">{map.name} · {map.resolution.toFixed(2)} m/cell</div>
     </div>
   );
-}
+});
