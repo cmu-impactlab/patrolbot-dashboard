@@ -1,4 +1,5 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { skipToken, useMutation, useQuery } from "@tanstack/react-query";
+import { sameMap } from "../lib/mapContext";
 import type { MapData } from "../types/protocol";
 import type { LayoutDoc, SavedLayout } from "../stores/layoutStore";
 
@@ -83,6 +84,23 @@ export function useMapQuery(mapVersion: number, mapId?: string) {
     queryFn: () => json<MapData>(mapId ? `/api/maps/${encodeURIComponent(mapId)}` : "/api/map"),
     staleTime: Infinity,
     retry: 2,
+  });
+}
+
+export function useReplayMapQuery(mapId: string | null, revision: string | null) {
+  return useQuery({
+    queryKey: ["replay-map", mapId, revision],
+    // The catalog can look up a floor by ID but may only have a newer revision.
+    // Never cache that raster as the recorded map or fall back to /api/map.
+    queryFn: mapId && revision ? async ({ signal }) => {
+      const map = await json<MapData>(`/api/maps/${encodeURIComponent(mapId)}`, { signal });
+      if (!sameMap(map, { map_id: mapId, map_revision: revision })) {
+        throw new Error("Recorded map revision unavailable");
+      }
+      return map;
+    } : skipToken,
+    staleTime: Infinity,
+    retry: false,
   });
 }
 

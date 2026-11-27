@@ -139,19 +139,29 @@ test("temporary map leaves widget selection unchanged and disconnect discards pr
 
 test("large replay supports playback, scrubbing, speed and rotation", async ({ page }) => {
   await dashboardFixture(page, "administrator", "Research", true);
+  const liveMapRequests: string[] = [];
+  page.on("request", request => {
+    if (new URL(request.url()).pathname === "/api/map") liveMapRequests.push(request.url());
+  });
   await page.goto("/?replay=1");
   await expect(page.getByLabel("Recorded robot map")).toBeVisible();
-  await page.getByTitle("Play").click();
-  await page.getByTitle("Pause").click();
+  await expect(page.getByText("Floor 1 · 0.05 m/cell")).toBeVisible();
+  await page.getByTitle("Pause", { exact: true }).click();
+  await page.getByTitle("Play", { exact: true }).click();
+  await page.getByTitle("Pause", { exact: true }).click();
   await page.locator('input[type="range"]').fill("100000");
   await page.locator("select").selectOption("2");
   await page.getByTitle("Jump to this moment").click();
   await expect(page.locator('input[type="range"]')).toHaveValue("120000");
+  await expect(page.getByText("Floor 2 · 0.05 m/cell")).toBeVisible();
   for (const size of [{width:390,height:844},{width:844,height:390},{width:1024,height:768}]) {
     await page.setViewportSize(size);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await expect(page.getByRole("button", { name: "Interact with map" })).toBeVisible();
   }
+  await page.getByTitle("Back to the start").click();
+  await expect(page.getByText("Floor 1 · 0.05 m/cell")).toBeVisible();
+  expect(liveMapRequests).toHaveLength(0);
 });
 
 test("widget library, minimize, move, resize and named dashboards work with touch controls", async ({ page }) => {

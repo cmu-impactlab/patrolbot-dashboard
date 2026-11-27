@@ -24,7 +24,7 @@ def hello_frame() -> str:
     })
 
 
-def base_state_frame(seq: int) -> str:
+def base_state_frame(seq: int, **context: str) -> str:
     """A healthy drive base. The status pill refuses to characterise a robot it
     has no current drive-base data for, so a robot that only says hello reads
     as needing attention rather than as ready/recording."""
@@ -35,12 +35,14 @@ def base_state_frame(seq: int) -> str:
         "bumpers_front": False, "bumpers_rear": False, "bumpers_valid": True,
         "odom_epoch_valid": True, "localization_recovery_required": False,
         "localization_seed_stamp_ns": 1,
+        **context,
     })
 
 
-def pose_frame(seq: int, x: float) -> str:
+def pose_frame(seq: int, x: float, **context: str) -> str:
     return encode("telemetry.pose", "patrolbot-01", seq, {
         "x": x, "y": 0.0, "yaw": 0.0, "linear_velocity": 0.3, "angular_velocity": 0.0,
+        **context,
     })
 
 
@@ -113,3 +115,41 @@ def test_open_recording_recovered_on_restart(tmp_path):
             robot.receive_text()
             assert client.post("/api/recordings/start", json={"name": "new"}).status_code == 200
             assert client.post("/api/recordings/stop").status_code == 200
+
+
+def test_recording_retains_map_identity_after_robot_changes_floor(client):
+    maps = {entry["map_id"]: {key: entry[key] for key in ("map_id", "map_revision")}
+            for entry in client.get("/api/maps").json()}
+    first, second = maps["cmuq-floor1"], maps["cmuq-floor2"]
+
+    def wait_for_floor(context):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            base = client.get("/api/snapshot").json()["base_state"]
+            if base and all(base[key] == value for key, value in context.items()):
+                return
+            time.sleep(0.05)
+        pytest.fail(f"robot's live map did not switch to {context['map_id']}")
+
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        robot.send_text(base_state_frame(1, **first))
+        wait_for_floor(first)
+        started = client.post("/api/recordings/start", json={"name": "Floor 1 patrol"})
+        assert started.status_code == 200
+        replay_url = f"/api/recordings/{started.json()['id']}?channels=pose"
+        robot.send_text(pose_frame(2, 1.0, **first))
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not client.get(replay_url).json()["samples"]:
+            time.sleep(0.05)
+        assert client.post("/api/recordings/stop").status_code == 200
+
+        robot.send_text(base_state_frame(3, **second))
+        wait_for_floor(second)
+        assert client.get("/api/map").json()["map_id"] == second["map_id"]
+
+    [pose] = client.get(replay_url).json()["samples"]
+    assert pose["data"]["map_id"] == first["map_id"]
+    assert pose["data"]["map_revision"] == first["map_revision"]

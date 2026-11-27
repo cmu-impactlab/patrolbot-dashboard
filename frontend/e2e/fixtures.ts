@@ -59,14 +59,24 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
     ] });
     if (url.pathname === "/api/map" || url.pathname.startsWith("/api/maps/")) {
       const width = largeMap ? 3192 : 120, height = largeMap ? 2205 : 120;
-      return route.fulfill({ json: { map_id: url.pathname.endsWith("cmuq-floor1") ? "cmuq-floor1" : "cmuq-floor2", map_revision: url.pathname.endsWith("cmuq-floor1") ? "test-first" : "test-revision", map_version: 1, name: "Test floor", width, height, resolution: 0.05, origin: { x: -3, y: -3, yaw: 0 }, rle: [[0, width * height]] } });
+      const first = url.pathname.endsWith("cmuq-floor1");
+      return route.fulfill({ json: { map_id: first ? "cmuq-floor1" : "cmuq-floor2", map_revision: first ? "test-first" : "test-revision", map_version: 1, name: first ? "Floor 1" : "Floor 2", width, height, resolution: 0.05, origin: { x: -3, y: -3, yaw: 0 }, rle: [[0, width * height]] } });
     }
     if (url.pathname === "/api/help-guide/status") return route.fulfill({ json: { should_prompt: false, current_version: 1, seen_version: 1 } });
     if (url.pathname.endsWith("export.zip")) return route.fulfill({ contentType: "application/zip", headers: { "Content-Disposition": 'attachment; filename="recording.zip"' }, body: "fixture export" });
     if (url.pathname === "/api/recordings/start") { rows = [...rows, { ...rows[0], id: 2, status: "recording", name: route.request().postDataJSON().name }]; return route.fulfill({ json: rows[1] }); }
     if (url.pathname === "/api/recordings/stop") { rows = rows.map(row => ({...row, status: "done"})); return route.fulfill({json: rows[1]}); }
     if (url.pathname === "/api/recordings/1" && route.request().method() === "DELETE") { rows = rows.filter(row => row.id !== 1); return route.fulfill({json: {}}); }
-    if (url.pathname === "/api/recordings/1") return route.fulfill({ json: { ...rows[0], samples: [...Array.from({ length: 6000 }, (_, i) => ({ ts: new Date(Date.parse(rows[0].started_at) + i * 100).toISOString(), kind: "pose", data: { x: i / 100, y: Math.sin(i / 100), yaw: 0, linear_velocity: 0.1 } })), {ts:"2026-09-16T08:02:00Z",kind:"event",data:{severity:"warning",title:"Recorded alert",message:"Touch to seek to this event"}}] } });
+    if (url.pathname === "/api/recordings/1") return route.fulfill({ json: { ...rows[0], samples: [
+      ...Array.from({ length: 6000 }, (_, i) => ({
+        ts: new Date(Date.parse(rows[0].started_at) + i * 100).toISOString(),
+        kind: "pose",
+        data: { map_id: i < 1200 ? "cmuq-floor1" : "cmuq-floor2",
+          map_revision: i < 1200 ? "test-first" : "test-revision",
+          x: i / 100, y: Math.sin(i / 100), yaw: 0, linear_velocity: 0.1 },
+      })),
+      {ts:"2026-09-16T08:02:00Z",kind:"event",data:{severity:"warning",title:"Recorded alert",message:"Touch to seek to this event"}},
+    ] } });
     if (url.pathname === "/api/history/battery") return route.fulfill({json: Array.from({length:30},(_,i)=>({ts:`2026-09-16T08:${String(i).padStart(2,"0")}:00Z`,voltage:25-i/100,percentage:85,current:0,charging:0}))});
     if (url.pathname === "/api/recordings") return route.fulfill({ json: rows });
     return route.fulfill({ json: [] });
