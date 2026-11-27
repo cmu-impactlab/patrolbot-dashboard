@@ -27,7 +27,7 @@ _TUNING_PREFIX = "tuning."
 def _raw_tuning_type(raw: str) -> str | None:
     """Cheaply detect a tuning frame before typed decoding.
 
-    Tuning has no browser-WebSocket mutation channel: read/save/apply go
+    Tuning has no browser-WebSocket channel: inspection goes
     through the authenticated HTTP endpoints. Any tuning frame arriving on
     /ws/ui is therefore refused, but only after re-verifying the session cookie
     *per message* so a socket that outlives its cookie cannot act.

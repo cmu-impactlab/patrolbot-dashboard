@@ -1,22 +1,4 @@
-import { normalizeSnapshot, parseTuningResponse } from "../lib/tuning";
-import type { CanonicalRequest, NormalizedSnapshot, TuningJob, TuningResponse } from "../lib/tuning";
-
-/**
- * HTTP client for the read/status/save/apply/redeploy/restore endpoints owned
- * by the API agent. The browser sends only canonical logical requests; the
- * server derives the actor and re-checks permissions on every mutation.
- */
-
-export class TuningHttpError extends Error {
-  status: number;
-  reason: string | null;
-  constructor(status: number, reason: string | null) {
-    super(reason ? `${reason} (HTTP ${status})` : `Tuning request failed (HTTP ${status})`);
-    this.name = "TuningHttpError";
-    this.status = status;
-    this.reason = reason;
-  }
-}
+import { normalizeSnapshot, type NormalizedSnapshot } from "../lib/tuning";
 
 async function reasonFrom(response: Response): Promise<string | null> {
   try {
@@ -64,27 +46,4 @@ export async function fetchTuningSnapshot(robotId: string): Promise<NormalizedSn
   } finally {
     clearTimeout(timeout);
   }
-}
-
-/** POST one canonical request. Caller maps failures to visible statuses. */
-export async function postTuningRequest(robotId: string, request: CanonicalRequest): Promise<TuningResponse> {
-  const response = await fetch(base(robotId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(request),
-  });
-  if (!response.ok) throw new TuningHttpError(response.status, await reasonFrom(response));
-  return parseTuningResponse(await response.json());
-}
-
-/** GET a durable job by id; used to resolve an unknown outcome, never to retry it. */
-export async function fetchTuningJob(robotId: string, jobId: string): Promise<TuningJob> {
-  const response = await fetch(`${base(robotId)}/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" } });
-  if (!response.ok) throw new TuningHttpError(response.status, await reasonFrom(response));
-  const body = (await response.json()) as unknown;
-  if (body && typeof body === "object" && "job" in body) {
-    const job = (body as { job: unknown }).job;
-    if (job && typeof job === "object") return job as TuningJob;
-  }
-  return (body && typeof body === "object" ? body : {}) as TuningJob;
 }

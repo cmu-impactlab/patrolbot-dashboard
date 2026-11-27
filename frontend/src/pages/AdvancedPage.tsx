@@ -11,7 +11,7 @@ export function AdvancedPage() {
   useTelemetrySocket();
   return <main className="advanced-page">
     <header className="advanced-header">
-      <div><h1>Advanced controls</h1><p>Saved targets and live robot values, side by side.</p></div>
+      <div><h1>Advanced controls</h1><p>Configured targets and live robot values, side by side.</p></div>
       <a className="btn" href="/">Dashboard</a>
     </header>
     <OperationFaultBanner />
