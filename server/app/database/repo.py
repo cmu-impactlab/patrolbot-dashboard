@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS recordings (
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     ended_at TEXT,
     status TEXT NOT NULL DEFAULT 'recording',
-    sample_count INTEGER NOT NULL DEFAULT 0
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    stop_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS recording_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,6 +168,8 @@ class Database:
             await self._db.execute(
                 "ALTER TABLE recordings ADD COLUMN channels TEXT NOT NULL "
                 "DEFAULT '[\"pose\",\"battery\",\"event\"]'")
+        if "stop_reason" not in columns:
+            await self._db.execute("ALTER TABLE recordings ADD COLUMN stop_reason TEXT")
         await self._migrate_events_primary_key()
         # Migration for command_audit identity columns (added during hardening).
         async with self._db.execute("PRAGMA table_info(command_audit)") as cur:
@@ -408,10 +411,12 @@ class Database:
         await self.db.commit()
         return await self.get_recording(cur.lastrowid)
 
-    async def stop_recording(self, recording_id: int) -> bool:
+    async def stop_recording(self, recording_id: int, reason: str = "manual") -> bool:
         cur = await self.db.execute(
-            "UPDATE recordings SET status = 'done', ended_at = datetime('now') "
-            "WHERE id = ? AND status = 'recording'", (recording_id,))
+            "UPDATE recordings SET status = 'done', ended_at = datetime('now'), "
+            "stop_reason = ?, sample_count = (SELECT COUNT(*) FROM recording_samples "
+            "WHERE recording_id = recordings.id) "
+            "WHERE id = ? AND status = 'recording'", (reason, recording_id))
         await self.db.commit()
         return cur.rowcount > 0
 
@@ -425,14 +430,14 @@ class Database:
 
     async def list_recordings(self, limit: int = 50) -> list[dict[str, Any]]:
         async with self.db.execute(
-            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count "
+            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count, stop_reason "
             "FROM recordings ORDER BY id DESC LIMIT ?", (limit,)
         ) as cur:
             return [self._recording_row(row) for row in await cur.fetchall()]
 
     async def get_recording(self, recording_id: int) -> dict[str, Any] | None:
         async with self.db.execute(
-            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count "
+            "SELECT id, robot_id, name, channels, started_at, ended_at, status, sample_count, stop_reason "
             "FROM recordings WHERE id = ?", (recording_id,)
         ) as cur:
             row = await cur.fetchone()
