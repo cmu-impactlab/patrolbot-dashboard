@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { manualDriveReason, operationalLimits, TELEOP_LIMITS, TELEOP_TICK_MS } from "../lib/teleop";
 import { useTeleopStore } from "../stores/teleopStore";
@@ -15,6 +15,11 @@ function editable(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && !!target.closest("input, textarea, select, [contenteditable=true]");
 }
 
+function driveKey(event: Pick<globalThis.KeyboardEvent, "key" | "code">): string {
+  if (event.code === "Space" || event.key === "Spacebar" || event.key === "Space") return " ";
+  return event.key.length === 1 ? event.key.toLowerCase() : event.key;
+}
+
 export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const user = useAuthStore(state => state.user);
   const telemetry = useTelemetryStore();
@@ -22,6 +27,9 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   const state = useTeleopStore();
   const [, refresh] = useState(0);
   const [stick, setStick] = useState<[number, number]>([0, 0]);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
+  const instructions = useId();
+  const joystick = useRef<HTMLDivElement>(null);
   const keys = useRef(new Set<string>());
   const pointer = useRef<number | null>(null);
   const blockedKeys = useRef(new Set<string>());
@@ -37,11 +45,16 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
   useEffect(() => {
     const blur = () => reset();
     const visibility = () => { if (document.visibilityState === "hidden") reset(); };
-    const keyup = (event: globalThis.KeyboardEvent) => blockedKeys.current.delete(event.key.length === 1 ? event.key.toLowerCase() : event.key);
+    const keyup = (event: globalThis.KeyboardEvent) => {
+      const key = driveKey(event);
+      // Only release a Space press owned by this panel.
+      if (key === " " && keys.current.has(" ")) reset();
+      blockedKeys.current.delete(key);
+    };
     const timer = setInterval(() => refresh(value => value + 1), TELEOP_TICK_MS);
     window.addEventListener("blur", blur);
     window.addEventListener("pagehide", blur);
-    window.addEventListener("keyup", keyup);
+    window.addEventListener("keyup", keyup, true);
     document.addEventListener("visibilitychange", visibility);
     const unsubscribe = useTeleopStore.subscribe(next => {
       if (!next.deadman && next.phase !== "armed") {
@@ -56,7 +69,7 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
       clearInterval(timer);
       window.removeEventListener("blur", blur);
       window.removeEventListener("pagehide", blur);
-      window.removeEventListener("keyup", keyup);
+      window.removeEventListener("keyup", keyup, true);
       document.removeEventListener("visibilitychange", visibility);
       useTeleopStore.getState().end();
     };
@@ -74,18 +87,19 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
     useTeleopStore.getState().input(linear * limits.linear_m_s.max, angular * limits.angular_rad_s.max, keys.current.has(" "), false, true);
   };
   const keyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (editable(event.target) || (event.target !== panel.current && event.target !== event.currentTarget.querySelector(".manual-joystick"))) return;
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    if (event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey
+      || editable(event.target) || (event.target !== panel.current && event.target !== joystick.current)) return;
+    const key = driveKey(event);
     if (key !== " " && !DIRECTIONS[key]) return;
     event.preventDefault();
-    if (!usable || event.repeat || blockedKeys.current.has(key) || pointer.current !== null) return;
+    if (!usable || (state.phase !== "armed" && !keys.current.has(" ")) || event.repeat || blockedKeys.current.has(key) || pointer.current !== null) return;
     keys.current.add(key);
     if (keys.current.has(" ")) sendKeys();
   };
   const keyUp = (event: KeyboardEvent<HTMLElement>) => {
-    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const key = driveKey(event);
     blockedKeys.current.delete(key);
-    if (editable(event.target)) return;
+    if (!keys.current.has(key)) return;
     keys.current.delete(key);
     if (key === " ") { event.preventDefault(); reset(); }
     else if (DIRECTIONS[key] && keys.current.has(" ")) { event.preventDefault(); sendKeys(); }
@@ -101,17 +115,22 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
     useTeleopStore.getState().input(y * limits.linear_m_s.max, -x * limits.angular_rad_s.max, true);
   };
 
-  return <section ref={panel} className={`manual-panel${compact ? " manual-compact" : ""}`} aria-label="Manual drive keyboard panel" tabIndex={0}
+  return <section ref={panel} className={`manual-panel${compact ? " manual-compact" : ""}`} aria-label="Manual drive keyboard panel" aria-describedby={instructions} tabIndex={0}
+    onFocus={event => setKeyboardFocused(event.target === panel.current || event.target === joystick.current)}
     onKeyDown={keyDown} onKeyUp={keyUp} onBlur={event => {
+      setKeyboardFocused(event.relatedTarget === panel.current || event.relatedTarget === joystick.current);
       if (useTeleopStore.getState().deadman || !event.currentTarget.contains(event.relatedTarget)) reset();
     }}>
     <h2>Manual drive</h2>
     <p role="status">{PHASE_COPY[state.phase]}</p>
     {reason && <p className="nav-disabled-banner">{reason}</p>}
     {state.detail && <p className="subtext">{state.detail}</p>}
-    <p id="manual-instructions">{compact
+    <p id={instructions}>{compact
       ? "Arm, then hold the joystick or Space + arrows/WASD. Release to end input; arm again for a new session."
       : "Arm, then hold and drag the joystick. For keyboard input, focus this panel and hold Space plus Arrow keys or WASD. Release Space or the pointer to end input. Arm again for a new session."}</p>
+    {usable && <p className="subtext">{keyboardFocused
+      ? "Keyboard focused — hold Space plus arrows or WASD."
+      : "Keyboard not focused — click or tab to the manual drive panel."}</p>}
     <div className="manual-actions">
       <button className="btn primary" disabled={!!reason || state.phase !== "idle"} onClick={() => { state.arm(); panel.current?.focus(); }}>Arm manual drive</button>
       {state.phase === "idle" && /in control of the robot|another operator|lease/i.test(state.detail ?? "") && <button className="btn danger" disabled={!!reason} onClick={() => { state.arm(true); panel.current?.focus(); }}>Take over</button>}
@@ -120,9 +139,9 @@ export function ManualDrive({ compact = false }: { compact?: boolean }) {
         else reset();
       }}>End manual input</button>
     </div>
-    <div className="manual-joystick" role="group" aria-label="Hold joystick to drive" aria-describedby="manual-instructions" aria-disabled={!usable} tabIndex={0}
+    <div ref={joystick} className="manual-joystick" role="group" aria-label="Hold joystick to drive" aria-describedby={instructions} aria-disabled={!usable} tabIndex={0}
       onPointerDown={event => {
-        if (!usable || pointer.current !== null || event.button !== 0) return;
+        if (!usable || pointer.current !== null || keys.current.has(" ") || event.button !== 0) return;
         event.preventDefault();
         keys.current.clear();
         pointer.current = event.pointerId;
