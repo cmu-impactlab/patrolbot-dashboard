@@ -77,6 +77,23 @@ describe("replay page", () => {
     expect(help.getAttribute("target")).toBe("_blank");
   });
 
+  it("discloses partial replay using replay counts and keeps the full export", async () => {
+    mockApi({ ...DETAIL, sample_count: 100000, truncated: true, available_sample_count: 24000 });
+    renderPage();
+    expect(await screen.findByRole("status")).toHaveProperty("textContent",
+      "Partial replay: showing 4 of 24000 available replay samples. Download data for the full recording.");
+    expect(screen.getByRole("link", { name: "Download data" }).getAttribute("href"))
+      .toBe("/api/recordings/4/export.zip");
+    expect(await screen.findByText("Floor 2 · 0.05 m/cell")).toBeTruthy();
+  });
+
+  it.each([false, undefined])("does not invent a partial notice for truncated=%s", async (truncated) => {
+    mockApi({ ...DETAIL, truncated, available_sample_count: 4 });
+    renderPage();
+    await screen.findByRole("heading", { name: "Corridor sweep" });
+    expect(screen.queryByText(/Partial replay/)).toBeNull();
+  });
+
   it("offers a transport for the recorded route", async () => {
     renderPage();
     const slider = await screen.findByLabelText("Replay position");

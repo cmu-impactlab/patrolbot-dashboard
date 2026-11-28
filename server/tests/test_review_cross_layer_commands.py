@@ -189,16 +189,30 @@ async def test_stop_pending_acceptance_waits_for_actual_terminal():
         await link.broker.shutdown()
 
 
-async def test_motor_disable_passes_both_reset_barriers():
+async def test_motor_disable_passes_both_reset_barriers(monkeypatch):
     link = CommandLink()
+    replies_handled = asyncio.Event()
+    original_timeout = link.broker._result_timeout
+
+    async def result_timeout(entry):
+        # This admission test releases its zero deadline after adapter replies.
+        await replies_handled.wait()
+        await original_timeout(entry)
+
+    monkeypatch.setattr(link.broker, "_result_timeout", result_timeout)
     try:
         link.broker.reset_pending["review-robot"] = "unresolved-reset"
         await link.broker.handle_browser_request(
             NS(user=LOCAL_USER, connected=True), NS(robot_id="review-robot"),
             CommandRequestData(command="motor_disable", command_id="disable-during-reset"))
         await link.flush()
+        replies_handled.set()
         assert link.disabled == ["disable-during-reset"]
-        assert link.results("disable-during-reset")[-1].outcome == "succeeded"
+        acks = [payload for kind, _robot, payload in link.frames
+                if kind == "command.ack" and payload.command_id == "disable-during-reset"]
+        assert len(acks) == 1 and acks[0].accepted
+        assert [result.outcome for result in link.results("disable-during-reset")] == ["succeeded"]
+        assert "disable-during-reset" not in link.broker.active
         assert link.broker.reset_pending["review-robot"] == "unresolved-reset"
     finally:
         await link.broker.shutdown()
