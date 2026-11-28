@@ -105,11 +105,12 @@ def test_open_recording_recovered_on_restart(tmp_path):
             robot.send_text(hello_frame())
             robot.receive_text()
             assert client.post("/api/recordings/start", json={"name": "left open"}).status_code == 200
-        # Exit without stopping: the row stays status='recording' in the DB.
+        # Exit without stopping explicitly: shutdown finalizes and drains it.
 
     with TestClient(create_app(settings)) as client:
         rows = client.get("/api/recordings").json()
-        assert rows[0]["status"] == "done"  # recovered at startup
+        assert rows[0]["status"] == "done"
+        assert rows[0]["stop_reason"] == "shutdown"
         with client.websocket_connect("/ws/robot?token=test-token") as robot:
             robot.send_text(hello_frame())
             robot.receive_text()
@@ -153,3 +154,59 @@ def test_recording_retains_map_identity_after_robot_changes_floor(client):
     [pose] = client.get(replay_url).json()["samples"]
     assert pose["data"]["map_id"] == first["map_id"]
     assert pose["data"]["map_revision"] == first["map_revision"]
+
+
+def test_cap_updates_authoritative_list_snapshot_and_event(client, monkeypatch):
+    import app.recordings.recorder as module
+    monkeypatch.setattr(module, "MAX_SAMPLES", 2)
+    hub = client.app.state.hub
+    published = []
+    publish = hub.publish
+
+    def capture(kind, robot_id, data):
+        published.append((kind, data))
+        publish(kind, robot_id, data)
+
+    monkeypatch.setattr(hub, "publish", capture)
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        robot.send_text(base_state_frame(1))
+        started = client.post("/api/recordings/start", json={"name": "cap"})
+        assert started.status_code == 200
+        robot.send_text(pose_frame(2, 0.0))
+        for _ in range(100):
+            row = client.get("/api/recordings").json()[0]
+            if row["status"] == "done":
+                break
+            time.sleep(0.01)
+        assert row["sample_count"] == 2
+        assert row["stop_reason"] == "sample_limit"
+        assert client.get("/api/snapshot").json()["robot_status"]["status"] != "recording"
+        events = [data for kind, data in published if kind == "event.append" and data.title == "Recording finished"]
+        assert len(events) == 1 and "100000-sample limit" in events[0].message
+        assert any(kind == "state.robot_status" and data.status != "recording" for kind, data in published)
+        assert client.post("/api/recordings/start", json={"name": "next", "channels": ["pose"]}).status_code == 200
+        result = client.post("/api/recordings/stop")
+        assert result.status_code == 200 and result.json()["stop_reason"] == "manual"
+
+
+def test_failed_save_is_retryable_through_api(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    db = client.app.state.db
+    original = db.stop_recording
+    with client.websocket_connect("/ws/robot?token=test-token") as robot:
+        robot.send_text(hello_frame())
+        robot.receive_text()
+        started = client.post("/api/recordings/start", json={"name": "retry"}).json()
+        monkeypatch.setattr(db, "stop_recording", AsyncMock(side_effect=OSError("disk failure")))
+        assert client.post("/api/recordings/stop").status_code == 503
+        assert client.get("/api/recordings").json()[0]["status"] == "stop_failed"
+        assert client.get(f"/api/recordings/{started['id']}").json()["status"] == "stop_failed"
+        assert client.post("/api/recordings/start", json={"name": "blocked"}).status_code == 409
+        assert client.delete(f"/api/recordings/{started['id']}").status_code == 409
+        assert not client.app.state.hub.primary().state.recording
+        monkeypatch.setattr(db, "stop_recording", original)
+        result = client.post("/api/recordings/stop")
+        assert result.status_code == 200 and result.json()["status"] == "done"
+        assert result.json()["id"] == started["id"]
