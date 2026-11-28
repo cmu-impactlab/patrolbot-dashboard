@@ -166,6 +166,13 @@ def test_replay_caps_its_response_and_says_so(client, monkeypatch):
     assert len(body["samples"]) == 10
     assert body["truncated"] is True
     assert body["available_sample_count"] == 40
+    csv = client.get(f"/api/recordings/{recording_id}/export.csv")
+    assert csv.status_code == 200 and len(csv.text.splitlines()) == 41
+    archive = client.get(f"/api/recordings/{recording_id}/export.zip")
+    assert archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+        pose_file = next(name for name in bundle.namelist() if name.endswith("/pose.csv"))
+        assert len(bundle.read(pose_file).splitlines()) == 41
 
 
 def test_an_ordinary_recording_is_not_marked_truncated(client):
