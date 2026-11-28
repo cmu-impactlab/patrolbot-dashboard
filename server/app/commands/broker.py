@@ -58,7 +58,6 @@ COMMAND_LABELS = {
 GOAL_REQUIRED = {"navigate_to_pose", "set_initial_pose"}
 MOTION_COMMANDS = {"navigate_to_pose", "undock"}
 SAFE_END_COMMANDS = {"stop", "motor_disable", "teleop_stop"}
-BOUND_COMMANDS = MOTION_COMMANDS | GOAL_REQUIRED | {"teleop_start", "teleop_stop"}
 
 
 @dataclass
@@ -69,6 +68,8 @@ class ActiveCommand:
     initiator: Any = None
     acked: bool = False
     uncertain: bool = False
+    uncertainty_detail: str | None = None
+    publication_started: bool = False
     robot_session: Any = None
     robot_websocket: Any = None
     cancel_requested: bool = False
@@ -319,11 +320,13 @@ class CommandBroker:
                 await self.hub.db.complete_command_audit(command_id, "rejected", "Command authority expired during admission.")
             return
 
+        retired_intents = False
         if command == "software_reset":
             self.teleop.owners.pop(robot_id, None)
             # Retire old intents; the fixed host restart stops their publishers.
             for old in list(self.active.values()):
                 if old.robot_id == robot_id:
+                    retired_intents = True
                     if old.command == "set_lidar_power":
                         self.lidar_recovery_required.add(robot_id)
                     await self._finish(old, "timeout" if old.uncertain else "canceled",
@@ -334,13 +337,23 @@ class CommandBroker:
                               robot_id=envelope.robot_id, initiator=client,
                               robot_session=session, robot_websocket=robot_websocket)
         self.active[command_id] = entry
-        if command in BOUND_COMMANDS and (
-                self.hub.robots.get(robot_id) is not session
-                or session.websocket is not robot_websocket):
-            if command == "teleop_start":
+
+        async def refuse_publication(reason: str) -> None:
+            if command in {"teleop_start", "teleop_stop"}:
                 self.teleop.terminal(entry)
-            self._reject(robot_id, command_id, "Robot connection changed during admission; command was not sent.")
-            await self._finish(entry, "rejected", "Robot connection changed during admission; command was not sent.")
+            self._reject(robot_id, command_id, reason)
+            if command == "software_reset" and retired_intents:
+                # Retiring local intents did not stop their remote publishers.
+                self.reset_pending[robot_id] = command_id
+                entry.cancel_timers()
+                await self._mark_uncertain(entry, reason +
+                    " Earlier operations remain unresolved. Confirm a new authorized reset.")
+            else:
+                await self._finish(entry, "rejected", reason)
+
+        if (self.hub.robots.get(robot_id) is not session
+                or session.websocket is not robot_websocket):
+            await refuse_publication("Robot connection changed during admission; command was not sent.")
             return
         if command == "teleop_start":
             owner = self.teleop.owners.get(robot_id)
@@ -360,15 +373,7 @@ class CommandBroker:
         if command == "set_lidar_power":
             self.lidar_pending[robot_id] = command_id
         if not self.can_command(client) and not self.can_end(client, command):
-            if command == "software_reset":
-                # The explicit recovery already replaced older intents. Keep
-                # its barrier, but do not publish using authority lost during
-                # the audit completions above.
-                await self._mark_uncertain(entry, "Reset was not sent: command authority expired during recovery. Confirm a new authorized reset.")
-            else:
-                if command in {"teleop_start", "teleop_stop"}:
-                    self.teleop.terminal(entry)
-                await self._close_out(entry, "rejected", "Command authority expired before publication.")
+            await refuse_publication("Command authority expired before publication; command was not sent.")
             return
         entry.timers.append(asyncio.create_task(self._ack_timeout(entry)))
         # An accepted destination is a Nav2 action, not a short RPC. Leave it
@@ -396,49 +401,48 @@ class CommandBroker:
                 reason = self._validate_robot_state(session, command, excluding=entry)
                 if reason is not None:
                     return reason
+            entry.publication_started = True
             await entry.robot_websocket.send_text(frame)
             return None
 
         try:
-            if command in {"teleop_start", "teleop_stop"} | MOTION_COMMANDS:
-                refusal = await asyncio.wait_for(send_bound(),
-                    timeout=(max(.001, self.ack_timeout_s) if command in MOTION_COMMANDS
-                             else max(.001, min(.3, self.hub.settings.teleop_send_timeout_s))))
-                if refusal is not None:
-                    if command in {"teleop_start", "teleop_stop"}:
-                        self.teleop.terminal(entry)
-                    self._reject(robot_id, command_id, refusal)
-                    await self._finish(entry, "rejected", refusal)
-                    return
-                if session.websocket is not entry.robot_websocket or self.hub.robots.get(robot_id) is not session:
-                    raise ConnectionError("robot session changed during publication")
-            else:
-                await session.websocket.send_text(frame)
-        except asyncio.CancelledError:
-            # Cancellation of this Python task says nothing about whether the
-            # remote action received its request. Do not leave a sent goal
-            # running without cancellation or release its retained ownership.
-            if command in MOTION_COMMANDS:
-                await self._motion_uncertain(entry, "Motion publication was interrupted; its outcome is unknown.")
-            elif command in {"teleop_start", "teleop_stop"}:
-                await self.teleop.revoke(robot_id, "Manual publication was interrupted.")
-                await self._mark_uncertain(entry, "Manual publication was interrupted; no physical stop is confirmed.")
-            raise
-        except Exception as exc:  # socket died between the check and the send
+            refusal = await asyncio.wait_for(send_bound(),
+                timeout=(max(.001, self.ack_timeout_s) if command in MOTION_COMMANDS
+                         else max(.001, min(.3, getattr(self.hub.settings, "teleop_send_timeout_s", .3)))))
+            if refusal is not None:
+                await refuse_publication(refusal)
+                return
+            if session.websocket is not entry.robot_websocket or self.hub.robots.get(robot_id) is not session:
+                raise ConnectionError("robot session changed during publication")
+        except (Exception, asyncio.CancelledError) as exc:
             log.warning("failed to forward %s to robot: %s", command_id, exc)
-            if command in MOTION_COMMANDS:
+            # Task cancellation propagates, but cannot prove a dispatched frame
+            # was not received. Only the pre-send path can reject it outright.
+            if self.active.get(command_id) is not entry:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return
+            if not entry.publication_started:
+                await refuse_publication("Publication interrupted before sending; command was not sent.")
+            elif command in MOTION_COMMANDS:
                 await self._motion_uncertain(entry, "Motion publication outcome unknown after a send failure.")
             elif command in {"teleop_start", "teleop_stop"}:
-                await self.teleop.revoke(robot_id, "Manual publication outcome unknown.", issue_stop=False)
+                await self.teleop.revoke(robot_id, "Manual publication outcome unknown.",
+                                         issue_stop=isinstance(exc, asyncio.CancelledError))
                 await self._mark_uncertain(entry, "Manual publication outcome unknown; no physical stop is confirmed. Wait for the robot result or explicitly reset.")
             elif command == "set_lidar_power":
-                await self._mark_uncertain(entry, "LiDAR power outcome is unknown after the connection dropped. Wait for its result; do not retry.")
+                await self._mark_uncertain(entry, "LiDAR power publication was not confirmed. Its outcome is unknown. Wait for its result; do not retry.")
             elif command == "software_reset":
                 await self._mark_uncertain(entry,
-                    "The robot connection dropped while sending. The reset outcome is unknown; "
+                    "Reset publication was not confirmed. The reset outcome is unknown; "
                     "confirm a new reset to try again.")
             else:
-                await self._close_out(entry, "failed", "The robot connection dropped while sending.")
+                await self._request_cancel(entry)
+                await self._mark_uncertain(entry,
+                    "Command publication outcome unknown; no physical stop or completion is confirmed. "
+                    "No automatic retry; wait for the robot result.")
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return
 
         await self.hub.emit_event(
@@ -454,9 +458,16 @@ class CommandBroker:
         if entry is None or entry.robot_id != session.robot_id:
             log.warning("dropping %s for unknown/closed command", envelope.type)
             return
-        if entry.command in BOUND_COMMANDS and (
-                entry.robot_session is not session or entry.robot_websocket is not session.websocket
-                or self.hub.robots.get(session.robot_id) is not session):
+        if self.hub.robots.get(session.robot_id) is not session:
+            return
+        if entry.command == "software_reset" and not entry.publication_started:
+            return
+        # The host supervisor persists reset status and re-emits its matching
+        # result after bridge restart (SystemResetClient._report).
+        reset_result = (entry.command == "software_reset" and isinstance(payload, CommandResultData)
+                        and self.reset_pending.get(entry.robot_id) == entry.command_id)
+        if not reset_result and (entry.robot_session is not session
+                                 or entry.robot_websocket is not session.websocket):
             return
 
         if isinstance(payload, CommandAckData):
@@ -495,7 +506,9 @@ class CommandBroker:
                     return
                 self.teleop.terminal(entry)
             if entry.command in {"software_reset", "set_lidar_power"} and payload.outcome == "timeout":
-                await self._mark_uncertain(entry, payload.detail or "Reset outcome unknown; a new reset needs confirmation.")
+                await self._mark_uncertain(entry, payload.detail or (
+                    "Reset outcome unknown; a new reset needs confirmation." if entry.command == "software_reset"
+                    else "LiDAR power outcome unknown. Wait for the robot result; do not retry."))
                 return
             if entry.command == "set_lidar_power":
                 self.lidar_state_after[entry.robot_id] = time.monotonic()
@@ -620,7 +633,7 @@ class CommandBroker:
 
     async def _ack_timeout(self, entry: ActiveCommand) -> None:
         await asyncio.sleep(self.ack_timeout_s)
-        if self.active.get(entry.command_id) is not entry:
+        if self.active.get(entry.command_id) is not entry or entry.uncertain:
             return
         if not entry.acked:
             if entry.command in MOTION_COMMANDS:
@@ -646,6 +659,10 @@ class CommandBroker:
         await asyncio.sleep(self.result_timeout_s)
         if self.active.get(entry.command_id) is not entry:
             return
+        if entry.uncertainty_detail is not None and entry.command not in (
+                MOTION_COMMANDS | {"software_reset", "set_lidar_power", "teleop_start", "teleop_stop"}):
+            await self._finish(entry, "timeout", entry.uncertainty_detail)
+            return
         if entry.command in MOTION_COMMANDS:
             await self._motion_uncertain(entry, "Motion did not report a terminal result in time.")
             return
@@ -664,9 +681,10 @@ class CommandBroker:
 
     async def _mark_uncertain(self, entry: ActiveCommand, detail: str) -> None:
         """Hold ordinary commands; an explicit reset may supersede an unknown result."""
-        if self.active.get(entry.command_id) is not entry:
+        if self.active.get(entry.command_id) is not entry or entry.uncertainty_detail is not None:
             return
         entry.uncertain = True
+        entry.uncertainty_detail = detail
         if entry.command in {"teleop_start", "teleop_stop"}:
             owner = self.teleop.owners.get(entry.robot_id)
             if owner is not None:

@@ -45,7 +45,10 @@ async def test_uncertain_robot_result_keeps_reset_barrier_and_later_success_reso
     broker=CommandBroker(hub)
     entry=ActiveCommand(command_id='reset-id',command='software_reset',robot_id='robot')
     broker.active[entry.command_id]=entry;broker.reset_pending['robot']=entry.command_id
-    session=SimpleNamespace(robot_id='robot')
+    session=SimpleNamespace(robot_id='robot',websocket=object())
+    hub.robots['robot']=session
+    entry.robot_session=session;entry.robot_websocket=session.websocket
+    entry.publication_started=True
     envelope=SimpleNamespace(type='command.result')
     await broker.handle_robot_reply(session,envelope,CommandResultData(command_id='reset-id',outcome='timeout'))
     assert broker.reset_pending['robot']=='reset-id' and 'reset-id' in broker.active
