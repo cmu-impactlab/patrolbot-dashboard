@@ -24,6 +24,15 @@ const CHANNELS: { id: string; label: string; default: boolean }[] = [
   { id: "event", label: "Alerts", default: true },
 ];
 
+const STOP_REASONS: Record<string, string> = {
+  sample_limit: "Reached the 100000-sample limit.",
+  sample_limit_with_loss: "Reached the 100000-sample limit; recorded data may be incomplete.",
+  write_error: "A sample write failed; recorded data may be incomplete.",
+  queue_full: "The recording writer queue filled; recorded data may be incomplete.",
+  shutdown: "Finished when the server shut down.",
+  restart: "Recovered after a server restart; recorded data may be incomplete.",
+};
+
 const CHANNEL_LABELS = new Map(CHANNELS.map((channel) => [channel.id, channel.label]));
 
 /** SQLite datetime('now') → parseable ISO ("YYYY-MM-DD HH:MM:SS" is UTC). */
@@ -126,7 +135,7 @@ export function RecordingsWidget() {
   const [error, setError] = useState("");
 
   const rows = listQuery.data ?? [];
-  const activeRow = rows.find((row) => row.status === "recording") ?? null;
+  const activeRow = rows.find((row) => row.status !== "done") ?? null;
 
   const toggleChannel = (id: string) =>
     setChannels((current) =>
@@ -150,11 +159,14 @@ export function RecordingsWidget() {
       {activeRow ? (
         <div className="rec-active">
           <span className="rec-dot" />
-          Recording “{activeRow.name}” — {activeRow.sample_count} samples
+          {activeRow.status === "stop_failed"
+            ? `Could not finalize “${activeRow.name}”. Retry Stop; new recordings are blocked.`
+            : activeRow.status === "stopping" ? `Finishing “${activeRow.name}”…`
+            : `Recording “${activeRow.name}” — ${activeRow.sample_count} samples`}
           <div style={{ flex: 1 }} />
-          <button className="btn danger" onClick={finish} disabled={!mayRecord}
+          <button className="btn danger" onClick={finish} disabled={!mayRecord || stopMutation.isPending || activeRow.status === "stopping"}
                   title={mayRecord ? "Stop recording" : readOnlyNote}>
-            <Square size={13} /> Stop
+            <Square size={13} /> {activeRow.status === "stop_failed" ? "Retry Stop" : "Stop"}
           </button>
         </div>
       ) : (
@@ -207,6 +219,7 @@ export function RecordingsWidget() {
             <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{row.name}</div>
             <div className="subtext">
               {formatTime(iso(row.started_at))} · {durationLabel(row)} · {row.sample_count} samples
+              {row.stop_reason && STOP_REASONS[row.stop_reason] && <> · {STOP_REASONS[row.stop_reason]}</>}
             </div>
           </div>
           <button className="btn icon" title="Replay in a new tab"

@@ -10,7 +10,8 @@ export interface RecordingRow {
   channels?: string[];
   started_at: string;
   ended_at: string | null;
-  status: "recording" | "done";
+  status: "recording" | "stopping" | "stop_failed" | "done";
+  stop_reason?: string | null;
   sample_count: number;
 }
 

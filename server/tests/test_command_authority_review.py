@@ -556,25 +556,46 @@ async def test_stale_id_and_old_replies_never_resolve_explicit_recovery(lab):
     assert lab.hub.commands.reset_pending[ROBOT] == reset
 
 
-async def test_duplicate_id_emergency_race_after_database_await(lab):
+@pytest.mark.parametrize("ack_order", ["accepted_first", "duplicate_first"])
+async def test_duplicate_id_emergency_race_after_database_await(lab, monkeypatch, ack_order):
     entered, release = asyncio.Event(), asyncio.Event()
+    accepted, duplicate = asyncio.Event(), asyncio.Event()
     count = 0
+    command_id = str(uuid.uuid4())
 
     async def recorded(command_id):
         nonlocal count
         count += 1
-        if count == 2:
+        second = count == 2
+        if second:
             entered.set()
         await release.wait()
+        if second and ack_order == "accepted_first":
+            await accepted.wait()
         return False
 
     async def noop(*args, **kwargs):
         pass
 
+    original_send, original_publish = lab.robot.send_text, lab.hub.publish
+
+    async def send(raw):
+        await original_send(raw)
+        if ack_order == "duplicate_first":
+            await duplicate.wait()
+        await reply(lab, command_id)
+        accepted.set()
+
+    def publish(kind, robot_id, payload):
+        original_publish(kind, robot_id, payload)
+        if kind == "command.ack" and payload.command_id == command_id and not payload.accepted:
+            duplicate.set()
+
+    monkeypatch.setattr(lab.robot, "send_text", send)
+    monkeypatch.setattr(lab.hub, "publish", publish)
     lab.hub.db = SimpleNamespace(command_recorded=recorded, add_command_audit=noop,
                                 add_command_rejection=noop, complete_command_audit=noop,
                                 add_event=noop)
-    command_id = str(uuid.uuid4())
     one = asyncio.create_task(request(lab, "stop", command_id=command_id))
     two = asyncio.create_task(request(lab, "stop", command_id=command_id))
     try:
@@ -582,9 +603,12 @@ async def test_duplicate_id_emergency_race_after_database_await(lab):
         release.set()
         await asyncio.gather(one, two)
         assert sum(frame["type"] == "command.request" for frame in lab.robot.frames) == 1
-        assert "Duplicate" in browser_frames(lab.client)[-1]["data"]["reason"] or any(
-            frame["type"] == "command.ack" and "Duplicate" in frame["data"].get("reason", "")
-            for frame in browser_frames(lab.client))
+        acks = [frame["data"] for frame in browser_frames(lab.client)
+                if frame["type"] == "command.ack" and frame["data"]["command_id"] == command_id]
+        assert [ack["accepted"] for ack in acks] == (
+            [True, False] if ack_order == "accepted_first" else [False, True])
+        refusal, = [ack for ack in acks if not ack["accepted"]]
+        assert "Duplicate" in refusal["reason"]
     finally:
         lab.hub.db = None
 

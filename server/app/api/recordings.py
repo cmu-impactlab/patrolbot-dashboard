@@ -53,7 +53,8 @@ class StartBody(BaseModel):
 
 @router.get("/api/recordings")
 async def list_recordings(request: Request) -> list[dict]:
-    return await request.app.state.db.list_recordings()
+    rows = await request.app.state.db.list_recordings()
+    return [request.app.state.hub.recorder.describe(row) for row in rows]
 
 
 @router.post("/api/recordings/start")
@@ -75,15 +76,12 @@ async def start_recording(request: Request, body: StartBody, user: Operator) -> 
 @router.post("/api/recordings/stop")
 async def stop_recording(request: Request, user: Operator) -> dict:
     hub = request.app.state.hub
-    row = await hub.recorder.stop()
+    try:
+        row = await hub.recorder.stop()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Recording could not be finalized. Retry Stop.") from exc
     if row is None:
         raise HTTPException(status_code=409, detail="No recording is in progress.")
-    session = hub.primary()
-    if session is not None:
-        session.state.recording = False
-        await hub.emit_event(session, "info", "Recording finished",
-                             f"“{row['name']}” saved with {row['sample_count']} samples.")
-        hub._emit_derived(session)
     return row
 
 
@@ -120,6 +118,7 @@ async def get_recording(
             continue
         samples.append({"ts": sample["ts"], "kind": sample["kind"], "data": data})
 
+    row = request.app.state.hub.recorder.describe(row)
     row["samples"] = samples
     row["channels_returned"] = wanted
     # A recording longer than the cap replays from its beginning rather than

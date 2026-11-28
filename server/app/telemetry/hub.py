@@ -186,7 +186,7 @@ class TelemetryHub:
         self.robots: dict[str, RobotSession] = {}
         self.browsers: set[BrowserClient] = set()
         self.commands = CommandBroker(self)
-        self.recorder = Recorder(db)
+        self.recorder = Recorder(db, self._recording_finished)
         # Battery history is the other telemetry-path write. Separate from the
         # recorder's queue so a recording that saturates the disk cannot also
         # cost the long-term battery log, and vice versa.
@@ -229,6 +229,26 @@ class TelemetryHub:
         # create_app's lifespan closes the database underneath them.
         await self.recorder.shutdown()
         await self.battery_writer.stop()
+
+    async def _recording_finished(self, row: dict) -> None:
+        session = self.robots.get(row["robot_id"])
+        if session is None:
+            return
+        session.state.recording = False
+        self._emit_derived(session)
+        failed = row["status"] == "stop_failed"
+        reason = {
+            "sample_limit": "Reached the 100000-sample limit.",
+            "sample_limit_with_loss": "Reached the 100000-sample limit; recorded data may be incomplete.",
+            "write_error": "A sample write failed; recorded data may be incomplete.",
+            "queue_full": "The recording writer queue filled; recorded data may be incomplete.",
+            "shutdown": "Server shutting down.",
+        }.get(row.get("stop_reason"), "")
+        message = ("Could not finalize the recording. Retry Stop; new recordings are blocked."
+                   if failed else f"“{row['name']}” saved with {row['sample_count']} samples. {reason}".strip())
+        await self.emit_event(session, "warning" if failed or row.get("stop_reason") in
+                              {"sample_limit_with_loss", "write_error", "queue_full"} else "info",
+                              "Recording finalization failed" if failed else "Recording finished", message)
 
     async def _tuning_shutdown(self) -> None:
         """Release the tuning broker if the API slice attached a real one.
@@ -466,6 +486,9 @@ class TelemetryHub:
                 await self.db.add_event(session.robot_id, event)
 
     def _emit_derived(self, session: RobotSession) -> None:
+        active = self.recorder.active
+        session.state.recording = bool(active and active["robot_id"] == session.robot_id
+                                       and self.recorder.recording)
         status, health = session.state.recompute()
         if status is not None:
             self.publish("state.robot_status", session.robot_id, status)
