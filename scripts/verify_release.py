@@ -13,7 +13,7 @@ import urllib.request
 
 
 def repository_mismatches(root, entries, source_ref=None):
-    failures = []
+    failures = [] if entries else ['empty release file inventory']
     for entry in entries:
         path = entry['repository_path']
         try:
@@ -27,19 +27,11 @@ def repository_mismatches(root, entries, source_ref=None):
     return failures
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('manifest', type=Path)
-    parser.add_argument('--live', action='store_true')
-    parser.add_argument('--source-ref', help='Compare Git files at this release ref instead of the current working tree')
-    args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
-    manifest = json.loads(args.manifest.read_text())
-    failures = repository_mismatches(root, manifest['files'], args.source_ref)
-    if args.live:
-        # Remote values are read only. Arguments come from a reviewed manifest,
-        # not from robot messages or browser requests.
-        program = '''import hashlib,json,subprocess,sys
+def remote_mismatches(manifest):
+    failures = []
+    # Remote values are read only. Arguments come from a reviewed manifest,
+    # not from robot messages or browser requests.
+    program = '''import hashlib,json,subprocess,sys
 m=json.load(sys.stdin)
 failures=[]
 docker=m.get('docker_command',['docker'])
@@ -60,20 +52,35 @@ for e in m.get('executables',[]):
     if actual!=e['sha256']: failures.append('running executable mismatch: '+e['name'])
 print(json.dumps(failures))
 '''
-        import shlex
-        for host in sorted({e['host'] for e in manifest['files']}):
-            payload = {key: [e for e in manifest.get(key, []) if e['host'] == host]
-                       for key in ('files', 'containers', 'executables')}
-            payload['docker_command'] = manifest.get('docker_commands', {}).get(host, ['docker'])
-            command = 'python3 -B -c ' + shlex.quote(program)
-            result = subprocess.run(
-                ['/usr/bin/ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, command],
-                input=json.dumps(payload), text=True, capture_output=True, timeout=120)
-            if result.returncode:
-                failures.append('read-only inspection failed: ' + host)
-                print(result.stderr, file=sys.stderr)
-            else:
-                failures.extend(json.loads(result.stdout))
+    import shlex
+    for host in sorted({e['host'] for key in ('files', 'containers', 'executables')
+                        for e in manifest.get(key, [])}):
+        payload = {key: [e for e in manifest.get(key, []) if e['host'] == host]
+                   for key in ('files', 'containers', 'executables')}
+        payload['docker_command'] = manifest.get('docker_commands', {}).get(host, ['docker'])
+        command = 'python3 -B -c ' + shlex.quote(program)
+        result = subprocess.run(
+            ['/usr/bin/ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, command],
+            input=json.dumps(payload), text=True, capture_output=True, timeout=120)
+        if result.returncode:
+            failures.append('read-only inspection failed: ' + host)
+            print(result.stderr, file=sys.stderr)
+        else:
+            failures.extend(json.loads(result.stdout))
+    return failures
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('manifest', type=Path)
+    parser.add_argument('--live', action='store_true')
+    parser.add_argument('--source-ref', help='Compare Git files at this release ref instead of the current working tree')
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(args.manifest.read_text())
+    failures = repository_mismatches(root, manifest['files'], args.source_ref)
+    if args.live:
+        failures.extend(remote_mismatches(manifest))
         for asset in manifest.get('assets', []):
             try:
                 with urllib.request.urlopen(manifest['public_url'] + asset['path'], timeout=15) as response:
