@@ -1,7 +1,7 @@
 import { type Page, type WebSocketRoute } from "@playwright/test";
 import presets from "./presets.json" with { type: "json" };
 import type { LayoutDoc } from "../src/stores/layoutStore";
-import type { MotionData } from "../src/types/protocol";
+import type { MotionData, RobotStatusData } from "../src/types/protocol";
 
 export const READY_BASE_STATE = {
   map_id: "cmuq-floor2", map_revision: "test-revision",
@@ -31,6 +31,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   const wsReady = new Promise<void>(resolve => { socketReady = () => resolve(); });
   let sequence = 0;
   let activeTeleop: string | null = null;
+  let robotStatus: RobotStatusData = { status: "ready", detail: "Ready" };
   let baseState: unknown = { ...READY_BASE_STATE };
   let baseTimer: ReturnType<typeof setInterval> | undefined;
   page.on("close", () => clearInterval(baseTimer));
@@ -38,6 +39,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   const send = (type: string, data: unknown) => {
     if (!socket) throw new Error("Fixture sent before the page opened /ws/ui; await the fixture wsReady promise first.");
     if (type === "telemetry.base_state") baseState = data;
+    if (type === "state.robot_status") robotStatus = data as RobotStatusData;
     socket.send(JSON.stringify({ version: 1, type, robot_id: "mock", sequence: ++sequence, timestamp: new Date().toISOString(), data }));
   };
   await page.route("**/auth/me", route => route.fulfill({ json: { id: 1, username: "touch-user", display_name: "Touch User", role, auth_mode: "oidc" } }));
@@ -84,7 +86,7 @@ export async function dashboardFixture(page: Page, role = "operator", preset = "
   await page.routeWebSocket("**/ws/ui", ws => {
     socket = ws;
     socketReady();
-    send("server.snapshot", { connection: { state: "online" }, robot_status: { status: "ready", detail: "Ready" },
+    send("server.snapshot", { connection: { state: "online" }, robot_status: robotStatus,
       system_health: { overall: "healthy", subsystems: [{ id: "computer", label: "Computer", level: "healthy", message: "Long network diagnostic ".repeat(15), updated_at: new Date().toISOString() }] },
       map_version: 1, pose: omitPose ? null : { map_id: "cmuq-floor2", map_revision: "test-revision", x: 0, y: 0, yaw: 0, localized: true, linear_velocity: 0, angular_velocity: 0 },
       battery: { voltage: 25, percentage: 85, charging: false },
