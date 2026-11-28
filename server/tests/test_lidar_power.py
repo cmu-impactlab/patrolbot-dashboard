@@ -1,3 +1,6 @@
+import math
+from itertools import product
+
 import pytest
 from pydantic import ValidationError
 from app.commands import gates
@@ -31,10 +34,16 @@ def test_power_can_turn_on_without_scans_but_requires_stationary_supported_robot
     facts.navigating = True
     assert gates.rejection_reason("set_lidar_power", facts)
 
-@pytest.mark.parametrize("scan_age,receipt_age", [(0.3, 0.3), (float("nan"), 0), (0, -1), (0, None)])
-def test_lidar_counts_receipt_age_and_refuses_invalid_age(scan_age, receipt_age):
-    facts = gates.StateFacts(lidar_state="READY", lidar_scan_age=scan_age, base_state_age=receipt_age)
-    assert "LiDAR" in gates.rejection_reason("set_initial_pose", facts)
+@pytest.mark.parametrize("scan_age,receipt_age,reason", [
+    (0.3, 0.3, "LiDAR scans are stale — wait for fresh scans."),
+    (float("nan"), 0, "LiDAR scan age is unavailable — wait for fresh scans."),
+    (0, -1, "BaseState telemetry is stale or invalid — wait for fresh hardware readings."),
+    (0, None, "BaseState telemetry is unavailable — wait for fresh hardware readings."),
+])
+def test_lidar_counts_receipt_age_and_refuses_invalid_age(scan_age, receipt_age, reason):
+    facts = gates.StateFacts(online=True, link_connected=True, hardware_state_valid=True,
+        telemetry_age=.1, lidar_state="READY", lidar_scan_age=scan_age, base_state_age=receipt_age)
+    assert gates.rejection_reason("set_initial_pose", facts) == reason
 
 def test_missing_lidar_remains_unsafe_and_stop_is_available():
     assert gates.rejection_reason("set_initial_pose", gates.StateFacts())
@@ -194,3 +203,59 @@ def test_power_recovery_does_not_require_map_pose(state):
         base_state_age=.01, hardware_state_valid=True,
         lidar_state=state, lidar_power_supported=True, capabilities=("set_lidar_power",))
     assert gates.rejection_reason("set_lidar_power", facts) is None
+
+
+def ready_facts(**changes):
+    values = dict(online=True, link_connected=True, hardware_state_valid=True,
+                  telemetry_age=.1, base_state_age=0, lidar_state="READY", lidar_scan_age=.1)
+    return gates.StateFacts(**(values | changes))
+
+
+@pytest.mark.parametrize("changes,reason", [
+    (dict(online=False), "The robot is not connected right now."),
+    (dict(base_state_age=None), "BaseState telemetry is unavailable — wait for fresh hardware readings."),
+    (dict(link_connected=False), "The drive base is disconnected — LiDAR readiness is unavailable."),
+    (dict(hardware_state_valid=False), "BaseState hardware readings are invalid — LiDAR readiness is unavailable."),
+    (dict(telemetry_age=.501), "BaseState telemetry is stale or invalid — wait for fresh hardware readings."),
+    (dict(lidar_state="OFF", lidar_scan_age=-1), "LiDAR is off — turn it on before waiting for fresh scans."),
+    (dict(lidar_state="STARTING", lidar_scan_age=-1), "LiDAR is warming up — wait for fresh scans."),
+    (dict(lidar_state="UNKNOWN"), "LiDAR state is unavailable — wait for a ready state."),
+    (dict(lidar_state="FAULT"), "LiDAR is reporting a fault — wait for a ready state."),
+    (dict(lidar_scan_age=-1), "LiDAR scan age is unavailable — wait for fresh scans."),
+    (dict(lidar_scan_age=float("nan")), "LiDAR scan age is unavailable — wait for fresh scans."),
+    (dict(lidar_scan_age=float("inf")), "LiDAR scan age is unavailable — wait for fresh scans."),
+    (dict(lidar_scan_age=.501), "LiDAR scans are stale — wait for fresh scans."),
+    (dict(lidar_scan_age=.4, base_state_age=.101), "LiDAR scans are stale — wait for fresh scans."),
+])
+@pytest.mark.parametrize("command", ["set_initial_pose", "navigate_to_pose", "undock", "charge_release"])
+def test_explicit_lidar_reasons_keep_priority_over_other_command_gates(changes, reason, command):
+    # Other command prerequisites deliberately remain unmet; LiDAR still goes first.
+    facts = ready_facts(allow_unlocalized=True, **changes)
+    assert gates.rejection_reason(command, facts) == reason
+    assert gates.rejection_reason("stop", facts) is None
+
+
+def test_stale_base_precedes_scanner_off_and_scan_age():
+    assert gates.lidar_reason(ready_facts(telemetry_age=.6, lidar_state="OFF", lidar_scan_age=-1)) == (
+        "BaseState telemetry is stale or invalid — wait for fresh hardware readings.")
+
+
+@pytest.mark.parametrize("scan_age,telemetry_age,receipt", [(.5, 0, 0), (.4, .4, .1), (0, .5, 0)])
+def test_inclusive_half_second_boundary(scan_age, telemetry_age, receipt):
+    assert gates.lidar_reason(ready_facts(lidar_scan_age=scan_age, telemetry_age=telemetry_age,
+                                   base_state_age=receipt)) is None
+
+
+def test_original_admission_predicate_is_unchanged():
+    ages = [-1, 0, .1, .5, .501, float("nan"), float("inf"), -float("inf")]
+    for state, age, telemetry, receipt in product(
+            ["READY", "OFF", "STARTING", "UNKNOWN", "FAULT"], ages, ages, [None, *ages]):
+        facts = ready_facts(lidar_state=state, lidar_scan_age=age,
+                            telemetry_age=telemetry, base_state_age=receipt)
+        refused = (not facts.online or not facts.link_connected or not facts.hardware_state_valid
+                   or not math.isfinite(telemetry) or telemetry < 0
+                   or receipt is None or telemetry + receipt > .5
+                   or state != "READY"
+                   or not math.isfinite(age) or not math.isfinite(receipt)
+                   or age < 0 or receipt < 0 or age + receipt > .5)
+        assert (gates.lidar_reason(facts) is not None) == refused

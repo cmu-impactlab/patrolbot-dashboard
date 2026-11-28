@@ -262,11 +262,29 @@ def lidar_reason(facts: StateFacts) -> str | None:
     receipt = facts.base_state_age
     if (not facts.online or not facts.link_connected or not facts.hardware_state_valid
             or not math.isfinite(facts.telemetry_age) or facts.telemetry_age < 0
-            or receipt is None or facts.telemetry_age + receipt > .5
-            or facts.lidar_state != "READY"
-            or not math.isfinite(age) or not math.isfinite(receipt)
-            or age < 0 or receipt < 0 or age + receipt > 0.5):
-        return "LiDAR is off, starting, stale or unavailable — wait for fresh scans."
+            or receipt is None or not math.isfinite(receipt) or receipt < 0
+            or facts.telemetry_age + receipt > .5):
+        if not facts.online:
+            return "The robot is not connected right now."
+        if receipt is None:
+            return "BaseState telemetry is unavailable — wait for fresh hardware readings."
+        if not facts.link_connected:
+            return "The drive base is disconnected — LiDAR readiness is unavailable."
+        if not facts.hardware_state_valid:
+            return "BaseState hardware readings are invalid — LiDAR readiness is unavailable."
+        return "BaseState telemetry is stale or invalid — wait for fresh hardware readings."
+    if facts.lidar_state == "OFF":
+        return "LiDAR is off — turn it on before waiting for fresh scans."
+    if facts.lidar_state == "STARTING":
+        return "LiDAR is warming up — wait for fresh scans."
+    if facts.lidar_state == "FAULT":
+        return "LiDAR is reporting a fault — wait for a ready state."
+    if facts.lidar_state != "READY":
+        return "LiDAR state is unavailable — wait for a ready state."
+    if not math.isfinite(age) or age < 0:
+        return "LiDAR scan age is unavailable — wait for fresh scans."
+    if age + receipt > 0.5:
+        return "LiDAR scans are stale — wait for fresh scans."
     return None
 
 
