@@ -5,6 +5,7 @@ import { registerCommandSender, useCommandStore } from "../../stores/commandStor
 import { useTelemetryStore } from "../../stores/telemetryStore";
 import { useAuthStore } from "../../stores/authStore";
 import type { BaseStateData } from "../../types/protocol";
+import { mapCommandReason } from "../../lib/mapCommand";
 import { useUiStore } from "../../stores/uiStore";
 
 vi.mock("../../api/queries", () => ({ useMapQuery: (_version: number, id: string) => ({ data: {
@@ -73,7 +74,7 @@ describe("live map command boundary", () => {
     fireEvent.click(screen.getByLabelText(/Measured position and heading/));
     fireEvent.change(screen.getByLabelText("Heading"), { target: { value: "90" } });
     const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
-    const reason = "LiDAR is off, starting, stale or unavailable — wait for fresh scans.";
+    const reason = "BaseState telemetry is stale or invalid — wait for fresh hardware readings.";
     expect(screen.getByRole("status").textContent).toBe(reason);
     expect(confirm.disabled).toBe(true);
     expect(confirm.title).toBe(reason);
@@ -87,7 +88,7 @@ describe("live map command boundary", () => {
     now += 401;
     fireEvent.click(confirm);
     expect(screen.getByRole("alert").textContent).toBe(
-      "LiDAR is off, starting, stale or unavailable — wait for fresh scans.",
+      "BaseState telemetry is stale or invalid — wait for fresh hardware readings.",
     );
     expect(sender).not.toHaveBeenCalled();
   });
@@ -106,13 +107,31 @@ describe("live map command boundary", () => {
     expect(data.seed_profile).toBe("measured");
     expect(data.goal.yaw).toBeCloseTo(Math.PI / 2, 3);
   });
-  it("disables confirmation and explains when LiDAR turns off during a preview", () => {
+  it.each([
+    [null, "BaseState telemetry is unavailable — wait for fresh hardware readings."],
+    [{ telemetry_age: .6 }, "BaseState telemetry is stale or invalid — wait for fresh hardware readings."],
+    [{ lidar_state: "OFF", lidar_scan_age: -1 }, "LiDAR is off — turn it on before waiting for fresh scans."],
+    [{ lidar_state: "STARTING", lidar_scan_age: -1 }, "LiDAR is warming up — wait for fresh scans."],
+    [{ lidar_state: "UNKNOWN" }, "LiDAR state is unavailable — wait for a ready state."],
+    [{ lidar_state: "FAULT" }, "LiDAR is reporting a fault — wait for a ready state."],
+    [{ lidar_scan_age: -1 }, "LiDAR scan age is unavailable — wait for fresh scans."],
+    [{ lidar_scan_age: .6 }, "LiDAR scans are stale — wait for fresh scans."],
+  ] as const)("surfaces the current reason through map and Set location routes: %s", (changes, reason) => {
     const canvas = mount(); down(canvas); up(canvas);
-    act(() => useTelemetryStore.setState({ baseState: { lidar_state: "OFF", lidar_scan_age: -1 } as BaseStateData }));
+    act(() => useTelemetryStore.setState({ baseState: changes === null ? null : {
+      ...useTelemetryStore.getState().baseState!, ...changes,
+    } }));
     const confirm = screen.getByRole("button", { name: "Set location" }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
-    expect(screen.getByText(/LiDAR is off/)).toBeTruthy();
+    expect(confirm.title).toBe(reason);
+    expect(screen.getByRole("status").textContent).toBe(reason);
     fireEvent.click(confirm);
+    for (const mode of ["initialpose", "goal"] as const) {
+      useCommandStore.setState({ pickMode: mode });
+      expect(mapCommandReason(mode)).toBe(reason);
+    }
+    useCommandStore.getState().send("set_initial_pose", { map_id: "cmuq-floor1", map_revision: "test-first", x: 0, y: 0, yaw: null });
+    expect(useCommandStore.getState().lastResult?.detail).toBe(reason);
     expect(sender).not.toHaveBeenCalled();
   });
   it("previews a touch tap and sends only after explicit confirmation", () => {
