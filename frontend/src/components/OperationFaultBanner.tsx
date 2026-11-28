@@ -1,5 +1,4 @@
-import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { canCommand, useAuthStore } from "../stores/authStore";
 import { useCommandStore } from "../stores/commandStore";
 import { useTelemetryStore } from "../stores/telemetryStore";
@@ -8,10 +7,52 @@ import { useIsFresh } from "../lib/freshness";
 import { operationFaultReason } from "../lib/operationFault";
 import { motionFreshness, useMotion } from "../lib/motion";
 
+function FaultDetails({ children, blocked }: { children: ReactNode; blocked: string | null }) {
+  const [open, setOpen] = useState(false);
+  const panel = useId();
+  const toggle = useRef<HTMLButtonElement>(null);
+  const lastResult = useCommandStore(s => s.lastResult);
+  const [attempt, setAttempt] = useState<{ commandId: string | null; startedAt: number } | null>(null);
+  const outcome = attempt && lastResult?.command === "dock_reset" &&
+    lastResult.commandId === attempt.commandId && lastResult.at >= attempt.startedAt ? lastResult : null;
+  const confirmRecovery = () => {
+    const before = useCommandStore.getState();
+    const startedAt = Date.now();
+    before.send("dock_reset");
+    const after = useCommandStore.getState();
+    if (after.active?.command === "dock_reset" && before.active !== after.active) {
+      setAttempt({ commandId: after.active.commandId, startedAt });
+    } else if (after.lastResult?.command === "dock_reset" && before.lastResult !== after.lastResult) {
+      setAttempt({ commandId: after.lastResult.commandId, startedAt });
+    }
+  };
+  return <>
+    <button type="button" ref={toggle} aria-expanded={open} aria-controls={panel}
+      className="mt-2 rounded border px-3 py-1" onClick={() => setOpen(value => !value)}>
+      Details / recovery
+    </button>
+    <section id={panel} hidden={!open} aria-label="Recover operation fault"
+      className="mt-3 rounded border p-4">
+      {open && <>
+        {children}
+        {blocked && <p className="my-2 text-amber-300">{blocked}</p>}
+        {outcome && <p role="status" className="my-2">Recovery {outcome.outcome}: {outcome.detail}</p>}
+        <button type="button" disabled={!!blocked} className="mt-4 mr-2 rounded border px-3 py-2 disabled:opacity-40"
+          onClick={confirmRecovery}>Confirm recovery</button>
+        <button type="button" className="mt-2 rounded border px-3 py-2" onClick={() => {
+          setOpen(false);
+          toggle.current?.focus();
+        }}>Close details</button>
+      </>}
+    </section>
+  </>;
+}
+
 /** Keep failed controller operations visible even though no browser issued them. */
 export function OperationFaultBanner() {
   const base = useTelemetryStore(s => s.baseState);
   const ws = useTelemetryStore(s => s.wsConnected);
+  const robotId = useTelemetryStore(s => s.robotId);
   const connection = useTelemetryStore(s => s.connection);
   const capabilities = useTelemetryStore(s => s.capabilities);
   const fresh = useIsFresh(useTelemetryStore(s => s.baseStateAt), 3000);
@@ -24,10 +65,7 @@ export function OperationFaultBanner() {
   const speed = motionFreshness(motion, performance.now(), base?.session_generation ?? null);
   const mayCommand = canCommand(useAuthStore(s => s.user));
   const active = useCommandStore(s => s.active);
-  const lastResult = useCommandStore(s => s.lastResult);
-  const send = useCommandStore(s => s.send);
   const manualBusy = useTeleopStore(s => s.phase !== "idle" || s.externalBusy);
-  const [open, setOpen] = useState(false);
   const reason = operationFaultReason(base);
   if (!reason) return null;
   const blocked = !mayCommand ? "Operator permission is required."
@@ -42,25 +80,15 @@ export function OperationFaultBanner() {
     <strong>Robot operation fault</strong>
     <p>{reason}</p>
     {!fresh && <p>These are the last received readings; current state is unconfirmed.</p>}
-    <Dialog.Root open={open} onOpenChange={setOpen}>
-      <Dialog.Trigger asChild><button className="mt-2 rounded border px-3 py-1">Details / recovery</button></Dialog.Trigger>
-      <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded border bg-slate-950 p-5 text-slate-100">
-          <Dialog.Title className="font-semibold">Recover operation fault</Dialog.Title>
-          <Dialog.Description className="my-3">{reason}</Dialog.Description>
-          <p>Recovery acknowledges the failed operation and requests a fresh hardware check. It does not enable motors, move the robot, resume the turn or resume an old goal. Dock state is re-evaluated from physical charging evidence.</p>
-          <p className="my-2">After recovery, release all controls and make a new RB press or dashboard manual-control request. Ordinary bumper, obstacle and hardware safeguards still apply.</p>
-          <p>Dock state: {base?.dock_state ?? "Unknown"}. Motors: {base?.motors_enabled ? "enabled" : "disabled"}.</p>
-          {base?.operation_fault_reason && <p className="break-all">Reason code: {base.operation_fault_reason}</p>}
-          {base?.operation_fault_request_id && <p className="break-all">Operation: {base.operation_fault_request_id}</p>}
-          {blocked && <p className="my-2 text-amber-300">{blocked}</p>}
-          {lastResult?.command === "dock_reset" && <p className="my-2">Recovery {lastResult.outcome}: {lastResult.detail}</p>}
-          <div className="mt-4 flex gap-3">
-            <button disabled={!!blocked} className="rounded border px-3 py-2 disabled:opacity-40" onClick={() => send("dock_reset")}>Confirm recovery</button>
-            <Dialog.Close asChild><button className="rounded border px-3 py-2">Close</button></Dialog.Close>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <FaultDetails blocked={blocked}
+      key={JSON.stringify([robotId, base?.session_generation, base?.operation_fault_request_id, reason])}>
+      <h2 className="font-semibold">Recover operation fault</h2>
+      <p>Recovery acknowledges the failed operation and requests a fresh hardware check. It does not enable motors, move the robot, resume the turn or resume an old goal. Dock state is re-evaluated from physical charging evidence.</p>
+      <p>The fault stays visible until the robot reports it cleared. You can close these details at any time.</p>
+      <p className="my-2">After recovery, release all controls and make a new RB press or dashboard manual-control request. Ordinary bumper, obstacle and hardware safeguards still apply.</p>
+      <p>Dock state: {base?.dock_state ?? "Unknown"}. Motors: {base?.motors_enabled ? "enabled" : "disabled"}.</p>
+      {base?.operation_fault_reason && <p className="break-all">Reason code: {base.operation_fault_reason}</p>}
+      {base?.operation_fault_request_id && <p className="break-all">Operation: {base.operation_fault_request_id}</p>}
+    </FaultDetails>
   </section>;
 }
