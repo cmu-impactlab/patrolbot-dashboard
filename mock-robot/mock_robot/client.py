@@ -337,11 +337,22 @@ class MockRobot:
     # -- command handling ------------------------------------------------------
 
     async def _receive_loop(self, ws) -> None:
-        """Handle command.request frames; mirrors what the real bridge does."""
+        """Handle command.request and command.cancel frames like the real bridge."""
         async for raw in ws:
             try:
                 frame = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+            if frame.get("type") == "command.cancel":
+                data = frame.get("data")
+                if not isinstance(data, dict):
+                    continue
+                command_id = data.get("command_id")
+                if self.command is not None and self.command["command_id"] == command_id:
+                    self.mode = "idle"
+                    self.robot.set_goal(None)
+                    self.robot.speed = self.robot.yaw_rate = 0.0
+                    await self._preempt(ws, "Canceled by the server.")
                 continue
             if frame.get("type") != "command.request":
                 continue
@@ -508,11 +519,13 @@ class MockRobot:
             self.robot.set_goal(None)
 
     async def _preempt(self, ws, detail: str) -> None:
-        if self.command is not None:
-            await ws.send(self.frame("command.result",
-                                     {"command_id": self.command["command_id"],
-                                      "outcome": "canceled", "detail": detail}))
+        command = self.command
+        if command is not None:
             self.command = None
+            self._command_arrived = False
+            await ws.send(self.frame("command.result",
+                                     {"command_id": command["command_id"],
+                                      "outcome": "canceled", "detail": detail}))
 
     # Per command kind: (arrival detail, in-flight stage detail).
     _COMMAND_COPY = {
@@ -530,12 +543,13 @@ class MockRobot:
             if kind == "undock":
                 self.on_dock = False
             self.mode = "idle"
-            await ws.send(self.frame("command.result",
-                                     {"command_id": self.command["command_id"],
-                                      "outcome": "succeeded",
-                                      "detail": arrived_detail}))
+            command_id = self.command["command_id"]
             self.command = None
             self._command_arrived = False
+            await ws.send(self.frame("command.result",
+                                     {"command_id": command_id,
+                                      "outcome": "succeeded",
+                                      "detail": arrived_detail}))
             return
         # Undocking has no goal pose — it reverses a fixed distance.
         goal = self.robot.goal

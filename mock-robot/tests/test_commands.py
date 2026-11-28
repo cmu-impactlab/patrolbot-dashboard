@@ -1,5 +1,8 @@
 import asyncio
 import json
+from unittest.mock import AsyncMock
+
+import pytest
 
 from mock_robot.client import MockRobot
 from mock_robot.map_context import MAP_REVISIONS
@@ -89,6 +92,112 @@ def test_stop_cancels_active_navigation():
         assert results == {"nav-1": "canceled", "stop-1": "succeeded"}
         assert robot.mode == "idle"
         assert robot.robot.goal is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("command", ["navigate_to_pose", "undock"])
+def test_cancel_only_stops_matching_operation(command):
+    robot = make_robot()
+    if command == "undock":
+        robot._settle_on_dock()
+    start = FakeWs([request(command, "active", {"x": 3.0, "y": 3.0})])
+
+    def cancel(command_id):
+        return {"type": "command.cancel", "data": {"command_id": command_id}}
+
+    async def run():
+        await robot._receive_loop(start)
+        robot.step(0.1)
+        active, mode, goal = robot.command.copy(), robot.mode, robot.robot.goal
+        unrelated = FakeWs([cancel("other"), cancel(None)])
+        await robot._receive_loop(unrelated)
+        assert (robot.command, robot.mode, robot.robot.goal) == (active, mode, goal)
+        assert unrelated.sent == []
+
+        # Cancellation must bypass readiness checks and clear pending arrival.
+        robot.lidar_state = "OFF"
+        robot._command_arrived = True
+        canceled = FakeWs([cancel("active"), cancel("active")])
+        await robot._receive_loop(canceled)
+        assert robot.command is None and robot.mode == "idle"
+        assert robot.robot.goal is None
+        assert robot.robot.speed == robot.robot.yaw_rate == 0.0
+        assert not robot._command_arrived
+        position = (robot.robot.x, robot.robot.y)
+        robot.step(0.1)
+        await robot._command_progress(canceled)
+        assert (robot.robot.x, robot.robot.y) == position
+        assert [f["data"]["outcome"] for f in canceled.sent] == ["canceled"]
+        assert canceled.sent[0]["type"] == "command.result"
+        assert canceled.sent[0]["data"]["command_id"] == "active"
+
+    asyncio.run(run())
+
+
+def test_cancel_is_not_replayed_on_reconnect(monkeypatch):
+    robot = make_robot()
+
+    class Session(FakeWs):
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def recv(self):
+            return json.dumps({"type": "server.hello_ack"})
+
+    first = Session([request("navigate_to_pose", "old", {"x": 3.0, "y": 3.0}),
+                     {"type": "command.cancel", "data": {"command_id": "old"}}])
+    # A fresh session has no cancellation intent, even for the same correlation ID.
+    second = Session([request("navigate_to_pose", "old", {"x": 3.0, "y": 3.0})])
+    sessions = iter([first, second])
+    monkeypatch.setattr("mock_robot.client.websockets.connect", lambda *a, **k: next(sessions))
+    for loop in ("_pose_loop", "_lidar_loop", "_path_loop", "_slow_loop", "_base_state_loop",
+                 "_motion_loop", "_disconnect_watch"):
+        monkeypatch.setattr(robot, loop, AsyncMock())
+
+    async def run():
+        await robot.run_session()
+        assert robot.command is None
+        await robot.run_session()
+        await robot._command_progress(second)
+
+    asyncio.run(run())
+    assert robot.command == {"command_id": "old", "kind": "navigate"}
+    assert robot.mode == "commanded"
+    assert second.of_type("command.result") == []
+    assert second.of_type("command.progress")
+
+
+def test_cancel_during_arrival_publication_keeps_single_terminal_result():
+    robot = make_robot()
+    cancel = {"type": "command.cancel", "data": {"command_id": "arrived"}}
+
+    async def run():
+        await robot._receive_loop(FakeWs([
+            request("navigate_to_pose", "arrived", {"x": 3.0, "y": 3.0}),
+        ]))
+        robot._command_arrived = True
+        publishing = asyncio.Event()
+        release = asyncio.Event()
+
+        class PausedResultSocket(FakeWs):
+            async def send(self, frame):
+                publishing.set()
+                await release.wait()
+                await super().send(frame)
+
+        success = PausedResultSocket()
+        arrival = asyncio.create_task(robot._command_progress(success))
+        await asyncio.wait_for(publishing.wait(), timeout=1)
+        cancellation = FakeWs([cancel])
+        await robot._receive_loop(cancellation)
+        release.set()
+        await arrival
+        assert cancellation.sent == []
+        assert [frame["data"]["outcome"] for frame in success.sent] == ["succeeded"]
 
     asyncio.run(run())
 
