@@ -138,7 +138,7 @@ export function useDeleteRecording() {
 }
 
 export function fetchRecordingDetail(id: number) {
-  return json<RecordingRow & { samples: RecordingSample[] }>(`/api/recordings/${id}`);
+  return json<RecordingRow & { samples: RecordingSample[]; truncated: boolean; available_sample_count: number }>(`/api/recordings/${id}`);
 }
 
 export interface BatteryHistoryRow {

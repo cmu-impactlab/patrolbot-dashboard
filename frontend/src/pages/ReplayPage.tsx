@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchRecordingDetail } from "../api/queries";
 import { formatTime } from "../lib/format";
 import {
-  REPLAY_SPEEDS, useReplayStore, type RecordingRow, type ReplayEvent, type ReplayPose,
+  REPLAY_SPEEDS, useReplayStore, type ReplayEvent, type ReplayPose,
 } from "../stores/replayStore";
 import { useUiStore } from "../stores/uiStore";
 import { ReplayMap } from "../widgets/LiveMapWidget/ReplayMap";
@@ -155,16 +155,21 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
   const recording = useReplayStore((state) => state.recording);
   const poses = useReplayStore((state) => state.poses);
   const [error, setError] = useState("");
+  const [partial, setPartial] = useState<string | null>(null);
   const t = usePlayhead();
 
   useEffect(() => {
     setError("");
+    setPartial(null);
     let cancelled = false;
     fetchRecordingDetail(recordingId)
       .then((detail) => {
         if (cancelled) return;
-        const { samples, ...row } = detail;
-        useReplayStore.getState().load(row as RecordingRow, samples);
+        const { samples, truncated, available_sample_count, ...row } = detail;
+        setPartial(truncated
+          ? `Partial replay: showing ${samples.length} of ${available_sample_count} available replay samples. Download data for the full recording.`
+          : null);
+        useReplayStore.getState().load(row, samples);
       })
       .catch(() => { if (!cancelled) setError("That recording could not be loaded."); });
     return () => {
@@ -220,6 +225,8 @@ export function ReplayPage({ recordingId }: { recordingId: number }) {
         <a className="btn" href="/">Return to dashboard</a>
         <DashboardTourButton replay />
       </header>
+
+      {partial && <p role="status" className="subtext">{partial}</p>}
 
       <div className="replay-body">
         <div className="replay-stage">
