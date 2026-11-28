@@ -49,6 +49,64 @@ describe("manual drive isolated software input", () => {
   });
   afterEach(() => { cleanup(); useTeleopStore.getState().end(); registerCommandSender(null); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+  it.each([" ", "Spacebar", "Space"])("normalizes %s and releases globally even when propagation is stopped", space => {
+    render(<ManualDrive />); arm();
+    expect(document.activeElement).toBe(panel());
+    expect(screen.getByText("Keyboard focused — hold Space plus arrows or WASD.")).toBeTruthy();
+    key("ArrowUp"); key(space); ack(); tick();
+    const outside = document.createElement("input"); document.body.append(outside);
+    outside.addEventListener("keyup", event => event.stopPropagation());
+    fireEvent.keyUp(outside, { key: space, code: "Space" });
+    expect(velocity().at(-1)).toMatchObject({ linear: 0, angular: 0, deadman: false });
+    expect(requests("teleop_stop")).toHaveLength(1);
+    outside.remove();
+    act(() => {
+      useTeleopStore.getState().handleResult({ command_id: String(requests("teleop_start")[0].data.command_id), outcome: "canceled" });
+      useTeleopStore.getState().handleResult({ command_id: String(requests("teleop_stop")[0].data.command_id), outcome: "succeeded" });
+    });
+    fireEvent.keyUp(window, { key: "ArrowUp" });
+    arm(); key("ArrowUp"); key(space); ack(); tick();
+    expect(requests("teleop_start")).toHaveLength(2);
+    expect(velocity().at(-1)?.deadman).toBe(true);
+  });
+  it("does not let an unrelated panel's Space release disarm or rearm the shared session", () => {
+    const view = render(<><ManualDrive /><ManualDrive compact /></>);
+    const panels = screen.getAllByRole("region", { name: "Manual drive keyboard panel" });
+    fireEvent.click(screen.getAllByRole("button", { name: "Arm manual drive" })[0]);
+    fireEvent.keyUp(panels[1], { key: " " });
+    expect(useTeleopStore.getState().phase).toBe("armed");
+    key("w", false, panels[0]); key(" ", false, panels[0]); ack(); tick();
+    key("a", false, panels[1]); key(" ", false, panels[1]);
+    tick();
+    expect(velocity().at(-1)).toMatchObject({ deadman: true, angular: 0 });
+    fireEvent.keyUp(panels[1], { key: " " });
+    expect(velocity().at(-1)?.deadman).toBe(false);
+    expect(requests("teleop_start")).toHaveLength(1);
+    const startId = String(requests("teleop_start")[0].data.command_id);
+    const stopId = String(requests("teleop_stop")[0].data.command_id);
+    act(() => {
+      useTeleopStore.getState().handleResult({ command_id: startId, outcome: "canceled" });
+      useTeleopStore.getState().handleResult({ command_id: stopId, outcome: "succeeded" });
+    });
+    fireEvent.keyUp(panels[1], { key: " " });
+    expect(useTeleopStore.getState().phase).toBe("idle");
+    key(" ", false, panels[1]); tick();
+    expect(requests("teleop_start")).toHaveLength(1);
+    view.unmount();
+  });
+  it.each([{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true }])("ignores keyboard shortcuts and composition: %j", modifiers => {
+    render(<ManualDrive />); arm();
+    fireEvent.keyDown(panel(), { key: "w", ...modifiers });
+    fireEvent.keyDown(panel(), { key: " ", ...modifiers }); tick();
+    expect(requests("teleop_start")).toHaveLength(0);
+  });
+  it("does not let a pointer replace a held keyboard deadman", () => {
+    render(<ManualDrive />); keyboardStart(); ack(); tick();
+    fireEvent.pointerDown(screen.getByRole("group"), { button: 0, clientX: 0, clientY: 0 });
+    fireEvent.keyUp(window, { key: " " });
+    expect(velocity().at(-1)?.deadman).toBe(false);
+    expect(requests("teleop_stop")).toHaveLength(1);
+  });
   it("opening the page never arms, enables motors or sends a command", () => {
     render(<ManualDrive />); tick();
     expect(frames).toEqual([]);
@@ -162,9 +220,10 @@ describe("manual drive isolated software input", () => {
     act(() => useTeleopStore.getState().handleResult({ command_id: String(requests("teleop_start")[0].data.command_id), outcome: "canceled" }));
     expect(useTeleopStore.getState().phase).toBe("idle");
   });
-  it.each(["blur", "visibility", "unmount", "pointercancel", "lostcapture"])("ends input on %s", event => {
+  it.each(["blur", "pagehide", "visibility", "unmount", "pointercancel", "lostcapture"])("ends input on %s", event => {
     const view = render(<ManualDrive />); keyboardStart(); ack(); tick();
     if (event === "blur") fireEvent.blur(window);
+    if (event === "pagehide") fireEvent(window, new Event("pagehide"));
     if (event === "visibility") { vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden"); fireEvent(document, new Event("visibilitychange")); }
     if (event === "unmount") view.unmount();
     if (event === "pointercancel") fireEvent.pointerCancel(screen.getByRole("group"));
