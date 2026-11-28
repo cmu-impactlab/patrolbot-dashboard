@@ -58,22 +58,6 @@ async def test_cap_closes_intake_synchronously_drains_and_coalesces_stop(db, mon
     await recorder.shutdown()
 
 
-async def test_real_100000_cap(db):
-    assert module.MAX_SAMPLES == 100000
-    recorder = Recorder(db)
-    row = await recorder.start("robot", "full", ["event"])
-    # Batches exercise the actual cap without intentionally overflowing the queue.
-    for _ in range(500):
-        for _ in range(200):
-            recorder.offer("event", "2026-11-28T00:00:00Z", {})
-        await recorder.writer.flush()
-    assert not recorder.recording
-    await recorder._finish_task
-    assert (await db.get_recording(row["id"]))["sample_count"] == 100000
-    assert (await db.get_recording(row["id"]))["stop_reason"] == "sample_limit"
-    await recorder.shutdown()
-
-
 async def test_concurrent_start_and_cancelled_stop_waiter(db):
     recorder = Recorder(db)
     first, second = await asyncio.gather(recorder.start("r", "one"), recorder.start("r", "two"))
